@@ -69,6 +69,8 @@ const Native kNatives[] = {
     {"StormHash", storm_hash},           {"StatGet", stat_get_native},
     {"LightAdd", light_add_native},      {"LightStamp", light_stamp},
     {"LightStampOccluded", light_stamp_occluded},
+    {"RoomFind", room_find_native},      {"CollisionCross", collision_cross_native},
+    {"UnitWalk", unit_walk},             {"PathSearch", path_search},
 };
 
 struct Span {

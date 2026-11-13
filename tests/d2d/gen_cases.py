@@ -13,8 +13,8 @@ built, and the game's globals it set), the registers and stack arguments,
 then the game's EAX and every byte the game wrote, its stack aside. The
 records sit in a window just above Game.exe's image (CASE_LO), so the
 runner (native_cases.cpp) can hold the same addresses in a small arena.
-A case whose game run writes anywhere else, or faults, is left out and
-counted.
+A case whose game run writes anywhere else, faults, or takes the game's
+fatal-error path (an assertion) is left out and counted.
 
 The files (<out dir>/<Name>.cases) are made from the user's Game.exe: they
 stay in build/, never in the repository.
@@ -103,7 +103,9 @@ class Gen:
         try:
             eax = e.call(addr, *args, ecx=regs.get("ecx", 0), edx=regs.get("edx", 0),
                          regs={k: v for k, v in regs.items() if k not in ("ecx", "edx")})
-        except Exception:
+        except KeyboardInterrupt:
+            raise
+        except BaseException:   # a fault, or the game's fatal-error path (emu.py exits on its imports)
             self.recording = False
             self.reset()
             return None
@@ -321,6 +323,139 @@ def light_stamp_occluded(g, rng, count):
         yield g.run(0x00475420, (), edi=light)
 
 
+# ---- rooms and collision ----------------------------------------------------------
+# A room (d2_native.cpp, room_has): its neighbour list at +0 and their count
+# at +0x24, its collision at +0x20 (+0 x, +4 y, +8 width, +0xc height, +0x20
+# a word per subtile), its bounds in subtiles at +0x4c, +0x50, +0x54, +0x58.
+
+MASKS = (0x1, 0x4, 0x804, 0x1805, 0x3c01, 0x1c09, 0x3f11, 0xffff)
+
+
+def world(g, rng):
+    """Rooms side by side (a grid of columns and rows of random sizes), each
+    with a collision grid of random walls, and neighbour lists of the rooms
+    around it (sometimes itself, sometimes one left out). Some rooms have no
+    collision, or a collision without its grid. Returns the rooms with their
+    bounds, and the world's extent."""
+    cols, rows = rng.randint(1, 3), rng.randint(1, 3)
+    sizes = (5, 16, 40, 40, 80, 80) if rng.random() < 0.3 else (40, 80, 80)   # mostly as large as the game's
+    widths = [rng.choice(sizes) for _ in range(cols)]
+    heights = [rng.choice(sizes) for _ in range(rows)]
+    ox, oy = rng.randint(200, 4000), rng.randint(200, 4000)
+    density = rng.choice((0.0, 0.05, 0.2, 0.45))
+    rooms = {}
+    y = oy
+    for r in range(rows):
+        x = ox
+        for c in range(cols):
+            w, h = widths[c], heights[r]
+            room = g.block(0x80)
+            g.w32(room + 0x4c, x); g.w32(room + 0x50, y); g.w32(room + 0x54, w); g.w32(room + 0x58, h)
+            kind = rng.random()
+            if kind > 0.05:
+                col = g.block(0x40)
+                g.w32(room + 0x20, col)
+                g.w32(col, x); g.w32(col + 4, y); g.w32(col + 8, w); g.w32(col + 0xc, h)
+                if kind > 0.08:
+                    words = g.alloc(2 * w * h, 4)
+                    g.put(words, b"".join(struct.pack("<H", rng.choice(MASKS) if rng.random() < density else
+                                                      rng.choice((0, 0, 0, 0x100, 0x8000))) for _ in range(w * h)))
+                    g.w32(col + 0x20, words)
+            rooms[(c, r)] = (room, x, y, w, h)
+            x += w
+        y += h
+    for (c, r), (room, *_ ) in rooms.items():
+        near = [rooms[(c + dc, r + dr)][0] for dc in (-1, 0, 1) for dr in (-1, 0, 1)
+                if (dc or dr) and (c + dc, r + dr) in rooms]
+        if rng.random() < 0.3:
+            near.append(room)
+        if near and rng.random() < 0.15:
+            near.pop(rng.randrange(len(near)))
+        rng.shuffle(near)
+        lst = g.block(4 * max(len(near), 1))
+        for k, n in enumerate(near):
+            g.w32(lst + 4 * k, n)
+        g.w32(room, lst)
+        g.w32(room + 0x24, len(near))
+    return list(rooms.values()), (ox, oy, ox + sum(widths), oy + sum(heights))
+
+
+def room_find(g, rng, count):
+    """463740(ecx=room, edx=x, [8]=y): points in the room, in a neighbour,
+    on the edges, outside every room; a null room."""
+    for i in range(count):
+        g.begin()
+        rooms, (x0, y0, x1, y1) = world(g, rng)
+        room = rng.choice(rooms)[0] if i % 17 else 0
+        x, y = rng.randint(x0 - 6, x1 + 5), rng.randint(y0 - 6, y1 + 5)
+        yield g.run(0x00463740, (y,), ecx=room, edx=x)
+
+
+def collision_cross(g, rng, count):
+    """64d4e0([8]=room, [c]=x, [10]=y; esi=mask): the subtile and its four
+    neighbours, inside a room and on its edges (where the next room's
+    collision is asked: the native hands those to the game's code)."""
+    for _ in range(count):
+        g.begin()
+        rooms, (x0, y0, x1, y1) = world(g, rng)
+        room, rx, ry, w, h = rng.choice(rooms)
+        if rng.random() < 0.7:
+            x, y = rng.randint(rx, rx + w - 1), rng.randint(ry, ry + h - 1)
+        else:
+            x, y = rng.randint(x0 - 3, x1 + 2), rng.randint(y0 - 3, y1 + 2)
+        yield g.run(0x0064d4e0, (room, x, y), esi=rng.choice(MASKS))
+
+
+def walker(g, rng, rooms, extent, search):
+    """A path (UnitWalk) or a search record (PathSearch): +0 the target or
+    start, +4 where the unit is or the goal, +8 the room, +0x28 the size
+    class (1, 3, 5: the cross test; others the game's), +0x2c the mask,
+    +0x30 the unit."""
+    x0, y0, x1, y1 = extent
+    room, rx, ry, w, h = rng.choice(rooms)
+    m = min(12, w // 3, h // 3) if rng.random() < 0.8 else 0   # mostly away from the room's edges
+    ax, ay = rng.randint(rx + m, rx + w - 1 - m), rng.randint(ry + m, ry + h - 1 - m)
+    spread = rng.choice((1, 3, 8, 20, 40))
+    bx = max(x0 - 2, min(x1 + 1, ax + rng.randint(-spread, spread)))
+    by = max(y0 - 2, min(y1 + 1, ay + rng.randint(-spread, spread)))
+    rec = g.block(0x40)
+    unit = g.block(0x100 + 4 * 78)
+    if search:   # start where the unit is, the goal away
+        g.w16(rec, ax); g.w16(rec + 2, ay); g.w16(rec + 4, bx); g.w16(rec + 6, by)
+        g.w32(unit + 0x58, rng.random() < 0.3)
+    else:        # the target away, the unit where it is
+        g.w16(rec, bx); g.w16(rec + 2, by); g.w16(rec + 4, ax); g.w16(rec + 6, ay)
+        inner = g.block(0x10)
+        g.w32(inner, rng.choice((0, 0, 1, 2)))   # 0: a player's, which settles (648050)
+        g.w32(unit + 0x30, inner)
+        if rng.random() < 0.03:
+            g.w32(unit + 0x34, 0x40000)
+    g.w32(rec + 8, room)
+    g.w32(rec + 0x28, rng.choice((1, 1, 1, 1, 1, 3, 5, 0, 2)))   # 1, 3, 5: the cross test; others the game's
+    g.w32(rec + 0x2c, rng.choice(MASKS))
+    g.w32(rec + 0x30, unit)
+    return rec
+
+
+def unit_walk(g, rng, count):
+    """648120(eax=path): one step toward the target through the rooms'
+    collision, a player's push-on (648050), targets reached, blocked, off the
+    rooms."""
+    for _ in range(count):
+        g.begin()
+        rooms, extent = world(g, rng)
+        yield g.run(0x00648120, (), eax=walker(g, rng, rooms, extent, False))
+
+
+def path_search(g, rng, count):
+    """67b850(ecx=search): the A* toward the goal, near and far (a full pool
+    of 200 nodes ends it), walls from none to many, the goal check (+0x58)."""
+    for _ in range(count):
+        g.begin()
+        rooms, extent = world(g, rng)
+        yield g.run(0x0067b850, (), ecx=walker(g, rng, rooms, extent, True))
+
+
 # name: (generator, flags). EAX is dead after the light stamps (their one
 # caller overwrites it), so it is not compared there.
 NATIVES = {
@@ -329,6 +464,10 @@ NATIVES = {
     "LightAdd": (light_add, 0),
     "LightStamp": (light_stamp, 0),
     "LightStampOccluded": (light_stamp_occluded, 0),
+    "RoomFind": (room_find, COMPARE_EAX),
+    "CollisionCross": (collision_cross, COMPARE_EAX),
+    "UnitWalk": (unit_walk, COMPARE_EAX),
+    "PathSearch": (path_search, COMPARE_EAX),
 }
 
 
@@ -353,7 +492,7 @@ def main():
             else:
                 cases.append(case)
         write_cases(os.path.join(args.out, f"{name}.cases"), name, flags, cases)
-        print(f"{name}: {len(cases)} cases" + (f", {dropped} left out (the game faulted or wrote outside)" if dropped else ""))
+        print(f"{name}: {len(cases)} cases" + (f", {dropped} left out (the game asserted, faulted or wrote outside)" if dropped else ""))
     return 0
 
 
