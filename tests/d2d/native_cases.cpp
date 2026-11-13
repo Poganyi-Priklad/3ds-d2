@@ -71,6 +71,8 @@ const Native kNatives[] = {
     {"LightStampOccluded", light_stamp_occluded},
     {"RoomFind", room_find_native},      {"CollisionCross", collision_cross_native},
     {"UnitWalk", unit_walk},             {"PathSearch", path_search},
+    {"AdpcmDecode", adpcm_decode},       {"HuffmanDecode", huffman_decode},
+    {"PkExplode", pk_decode},
 };
 
 struct Span {
@@ -290,6 +292,7 @@ int main(int argc, char **argv)
         std::fprintf(stderr, "native_cases: %s is not a Game.exe this test can load\n", argv[1]);
         return 2;
     }
+    game::load_native_tables();   // as install_d2_native does, without its hooks
     static game::TestCpu cpu;
     static d2rt::Bridge bridge(&cpu);
     rt::set_bridge_for_tests(&bridge);

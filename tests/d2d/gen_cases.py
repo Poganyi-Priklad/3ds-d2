@@ -10,7 +10,8 @@ at the edges: off the grid, empty lists, the largest radii, keys at both ends.
 
 A case is the memory the generator wrote before the call (the records it
 built, and the game's globals it set), the registers and stack arguments,
-then the game's EAX and every byte the game wrote, its stack aside. The
+then the game's EAX and every byte the game wrote, its stack and its
+allocator's heap (work buffers) aside. The
 records sit in a window just above Game.exe's image (CASE_LO), so the
 runner (native_cases.cpp) can hold the same addresses in a small arena.
 A case whose game run writes anywhere else, faults, or takes the game's
@@ -27,6 +28,7 @@ va, length, bytes each), the game's EAX, the game's writes (the same form).
 import argparse
 import os
 import random
+import re
 import struct
 import sys
 
@@ -64,6 +66,16 @@ class Gen:
         data = open(exe, "rb").read(0x1000)
         pe = struct.unpack_from("<I", data, 0x3c)[0]
         return struct.unpack_from("<I", data, pe + 24 + 56)[0]
+
+    def storm_heap(self):
+        """Storm's SMemAlloc (413020) and SMemFree (412650), both (n or
+        ptr, file, line, flags) stdcall, served by emu.py's heap: their
+        bookkeeping in .bss (the last call's source file, at 0x7768a8) is
+        the allocator's, not the decoder's, and stays out of the case."""
+        if not getattr(self, "_storm_heap", False):
+            self.e.hook(0x00413020, lambda e: e.alloc(e.arg(0)), 4)
+            self.e.hook(0x00412650, lambda e: 1, 4)
+            self._storm_heap = True
 
     def _on_write(self, mu, access, addr, size, value, _):
         if self.recording:
@@ -105,16 +117,25 @@ class Gen:
                          regs={k: v for k, v in regs.items() if k not in ("ecx", "edx")})
         except KeyboardInterrupt:
             raise
-        except BaseException:   # a fault, or the game's fatal-error path (emu.py exits on its imports)
+        except BaseException as error:   # a fault, or the game's fatal-error path (emu.py exits on its imports)
             self.recording = False
             self.reset()
+            if os.environ.get("GEN_CASES_DEBUG"):
+                print(f"  left out: {type(error).__name__}: {error}", file=sys.stderr)
             return None
         self.recording = False
-        stack = (emu.STACK, emu.STACK + emu.STACK_SIZE)
-        game = merge([(a, n) for a, n in self.game if not stack[0] <= a < stack[1]])
-        if any(not (self.image_lo <= a and a + n <= self.image_hi or CASE_LO <= a and a + n <= CASE_LO + CASE_SIZE)
-               for a, n in game):
+        # The game's stack, its thread block (fs:[0], an exception frame's
+        # link) and its allocator's heap (emu.py serves Storm's and the CRT's
+        # allocations there): scratch, never compared.
+        scratch = ((emu.STACK, emu.STACK + emu.STACK_SIZE), (emu.TEB, emu.TEB + 0x10000),
+                   (emu.HEAP, emu.HEAP + emu.HEAP_SIZE))
+        game = merge([(a, n) for a, n in self.game if not any(lo <= a < hi for lo, hi in scratch)])
+        outside = [(a, n) for a, n in game if not (self.image_lo <= a and a + n <= self.image_hi or
+                                                    CASE_LO <= a and a + n <= CASE_LO + CASE_SIZE)]
+        if outside:
             self.reset()
+            if os.environ.get("GEN_CASES_DEBUG"):
+                print(f"  left out: the game wrote {', '.join(f'{a:08x}+{n}' for a, n in outside[:4])}", file=sys.stderr)
             return None
         case = dict(regs={r: regs.get(r, 0) for r in REGS}, args=list(args),
                     before=before,
@@ -456,6 +477,145 @@ def path_search(g, rng, count):
         yield g.run(0x0067b850, (), ecx=walker(g, rng, rooms, extent, True))
 
 
+# ---- the sound and archive decoders ------------------------------------------------
+# Their game versions take work buffers from Storm's allocator, which emu.py
+# serves from its own heap (emu.HEAP): those writes are the game's scratch,
+# not compared (Gen.run).
+
+def adpcm(g, rng, count):
+    """41dce0(ecx=dst, eax=src bytes, [8]=dst bytes, [c]=src, [10]=channels):
+    the shift at +1, a first sample per channel, then deltas and codes
+    (bit 7: 0 repeat, 1 and 2 step moves); output room from none to more
+    than enough, mono and stereo."""
+    for _ in range(count):
+        g.begin()
+        channels = rng.choice((1, 2))
+        n = rng.choice((0, 1, 2, 3, rng.randint(4, 64), rng.randint(64, 3000)))
+        head = bytes((rng.getrandbits(8), rng.choice((rng.randint(0, 15), rng.getrandbits(8))))) + \
+            bytes(rng.getrandbits(8) for _ in range(2 * channels))
+        body = bytes(rng.choice((rng.getrandbits(7), 0x80, 0x81, 0x82, rng.getrandbits(8))) for _ in range(n))
+        data = (head + body)[:rng.choice((len(head) + len(body), rng.randint(0, len(head) + len(body))))]
+        src = g.alloc(len(data) + 16)
+        g.put(src, data)
+        room = rng.choice((0, 1, 2, 3, 2 * len(data), 4 * len(data) + 8, rng.randint(0, 8 * len(data) + 16)))
+        dst = g.block(room + 16)
+        yield g.run(0x0041dce0, (room, src, channels), ecx=dst, eax=len(data))
+
+
+def huffman(g, rng, count):
+    """41f9e0(ecx=dst, edx=&dst bytes, [8]=src): Storm's adaptive Huffman,
+    the stream's first byte choosing the weight table; random bits after it
+    (decoded until the end code or a full buffer), output room from none."""
+    g.storm_heap()
+    for _ in range(count):
+        g.begin()
+        n = rng.choice((4, 8, rng.randint(8, 256), rng.randint(256, 4096)))
+        data = bytes((rng.choice((0, 1, 2, 3, 4, 5, 6, 7, 8, rng.randint(0, 8))),)) + bytes(rng.getrandbits(8) for _ in range(n))
+        src = g.alloc(len(data) + 64)
+        g.put(src, data + b"\0" * 64)
+        room = rng.choice((0, 1, 16, rng.randint(1, 4096), 8192))
+        dst = g.block(room + 16)
+        size = g.block(4)
+        g.w32(size, room)
+        yield g.run(0x0041f9e0, (src,), ecx=dst, edx=size)
+
+
+_PK = None
+
+
+def pk_tables():
+    """The DCL code tables, read from our own decoder (src/game/pklib_explode.cpp),
+    so the streams are encoded with the codes it decodes."""
+    global _PK
+    if _PK is None:
+        text = open(os.path.join(ROOT, "src", "game", "pklib_explode.cpp")).read()
+        _PK = {}
+        for name in ("kDistBits", "kDistCode", "kExLenBits", "kLenBase", "kLenBits", "kLenCode", "kChBitsAsc",
+                     "kChCodeAsc"):
+            m = re.search(name + r"\[[^\]]*\]\s*=\s*\{(.*?)\};", text, re.S)
+            _PK[name] = [int(v, 0) for v in m.group(1).replace("\n", " ").split(",") if v.strip()]
+    return _PK
+
+
+def pk_stream(rng, ctype, dsize_bits, n_out, end):
+    """A PKWARE DCL stream (Storm's "implode"): literals and repetitions whose
+    distances stay within what is already out, as any real one; LSB first
+    after the two header bytes. end: the end code (0x305) after the data."""
+    t = pk_tables()
+    bits, nbits, out = 0, 0, bytearray()
+
+    def put(v, n):
+        nonlocal bits, nbits
+        bits |= (v & ((1 << n) - 1)) << nbits
+        nbits += n
+        while nbits >= 8:
+            out.append(bits & 0xff)
+            bits >>= 8
+            nbits -= 8
+
+    def length_code(rest):   # rest = repetition length - 2, or 0x205 for the end
+        for i in range(16):
+            if t["kLenBase"][i] <= rest < t["kLenBase"][i] + (1 << t["kExLenBits"][i]):
+                put(1, 1)
+                put(t["kLenCode"][i], t["kLenBits"][i])
+                put(rest - t["kLenBase"][i], t["kExLenBits"][i])
+                return
+        raise ValueError(rest)
+
+    done = 0
+    while done < n_out:
+        if done >= 2 and rng.random() < 0.45:
+            length = rng.choice((2, 2, 3, rng.randint(3, 16), rng.randint(16, 0x206)))
+            low_bits = 2 if length == 2 else dsize_bits
+            distance = rng.randint(1, min(done, 64 << low_bits))
+            length_code(length - 2)
+            code, low = (distance - 1) >> low_bits, (distance - 1) & ((1 << low_bits) - 1)
+            put(t["kDistCode"][code], t["kDistBits"][code])
+            put(low, low_bits)
+            done += length
+        else:
+            byte = rng.getrandbits(8)
+            put(0, 1)
+            if ctype == 0:
+                put(byte, 8)
+            else:
+                put(t["kChCodeAsc"][byte], t["kChBitsAsc"][byte])
+            done += 1
+    if end:
+        length_code(0x205)
+    if nbits:
+        out.append(bits & 0xff)
+    return bytes((ctype, dsize_bits)) + bytes(out)
+
+
+def pk_explode(g, rng, count):
+    """41e000(ecx=dst, edx=&dst bytes, [8]=src, [c]=src bytes): PKWARE's
+    explode on streams our encoder makes (binary and ASCII literals, short and
+    long repetitions, dictionaries of 4, 5 and 6 bits), with and without the
+    end code, cut short, with bad headers; outputs from none to more than
+    enough. Random bits are no case: their repetitions reach before the
+    output's start, into the work buffer's old contents, which differ by
+    design (Storm's buffer is new each call, ours is kept)."""
+    g.storm_heap()
+    for _ in range(count):
+        g.begin()
+        ctype, dsize_bits = rng.choice((0, 0, 1)), rng.choice((4, 5, 6))
+        n = rng.choice((0, 1, 5, rng.randint(5, 200), rng.randint(200, 6000)))
+        data = pk_stream(rng, ctype, dsize_bits, n, rng.random() < 0.7)
+        kind = rng.random()
+        if kind < 0.15:
+            data = data[:rng.randint(0, len(data))]              # cut short
+        elif kind < 0.22:
+            data = bytes((rng.choice((2, 0xff, ctype)), rng.choice((3, 7, 0, dsize_bits)))) + data[2:]   # a bad header
+        src = g.alloc(len(data) + 64)
+        g.put(src, data)
+        room = rng.choice((0, 1, 16, n, n, max(0, n - 1), rng.randint(1, 4096), 0x4000))
+        dst = g.block(room + 16)
+        size = g.block(4)
+        g.w32(size, room)
+        yield g.run(0x0041e000, (src, len(data)), ecx=dst, edx=size)
+
+
 # name: (generator, flags). EAX is dead after the light stamps (their one
 # caller overwrites it), so it is not compared there.
 NATIVES = {
@@ -468,6 +628,12 @@ NATIVES = {
     "CollisionCross": (collision_cross, COMPARE_EAX),
     "UnitWalk": (unit_walk, COMPARE_EAX),
     "PathSearch": (path_search, COMPARE_EAX),
+    "AdpcmDecode": (adpcm, COMPARE_EAX),
+    # Both reached only through Storm's decompressor table (0x6cfed8,
+    # 0x6cfee8), whose two callers overwrite EAX at once (0x41e69d,
+    # 0x41e885): it is SMemFree's leftover in the game, not a result.
+    "HuffmanDecode": (huffman, 0),
+    "PkExplode": (pk_explode, 0),
 }
 
 

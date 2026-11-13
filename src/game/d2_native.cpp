@@ -4328,6 +4328,24 @@ bool install_ftol(Cpu &c, bool check)
     return true;
 }
 
+// The game's tables the natives keep a copy of: the iso floor's rows, the
+// ADPCM steps and index moves, the DCC bit masks. Read once g_base is set
+// (install_d2_native; tests/d2d's case runner too).
+void load_native_tables()
+{
+    for (int r = 0; r < 15; r++) {
+        g_xoff[r] = I32(kIsoXoff + 4 * r);
+        g_width[r] = I32(kIsoWidth + 4 * r);
+        g_soff[r] = I32(kIsoSoff + 4 * r);
+    }
+    for (int i = 0; i < 89; i++)
+        g_adpcm_step[i] = U32(kAdpcmSteps + 4 * i);
+    for (int i = 0; i < 32; i++)
+        g_adpcm_adj[i] = I32(kAdpcmIndexAdj + 4 * i);
+    for (int i = 0; i <= 32; i++)
+        g_dcc_mask[i] = U32(kDccMasks + 4 * i);
+}
+
 }  // namespace
 
 int install_d2_native(Cpu &c)
@@ -4337,11 +4355,7 @@ int install_d2_native(Cpu &c)
     if (!p)
         return 0;
     g_base = p - 0x00400000;
-    for (int r = 0; r < 15; r++) {
-        g_xoff[r] = I32(kIsoXoff + 4 * r);
-        g_width[r] = I32(kIsoWidth + 4 * r);
-        g_soff[r] = I32(kIsoSoff + 4 * r);
-    }
+    load_native_tables();
     // First bytes of each original (push ebp; mov ebp,esp; ...): only this
     // build of Game.exe gets hooked.
     static const uint8_t k4f69b0[] = {0x55, 0x8b, 0xec, 0x51, 0x53, 0x56, 0x8b, 0x75, 0x08};
@@ -4401,10 +4415,6 @@ int install_d2_native(Cpu &c)
     HOOK(c, 0x004ddef0, k4ddef0, sizeof k4ddef0, 3, light_block, "LightBlock");
     static const uint8_t k4f8b80[] = {0x55, 0x8b, 0xec, 0x83, 0xec, 0x48, 0x53, 0x8b, 0x1d};
     HOOK(c, 0x004f8b80, k4f8b80, sizeof k4f8b80, 2, draw_census_wrap("FloorTile", floor_tile), "FloorTile");
-    for (int i = 0; i < 89; i++)
-        g_adpcm_step[i] = U32(kAdpcmSteps + 4 * i);
-    for (int i = 0; i < 32; i++)
-        g_adpcm_adj[i] = I32(kAdpcmIndexAdj + 4 * i);
     static const uint8_t k41dce0[] = {0x55, 0x8b, 0xec, 0x83, 0xec, 0x1c, 0x53, 0x56, 0x8b, 0x75, 0x0c};
     HOOK(c, 0x0041dce0, k41dce0, sizeof k41dce0, 3, adpcm_decode, "AdpcmDecode", true);
     static const uint8_t k41f9e0[] = {0x55, 0x8b, 0xec, 0xb8, 0x80, 0x3a, 0x00, 0x00, 0xe8};
@@ -4413,8 +4423,6 @@ int install_d2_native(Cpu &c)
     HOOK(c, 0x0041e000, k41e000, sizeof k41e000, 3, pk_decode, "PkExplode", true);
     static const uint8_t k524c60[] = {0x55, 0x8b, 0xec, 0x83, 0xec, 0x08, 0x0f, 0xb7, 0x47, 0x02};
     HOOK(c, 0x00524c60, k524c60, sizeof k524c60, 3, lang_lookup, "LangLookup", true);
-    for (int i = 0; i <= 32; i++)
-        g_dcc_mask[i] = U32(kDccMasks + 4 * i);
     // DccCell: a translation-time intrinsic, not a hook. ecx, edx and esi
     // are its register arguments (stored for it), ret 8; it changes no guest
     // register the caller reads. Its only entry is the call at 0x60cbbe, and
