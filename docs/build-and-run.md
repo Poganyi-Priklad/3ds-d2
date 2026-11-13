@@ -54,6 +54,16 @@ d2decomped (`third_party/d2d`, GPL-3.0-or-later, #105) is used the same way, for
 - The `hosttest` image has its emulator harness's Python modules (`tools/emu`: Unicorn, Capstone, pefile), at the versions in its `uv.lock`. It has none of d2d's desktop dependencies.
 - The submodule is fetched with its history: about 27 MB of git objects and 30 MB of files, about 10 s to fetch when measured (2026-11-13). A shallow fetch is no smaller, because the pin is not upstream's newest commit: `clone --recursive` then fetched 58 MB. A new pin is a deliberate change, made with that history (`git log <old>..<new>`); it also updates `third_party/deps.lock` and THIRD_PARTY_NOTICES.md.
 
+### Cases for the natives from Game.exe
+
+`scripts/docker.sh test d2d <game-dir>` also checks our natives against the user's own Game.exe (#109):
+- `tests/d2d/gen_cases.py` runs each native's game function under Unicorn, through d2d's `tools/emu/emu.py` imported from `build/d2d/d2d` (never copied). Its inputs aim at the edges: off the grid, empty lists, the largest radii, values at a table's limits.
+- A case is the memory the generator wrote before the call, the registers and stack arguments, then the game's EAX and every byte it wrote. The records sit in a window above the image (`0x01000000`), so the runner can hold the same addresses.
+- `tests/d2d/native_cases.cpp` includes `d2_native.cpp` and runs each native on the same memory through a test `Cpu`. It compares EAX (where the caller reads it) and every byte of Game.exe's writable sections and the case's window. A native that hands the call back to the game's code is counted, not compared.
+- The cases are written to `build/d2d-cases/`. They are made from the user's Game.exe, so they never go in the repository.
+- `CASES=<n>` sets the cases per native (default 400), `ONLY=<Name,...>` picks natives: `CASES=50 ONLY=StatGet scripts/docker.sh test d2d dist/game`.
+- **Adding a native:** a generator function in `gen_cases.py` (its inputs, in the form of the others) and its entry in `NATIVES`, then the native's function in `native_cases.cpp`'s `kNatives`. Check that the cases can fail: break the native on purpose and see them differ.
+
 ## Run in Azahar
 
 ```sh

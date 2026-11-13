@@ -368,6 +368,9 @@ RunResult run_exe(std::vector<uint8_t> exe, const RunOptions &opt);
 const RunOptions &options();
 const Layout &layout();
 d2rt::Bridge &bridge();
+// Tests only (tests/d2d, issue #109): the bridge a native's hand-back to the
+// game's code goes through, where no runtime was started.
+void set_bridge_for_tests(d2rt::Bridge *b);
 uint32_t exe_base();
 // TEB of the guest thread currently running (the main TEB before the scheduler starts).
 uint32_t current_teb();

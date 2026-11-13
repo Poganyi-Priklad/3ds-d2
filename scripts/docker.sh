@@ -122,6 +122,7 @@ test)
         if [ -n "${2:-}" ]; then
             [ -f "$2/Game.exe" ] || die "test d2d [<game-dir with Game.exe>]"
             RUN_EXTRA=(-v "$(host_path "$(cd "$2" && pwd)"):/game:ro")
+            for v in CASES ONLY; do [ -n "${!v:-}" ] && RUN_EXTRA+=(-e "$v=${!v}"); done
             run_in "$HOSTTEST_IMAGE" make -C tests/d2d run cases
         else
             run_in "$HOSTTEST_IMAGE" make -C tests/d2d run

@@ -659,6 +659,7 @@ MemoryReport memory_report()
             (uint32_t)d2rt_box86_custommalloc_kb(), (uint32_t)d2rt_box86_jmptbl_kb()};
 }
 Bridge &bridge() { return *g_br; }
+void set_bridge_for_tests(Bridge *b) { g_br = b; }
 uint32_t exe_base() { return g_exe_base; }
 
 uint32_t current_teb()
