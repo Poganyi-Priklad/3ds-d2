@@ -5,7 +5,8 @@
 # directory is mounted read-only at /game and never copied.
 ROOT  := ../..
 W     := $(ROOT)/build/cpu/armv6/winx86
-OUT   := $(ROOT)/build/m4
+# M4_OUT=<dir> (scripts/docker.sh): another output directory, so that lanes can run side by side.
+OUT   ?= $(ROOT)/build/m4
 CXX   := arm-linux-gnueabi-g++
 ARCH  := -marm -march=armv6k -mtune=mpcore -mfpu=vfp -mfloat-abi=softfp
 INC   := -I$(ROOT)/src -I$(W)/src -I$(W)/src/dynarec86 -I$(W)/src/dynarec86/shim \

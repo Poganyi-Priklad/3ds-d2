@@ -1891,7 +1891,7 @@ def main():
     ap.add_argument("exe")
     ap.add_argument("--out", default="build/aot/spike")
     ap.add_argument("--root", action="append", default=[], help="va[:name], a compiled entry Box86 calls")
-    ap.add_argument("--compile", default="", help="more functions to compile, va,va,...")
+    ap.add_argument("--compile", action="append", default=[], help="more functions to compile, va,va,...")
     ap.add_argument("--tree", action="append", default=[],
                     help="va:depth: also compile what va calls, directly, to that depth")
     ap.add_argument("--functions", default="third_party/d2d/docs/research/re/game-functions.tsv")
@@ -1915,7 +1915,7 @@ def main():
         v, n = parse_vas(r)
         roots += v
         names.update(n)
-    extra, _ = parse_vas(a.compile)
+    extra, _ = parse_vas(",".join(a.compile))
     for t in a.tree:
         va, _, d = t.partition(":")
         prog = Program(img, starts, NATIVES, INTRINSICS)

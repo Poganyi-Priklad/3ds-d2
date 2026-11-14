@@ -79,7 +79,11 @@ build_id() { run_in "$TOOLCHAIN_IMAGE" sh scripts/build-id.sh; }
 # and in their own build. aot_prepare <game-dir> sets AOT_MAKE.
 AOT_MAKE=()
 aot_prepare() {
-    [ "${D2_AOT_BUILD:-}" = 1 ] || return 0
+    case "${D2_AOT_BUILD:-}" in
+    keep) AOT_MAKE=(AOT=/work/build/aot/spike); return 0 ;;   # what the last D2_AOT_BUILD=1 wrote (lanes side by side)
+    1) ;;
+    *) return 0 ;;
+    esac
     local game; game="$(cd "$1" && pwd)"
     local saved=(${RUN_EXTRA[@]+"${RUN_EXTRA[@]}"})
     RUN_EXTRA=(-v "$(host_path "$game/Game.exe"):/aot/Game.exe:ro")
@@ -154,6 +158,7 @@ test)
         [ -n "${2:-}" ] && [ -f "$2/Game.exe" ] || die "test m4 <game-dir with Game.exe> [guest-ms] [command line]"
         aot_prepare "$2"
         make_args=(-C tests/m4 run MS="${3:-20000}" ${AOT_MAKE[@]+"${AOT_MAKE[@]}"})
+        [ -n "${M4_OUT:-}" ] && make_args+=(OUT="/work/$M4_OUT")   # e.g. build/m4-b: a lane of its own
         [ -n "${4:-}" ] && make_args+=(CMD="$4")
         RUN_EXTRA=(-v "$(host_path "$(cd "$2" && pwd)"):/game:ro")
         for v in M4_LAYOUT M4_VIRTUAL_CLOCK M4_SCRIPT M4_BOTTOM RT_MSGLOG M4_PHYS_MB M4_FAST M4_QEMU_FLAGS WX86_SON WX86_SONDUMP WX86_SONMAXS WX86_HOTPROF D2_NOLINK M4_FRAMEHASH M4_NATIVE D2_NATIVE_MASK M4_DUMPFRAME M4_VIDEO M4_VIDEO_WAV M4_PROF RT_FILETRACE M4_HASHMEM WX86_FAKETSC M4_ASYNCIO M4_SPRITE_MB M4_POOL_RESERVE_MB M4_POOL_SPARE_KB M4_SPRITE_TRACE M4_STORM_PRIO M4_STORM_DIRECT D2_NATIVE_CHECK M4_SPRITE_FRAMES M4_META_CAP_KB D2_JITEVICT D2_JITFAILAFTER D2_JITCHUNK_KB M4_POOL_PIECES M4_POOL_BALLAST_MB M4_POOL_LARGE_KB M4_POOL_LARGE_MIN_KB M4_BG_QUANTUM M4_CALLRET M4_NOPEND M4_BUDGETTAIL M4_FORWARD M4_HOTPROF_LEVEL D2_DRAW_CENSUS D2_FLOOR_QUEUE D2_DCC D2_AOT D2_AOT_ONLY WX86_BLOCKLOG; do [ -n "${!v:-}" ] && RUN_EXTRA+=(-e "$v=${!v}"); done
@@ -226,7 +231,7 @@ package-cia)   # [<game-dir> | --slim|--full <game-dir>]: the game app (+ the us
     report_vars=(BUILD_ID="$bid" D2_VERSION="$version" ${AOT_MAKE[@]+"${AOT_MAKE[@]}"})
     [ -n "${D2_REPORT_DSN+x}" ] && report_vars+=(D2_REPORT_DSN="$D2_REPORT_DSN")
     run_in "$TOOLCHAIN_IMAGE" make -s -j8 -C tests/cpu/ctr "${report_vars[@]}" ../../../build/cpu/ctr/3ds-d2-game-cia.elf ../../../build/cpu/ctr/tls.bin
-    RUN_EXTRA=("${saved_extra[@]}" -e "D2_VERSION=$version")   # the CIA's name
+    RUN_EXTRA=("${saved_extra[@]}" -e "D2_VERSION=$version" -e "D2_BUILD_ID=$bid")   # the CIA's name
     if [ -n "$art" ]; then   # the icon, banner model and tune (packaging/cia/game_art.py)
         ensure_image banner "$BANNER_IMAGE"
         mkdir -p "$ROOT/build/cia/game-art"

@@ -10,13 +10,17 @@
 #include "runtime/guest_thread.h"
 #include "runtime/rt_host.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <map>
 
 #ifdef __3DS__
-#include <3ds/svc.h>
+extern "C" {
+#include <3ds/svc.h>   // svcGetSystemTick (a C header without its own extern "C")
+}
 #endif
 
 extern "C" {
@@ -79,6 +83,7 @@ uint32_t g_empty = 0;            // a ret, for the cost of a nested run
 uint32_t g_empty_n = 0;
 uint64_t g_empty_ticks = 0;
 uint32_t g_nested = 0;           // nested runs from compiled code (callees not compiled)
+std::map<uint32_t, uint32_t> g_nested_by;   // ... by callee, this window
 uint32_t g_bad = 0;
 
 struct NativeAt {
@@ -372,10 +377,17 @@ std::vector<std::string> aot_lines()
         R.checked = R.differ = 0;
     }
     if (g_nested) {
-        char line[96];
-        std::snprintf(line, sizeof line, "aot: %u nested runs of callees not compiled", g_nested);
+        char line[256];
+        int p = std::snprintf(line, sizeof line, "aot: %u nested runs of callees not compiled:", g_nested);
+        std::vector<std::pair<uint32_t, uint32_t>> by;
+        for (const auto &kv : g_nested_by)
+            by.push_back({kv.second, kv.first});
+        std::sort(by.rbegin(), by.rend());
+        for (size_t k = 0; k < by.size() && k < 6 && p < (int)sizeof line; k++)
+            p += std::snprintf(line + p, sizeof line - p, " %08x %u", by[k].second, by[k].first);
         out.push_back(line);
         g_nested = 0;
+        g_nested_by.clear();
     }
     g_empty_n = 0;
     g_empty_ticks = 0;
@@ -397,6 +409,7 @@ uint32_t aot_fs_base(void) { return rt::current_teb(); }
 void aot_guest_call(uint32_t va, AotRegs *r)
 {
     game::g_nested++;
+    game::g_nested_by[va]++;
     if (aot_guest_hook) {
         aot_guest_hook(va, r);
         return;

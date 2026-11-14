@@ -1,6 +1,6 @@
 # Ahead-of-time compilation: design note
 
-Status: draft for review (issue #112, part of #111). Nothing here is built yet. Figures marked *estimate* are worked out from the measurements named next to them, and the spike (#113) is there to replace them.
+Status: reviewed (issue #112, part of #111), and its spike built (#113, [below](#the-spike-113)). Figures marked *estimate* are worked out from the measurements named next to them; the spike's measurements replace some of them, and say so.
 
 ## The idea in one paragraph
 
@@ -65,7 +65,17 @@ The recompiler needs to know where functions start, where they end, and which by
 
 One x86 function becomes one C function. The C is plain and boring, so that gcc does the optimising.
 
-**Registers.** The eight x86 registers are C locals (`uint32_t eax, ...`). gcc keeps them in ARM registers across the function, which Box86 can't do across its blocks. They are written back to the CPU context only where something outside the function can see them: calls out, exits to the dispatcher, and the check mode.
+**Registers.** The eight x86 registers are C locals (`uint32_t eax, ...`). gcc keeps them in ARM registers across the function, which Box86 can't do across its blocks.
+
+**The register interface between compiled functions** (the review's first point, built in the spike). The game passes arguments in registers of its own choosing (`UnitRelation` takes a and b in `ecx` and `edx`, A*'s helpers take theirs in `eax`, `esi`, `edi`), so MSVC's conventions can't be assumed. Each compiled function gets a signature from a liveness pass across functions:
+- **in:** the registers it reads before writing them, given its callees' signatures;
+- **out:** the registers its compiled callers read after calling it; for a function Box86 calls, MSVC's rule (eax and the callee-saved registers it doesn't keep);
+- **preserved:** the registers equal to their entry values at every `ret`, from tracking pushes and pops through the frame.
+
+They become C arguments and results: `esp` and the ins as arguments, one out as the return value, two as a `uint64_t`, more through a pointer. `esp` after the call is the caller's own arithmetic (`+4 + ret N`), checked at run time at each `ret`. The two passes run to a joint fixed point from nothing up.
+- **Precision that mattered.** Liveness works on half registers: MSVC's `mov cx, [..]; movzx ecx, cx` reads no more of `ecx` than its low half, and counting the partial write as a read made `ecx` an output of most of A*'s functions. The prologue's saves of callee-saved registers aren't counted as reads (the slot is written only in the context build; see below), but only the entry block's leading run, each popped back into the same register: a `push esi` just before a call is an argument when `esi` still holds its entry value.
+- **What other code is assumed to do.** For code Box86 runs, the pass reads its summary where it can, and otherwise assumes MSVC's ABI: `ebx`, `ebp`, `esi` and `edi` survive any call (link-time code generation moves arguments, not those). An indirect call reads at most `ecx` and `edx` (a function whose address is taken keeps a standard convention). An import reads no register; its `ret N` comes from our shims' declared argument counts (`src/runtime/rt_shims_*.cpp`, 296 of the 371 imports, and the `_Name@N` decorations). The game's fatal-error and exit paths (calls that never return, including the C runtime's `exit`, 0x681e09) read nothing. The lane's check compares the callee-saved registers after every checked call, which tests these assumptions.
+- **The safe fallback** passes all eight registers through a context struct at every call and stores every push. Both are built from the same pass, and the spike measures the difference.
 
 **Memory.** The same guest memory model as today: the game's address space is one block, and host = guest + base ([natives.md](natives.md): `H(va)`, `U32(va)`, `put32(va, v)` in `src/game/d2_native.cpp`; `g_base` there). Every load and store goes through those helpers, with `memcpy` so unaligned access is legal on the ARM11. The game's structures keep their x86 layout, because the 3DS is 32-bit and little-endian too. There is no other memory model to keep in step with Box86, natives and shims.
 
@@ -73,13 +83,27 @@ One x86 function becomes one C function. The C is plain and boring, so that gcc 
 - Per function, a liveness pass finds which instruction reads which flag. `cmp`/`test` followed by `jcc` or `setcc` becomes a C comparison, and no flags are kept.
 - Flags that live across a basic block are kept as the last operation's operands and result, and worked out from those when read, as Box86 does.
 - 1,880 `adc`/`sbb` instructions read the carry flag, and only 15 instructions move flags to a register (`pushfd`, `popfd`, `lahf`, `sahf`). Those get the full computation.
-- At a call, a `ret` or an exit to the dispatcher, the flags are assumed dead, as MSVC's code expects. The spike checks this assumption over the whole binary (see Open questions).
+- At a call, a `ret` or an exit to the dispatcher, the flags are assumed dead, as MSVC's code expects. Over the whole binary, 12 of d2d's functions read flags that a call or their caller left (the spike's survey, below). Those stay with Box86.
+- **Which instructions write flags** comes from a table of our own, not Capstone's alone: Capstone 5 reports none for `test` with a memory operand (opcodes 84 and 85, 547 of the 164,075 flag-setting instructions in d2d's functions). Trusting it made a `jne` after `test word ptr [eax], si` read an older `cmp`'s flags, which the host cases caught.
+- In the spike's code every reader is a `jcc` after `cmp`, `sub`, `test`, `and` or `add`, or an `sbb` after `neg`. The reader's condition is a compare on the defining instruction's operands, which gcc folds.
 
 **x87.** The game takes its x87 and integer paths, because the port reports no SSE (`RunOptions::cpuid_edx`). So the 4,223 x87 instructions matter, though they are 0.5% of the code.
 - The register stack is a small array of `double`s with a top-of-stack index. Within a function whose stack depth is known at each instruction (MSVC's code keeps it balanced), the index is resolved at compile time, and the values become plain C locals.
 - Where the depth isn't known, the array is indexed at run time.
-- Precision is the same as Box86's on this port: 64-bit doubles on VFPv2, not 80-bit. The AOT code matches Box86 then, not a real Pentium, and the check mode compares against Box86.
+- Precision is the same as Box86's on this port: 64-bit doubles on VFPv2, not 80-bit. The game itself sets the x87 to 53-bit precision (MSVC's runtime does, #125 found it: Unicorn starts at 64), so for ordinary arithmetic 64-bit doubles match a real CPU too, not only Box86. They differ where the exponent range does (the x87 keeps its 15-bit exponent in registers even at 53-bit precision: denormals and overflow), and an `fldcw` that changes the precision or rounding has to be honoured.
 - Rounding and the `fist`/`fistp` conversions follow Box86's x87 handling on this port, which the check mode compares against.
+
+**Instruction kinds the note didn't cover** (the review's fourth point; counted over d2d's 13,048 functions):
+
+| Instructions | Count | What AOT code does |
+| --- | --- | --- |
+| `fs:` accesses | 268, in 83 functions | the running thread's TEB through `aot_fs_base()` (`rt::current_teb()`); SEH frames (`fs:[0]`) are memory like any other |
+| `rep movs`, `rep stos` | 608 | the copy or fill, element by element where it overlaps forward, with the direction flag known at each instruction (clear at entry and after calls, MSVC's rule; `std`/`cld` change it; a function where it isn't known stays with Box86) |
+| `fldcw` | 40 | not in the spike (no x87 there): the function stays with Box86 |
+| `cpuid` | 6 | to answer as `RunOptions::cpuid_edx` (not in the spike) |
+| `rdtsc` | 1 | from the same source as Box86's (not in the spike) |
+
+The spike's two trees have none of these. The recompiler emits the `fs:` and `rep` forms, but they haven't run on game code yet; x87, `cpuid` and `rdtsc` leave their function to Box86.
 
 **The C runtime's quirks.**
 - `_ftol2` (`0x682fd0`): the port already jumps over its SSE2 check, so the `cvttsd2si` path always runs (`install_ftol`). The recompiler turns a call to it into a truncating conversion in line.
@@ -97,10 +121,10 @@ One x86 function becomes one C function. The C is plain and boring, so that gcc 
 - **Return sites are entries too.** After a thread switch or a fallback, a thread can come back to a compiled function in the middle, just after a call. So each call's return site is an entry that continues the function from there. There are about 77,000 call sites. Whether every one needs an entry, or only those a thread can be switched under, is for the spike.
 - **Imports go straight to our shims.** The recompiler resolves each IAT slot at build time to the shim's tag. It calls the shim through the same interface the Bridge uses, so a shim doesn't know who called it. The clock reads and the lock calls take the lock-free path first, as from translated code today (below).
 - **Natives are C calls.** A call to a hooked function calls its native directly: no trap, no Bridge.
-  - The registers it may read are written to the CPU context first. It is called as `fn(c)`.
-  - `eax` and the other registers it may change are read back afterwards.
-  - A native that hands the call back (`resume_original`) leaves a new `esp` and `eip`. AOT code then continues at that `eip` through the target table.
-  - `D2_NATIVE_MASK` keeps working: each site calls through a small table, and a masked-off native's slot holds the compiled original instead.
+  - In the spike, the call goes to the native's own C function with the registers and stack words it takes, as `aot_native_<va>()` in `d2_native.cpp`: `room_find(ecx, edx, y)` for RoomFind, which covers every call, and `collision_cross(...)` for CollisionCross. Only `eax` changes, as through the trap.
+  - A native that hands the call back (CollisionCross on a room's edge) returns "not covered", and the compiled original (0x64d4e0) runs instead: nothing to resume. For a native without a compiled original, the original runs nested under Box86.
+  - `D2_NATIVE_MASK` keeps working: with CollisionCross masked off, the compiled 0x64d4e0 runs every time. (A general form would call through a `fn(c)` table, as first planned here; the spike didn't need it.)
+- **A callee not compiled runs nested under Box86** in the spike, as natives call the game's code (`rt::guest_call`): the compiled caller writes every register to the context, puts the sentinel where its return address is, runs Box86 from the callee to the sentinel, then reads the registers back and puts its return address back. That's why a root is hooked as a native not served in line. In CofParams' tree these nested runs are frequent (see the spike's results); a full build would compile them or call them through the target table instead.
 - **A miss falls back to Box86.** An indirect target that isn't in the table, an index outside a switch's guard, or a function the recompiler left out all end the same way. AOT code writes its state to the CPU context, sets `eip`, and exits to the dispatcher, which runs Box86 from there.
 - **Box86 calls into AOT code** through the backend's translation-time intrinsics (`dyn86_intrin.h`).
   - When Box86 translates a block that starts at a compiled function's entry, it emits a direct call to it, with every register in `inmask` and `regmask`.
