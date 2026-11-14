@@ -72,6 +72,24 @@ run_in() { # <image> <cmd...>
 
 build_id() { run_in "$TOOLCHAIN_IMAGE" sh scripts/build-id.sh; }
 
+# D2_AOT_BUILD=1 (issue #113, docs/aot.md): the AOT spike's recompiler runs on
+# the user's Game.exe (mounted read-only) and writes C into build/aot/spike/,
+# which the lane, the host cases and package-cia then compile in (AOT=...).
+# The output is the user's Game.exe in another form: it stays under build/
+# and in their own build. aot_prepare <game-dir> sets AOT_MAKE.
+AOT_MAKE=()
+aot_prepare() {
+    [ "${D2_AOT_BUILD:-}" = 1 ] || return 0
+    local game; game="$(cd "$1" && pwd)"
+    local saved=(${RUN_EXTRA[@]+"${RUN_EXTRA[@]}"})
+    RUN_EXTRA=(-v "$(host_path "$game/Game.exe"):/aot/Game.exe:ro")
+    # shellcheck disable=SC2046
+    run_in "$HOSTTEST_IMAGE" python3 -I tools/aot/recompile.py /aot/Game.exe --out build/aot/spike \
+        $(cat "$ROOT/tools/aot/spike.args")
+    RUN_EXTRA=(${saved[@]+"${saved[@]}"})
+    AOT_MAKE=(AOT=/work/build/aot/spike)
+}
+
 do_build() { # <flavor>
     local flavor="$1"
     case "$flavor" in debug|release) ;; *) die "flavor must be debug or release";; esac
@@ -121,9 +139,10 @@ test)
           # (mounted read-only), d2d's emulator-made cases against our natives (issue #108)
         if [ -n "${2:-}" ]; then
             [ -f "$2/Game.exe" ] || die "test d2d [<game-dir with Game.exe>]"
+            aot_prepare "$2"
             RUN_EXTRA=(-v "$(host_path "$(cd "$2" && pwd)"):/game:ro")
             for v in CASES ONLY GEN_CASES_DEBUG; do [ -n "${!v:-}" ] && RUN_EXTRA+=(-e "$v=${!v}"); done
-            run_in "$HOSTTEST_IMAGE" make -C tests/d2d run cases
+            run_in "$HOSTTEST_IMAGE" make -C tests/d2d run cases ${AOT_MAKE[@]+"${AOT_MAKE[@]}"}
         else
             run_in "$HOSTTEST_IMAGE" make -C tests/d2d run
         fi ;;
@@ -133,10 +152,11 @@ test)
         RUN_NETWORK=bridge run_in "$HOSTTEST_IMAGE" sh tests/tls/run.sh ;;   # the only lane with the network
     m4)   # <game-dir> [guest-ms] [command line]: the game directory is mounted read-only
         [ -n "${2:-}" ] && [ -f "$2/Game.exe" ] || die "test m4 <game-dir with Game.exe> [guest-ms] [command line]"
-        make_args=(-C tests/m4 run MS="${3:-20000}")
+        aot_prepare "$2"
+        make_args=(-C tests/m4 run MS="${3:-20000}" ${AOT_MAKE[@]+"${AOT_MAKE[@]}"})
         [ -n "${4:-}" ] && make_args+=(CMD="$4")
         RUN_EXTRA=(-v "$(host_path "$(cd "$2" && pwd)"):/game:ro")
-        for v in M4_LAYOUT M4_VIRTUAL_CLOCK M4_SCRIPT M4_BOTTOM RT_MSGLOG M4_PHYS_MB M4_FAST M4_QEMU_FLAGS WX86_SON WX86_SONDUMP WX86_SONMAXS WX86_HOTPROF D2_NOLINK M4_FRAMEHASH M4_NATIVE D2_NATIVE_MASK M4_DUMPFRAME M4_VIDEO M4_VIDEO_WAV M4_PROF RT_FILETRACE M4_HASHMEM WX86_FAKETSC M4_ASYNCIO M4_SPRITE_MB M4_POOL_RESERVE_MB M4_POOL_SPARE_KB M4_SPRITE_TRACE M4_STORM_PRIO M4_STORM_DIRECT D2_NATIVE_CHECK M4_SPRITE_FRAMES M4_META_CAP_KB D2_JITEVICT D2_JITFAILAFTER D2_JITCHUNK_KB M4_POOL_PIECES M4_POOL_BALLAST_MB M4_POOL_LARGE_KB M4_POOL_LARGE_MIN_KB M4_BG_QUANTUM M4_CALLRET M4_NOPEND M4_BUDGETTAIL M4_FORWARD M4_HOTPROF_LEVEL D2_DRAW_CENSUS D2_FLOOR_QUEUE D2_DCC; do [ -n "${!v:-}" ] && RUN_EXTRA+=(-e "$v=${!v}"); done
+        for v in M4_LAYOUT M4_VIRTUAL_CLOCK M4_SCRIPT M4_BOTTOM RT_MSGLOG M4_PHYS_MB M4_FAST M4_QEMU_FLAGS WX86_SON WX86_SONDUMP WX86_SONMAXS WX86_HOTPROF D2_NOLINK M4_FRAMEHASH M4_NATIVE D2_NATIVE_MASK M4_DUMPFRAME M4_VIDEO M4_VIDEO_WAV M4_PROF RT_FILETRACE M4_HASHMEM WX86_FAKETSC M4_ASYNCIO M4_SPRITE_MB M4_POOL_RESERVE_MB M4_POOL_SPARE_KB M4_SPRITE_TRACE M4_STORM_PRIO M4_STORM_DIRECT D2_NATIVE_CHECK M4_SPRITE_FRAMES M4_META_CAP_KB D2_JITEVICT D2_JITFAILAFTER D2_JITCHUNK_KB M4_POOL_PIECES M4_POOL_BALLAST_MB M4_POOL_LARGE_KB M4_POOL_LARGE_MIN_KB M4_BG_QUANTUM M4_CALLRET M4_NOPEND M4_BUDGETTAIL M4_FORWARD M4_HOTPROF_LEVEL D2_DRAW_CENSUS D2_FLOOR_QUEUE D2_DCC D2_AOT; do [ -n "${!v:-}" ] && RUN_EXTRA+=(-e "$v=${!v}"); done
         run_in "$HOSTTEST_IMAGE" make "${make_args[@]}" ;;
     *)    die "test host | test x86 [golden] | test cpu [armv7|armv6] | test m3 | test report | test governor | test gameexe | test frames | test pool | test d2d [<game-dir>] | test tls | test m4 <game-dir>" ;;
     esac
@@ -189,12 +209,21 @@ package-cia)   # [<game-dir> | --slim|--full <game-dir>]: the game app (+ the us
     ensure_image ctrtools "$CTRTOOLS_IMAGE"
     saved_extra=("${RUN_EXTRA[@]}"); RUN_EXTRA=()
     run_in "$HOSTTEST_IMAGE" make -C tests/cpu VARIANT=armv6 lib >/dev/null     # the patched backend tree
+    if [ "${D2_AOT_BUILD:-}" = 1 ]; then   # the AOT spike (issue #113): needs the user's Game.exe
+        [ -n "$art" ] || die "D2_AOT_BUILD=1 package-cia <game-dir>: the recompiler reads its Game.exe"
+        aot_prepare "$art"
+        echo "docker.sh: this CIA holds code made from your Game.exe: it is yours alone, never share it (docs/aot.md)"
+    fi
     # Reports (issue #26): the build ID and version ("0.4.0-dev" unless built
     # from its release tag: scripts/version.sh, issue #61), and the Sentry
     # project if D2_REPORT_DSN is set (even to nothing: no reports); otherwise
     # the Makefile takes packaging/cia/report.dsn.
     version="$(sh "$ROOT/scripts/version.sh")"
-    report_vars=(BUILD_ID="$(build_id)" D2_VERSION="$version")
+    bid="$(build_id)"
+    # The build ID covers the AOT step: the recompiler's and its arguments'
+    # hash, never Game.exe's.
+    [ ${#AOT_MAKE[@]} -gt 0 ] && bid="$bid-aot$(cat "$ROOT/tools/aot/recompile.py" "$ROOT/tools/aot/spike.args" | sha256sum | cut -c1-6)"
+    report_vars=(BUILD_ID="$bid" D2_VERSION="$version" ${AOT_MAKE[@]+"${AOT_MAKE[@]}"})
     [ -n "${D2_REPORT_DSN+x}" ] && report_vars+=(D2_REPORT_DSN="$D2_REPORT_DSN")
     run_in "$TOOLCHAIN_IMAGE" make -s -j8 -C tests/cpu/ctr "${report_vars[@]}" ../../../build/cpu/ctr/3ds-d2-game-cia.elf ../../../build/cpu/ctr/tls.bin
     RUN_EXTRA=("${saved_extra[@]}" -e "D2_VERSION=$version")   # the CIA's name

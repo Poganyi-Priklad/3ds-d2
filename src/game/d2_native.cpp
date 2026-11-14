@@ -13,6 +13,7 @@
 // Calling convention of all of them: MSVC fastcall (ecx, edx, then stack
 // arguments popped by the callee), which rt::hook_function maps directly.
 // No caller reads EAX afterwards; callee-saved registers are untouched here.
+#include "game/aot_spike.h"
 #include "game/d2_native.h"
 #include "game/draw_census.h"
 #include "game/pklib_explode.h"
@@ -4354,6 +4355,24 @@ void load_native_tables()
 
 }  // namespace
 
+// The AOT spike's compiled code (aot_rt.h) calls our natives in C. RoomFind
+// covers every call; CollisionCross hands a room's edge back (0 in the high
+// word), and the compiled 64d4e0 runs instead. With CollisionCross masked off
+// (D2_NATIVE_MASK), the compiled code doesn't use it either.
+bool g_aot_collision_cross = true;
+uint8_t *aot_guest_base() { return g_base; }
+extern "C" uint64_t aot_native_463740(uint32_t ecx, uint32_t edx, uint32_t y)
+{
+    return 1ull << 32 | room_find(ecx, (int32_t)edx, (int32_t)y);
+}
+extern "C" uint64_t aot_native_64d4e0(uint32_t esi, uint32_t room, uint32_t x, uint32_t y)
+{
+    uint32_t r;
+    if (!g_aot_collision_cross || !collision_cross(room, (int32_t)x, (int32_t)y, (uint16_t)esi, r))
+        return 0;
+    return 1ull << 32 | r;
+}
+
 int install_d2_native(Cpu &c)
 {
     // Arena base: any mapped guest address gives it.
@@ -4362,6 +4381,11 @@ int install_d2_native(Cpu &c)
         return 0;
     g_base = p - 0x00400000;
     load_native_tables();
+    // The AOT spike's compiled roots (issue #113) go in first, so that a
+    // native on the same entry (PathSearch) isn't hooked over them. Bench
+    // times PathSearch through this pointer.
+    aot_set_native(0x0067b850, path_search);
+    install_aot(c);
     // First bytes of each original (push ebp; mov ebp,esp; ...): only this
     // build of Game.exe gets hooked.
     static const uint8_t k4f69b0[] = {0x55, 0x8b, 0xec, 0x51, 0x53, 0x56, 0x8b, 0x75, 0x08};
@@ -4547,6 +4571,7 @@ int install_d2_native(Cpu &c)
     HOOK(c, 0x00463740, k463740, sizeof k463740, 1, remap_check ? room_find_checked : room_find_native, "RoomFind",
          !remap_check);
     static const uint8_t k64d4e0[] = {0x55, 0x8b, 0xec, 0x8b, 0x4d, 0x08, 0x83, 0xec, 0x10, 0x53};
+    g_aot_collision_cross = (mask & bit) != 0;
     HOOK(c, 0x0064d4e0, k64d4e0, sizeof k64d4e0, 3, remap_check ? collision_cross_checked : collision_cross_native,
          "CollisionCross", !remap_check);
 #undef DRAW

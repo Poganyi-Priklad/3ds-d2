@@ -78,6 +78,22 @@ BINKSRC := $(notdir $(wildcard $(ROOT)/src/game/bink/*.cpp))
 GAMEOBJ := $(CPUOBJ) $(addprefix $(OUT)/rt/,$(RTFULL:.cpp=.o)) $(addprefix $(OUT)/m3/,$(M3SRC:.cpp=.o)) \
            $(addprefix $(OUT)/game/,$(GAMESRC:.cpp=.o)) $(addprefix $(OUT)/game/bink/,$(BINKSRC:.cpp=.o)) $(OUT)/game/ctr_game.o $(OUT)/game/ctr_audio.o $(OUT)/game/ctr_screenshot.o $(OUT)/game/ctr_writer.o $(OUT)/game/ctr_report.o $(OUT)/game/ctr_tls.o $(OUT)/runner/ctr_stubs.o
 
+# AOT=<dir> (scripts/docker.sh package-cia with D2_AOT_BUILD=1): the AOT
+# spike's C, generated there from the user's Game.exe (issue #113,
+# tools/aot/), in the game app twice (src/game/aot_rt.h: inlined and not).
+# aot.cfg relinks the app when it comes or goes.
+AOT ?=
+ifneq ($(AOT),)
+AOTOBJ := $(OUT)/aot/aot.o $(OUT)/aot/aotn.o
+GAMEOBJ += $(AOTOBJ)
+endif
+$(OUT)/aot/aot.o: $(AOT)/aot_spike.c $(ROOT)/src/game/aot_rt.h
+	@mkdir -p $(@D); $(CC) -O2 -g $(ARCH) -std=gnu17 -I$(ROOT)/src -w -c $< -o $@
+$(OUT)/aot/aotn.o: $(AOT)/aot_spike.c $(ROOT)/src/game/aot_rt.h
+	@mkdir -p $(@D); $(CC) -O2 -g $(ARCH) -std=gnu17 -I$(ROOT)/src -w -DAOT_NOINLINE -c $< -o $@
+$(OUT)/aot.cfg: FORCE
+	@mkdir -p $(@D); echo '$(AOT)' | cmp -s - $@ || echo '$(AOT)' > $@
+
 .PHONY: all clean FORCE
 
 # The compile flags: when they change (PROF_COUNTERS joining every build),
@@ -192,11 +208,11 @@ $(OUT)/romfs-3dsx/tls.bin: $(OUT)/tls.bin
 	@mkdir -p $(@D); cp $< $@
 $(OUT)/game/ctr_game_cia.o: $(ROOT)/src/app/ctr_game.cpp $(wildcard $(ROOT)/src/game/*.h) $(wildcard $(ROOT)/src/runtime/rt_*.h)
 	@mkdir -p $(@D); $(CXX) $(CXXFLAGS) -O2 -DD2_CIA -I$(ROOT)/src -c $< -o $@
-$(OUT)/3ds-d2-game-cia.elf: $(filter-out $(OUT)/game/ctr_game.o,$(GAMEOBJ)) $(OUT)/game/ctr_game_cia.o
-	$(CXX) $(LDFLAGS) $(GAMELDFLAGS) $^ -L$(PORTLIBS)/lib -ljpeg -lz -lctru -lm -o $@
+$(OUT)/3ds-d2-game-cia.elf: $(filter-out $(OUT)/game/ctr_game.o,$(GAMEOBJ)) $(OUT)/game/ctr_game_cia.o $(OUT)/aot.cfg
+	$(CXX) $(LDFLAGS) $(GAMELDFLAGS) $(filter %.o,$^) -L$(PORTLIBS)/lib -ljpeg -lz -lctru -lm -o $@
 
-$(OUT)/3ds-d2-game.elf: $(GAMEOBJ)
-	$(CXX) $(LDFLAGS) $(GAMELDFLAGS) $^ -L$(PORTLIBS)/lib -ljpeg -lz -lctru -lm -o $@
+$(OUT)/3ds-d2-game.elf: $(GAMEOBJ) $(OUT)/aot.cfg
+	$(CXX) $(LDFLAGS) $(GAMELDFLAGS) $(filter %.o,$^) -L$(PORTLIBS)/lib -ljpeg -lz -lctru -lm -o $@
 $(OUT)/3ds-d2-game.smdh:
 	@mkdir -p $(@D); smdhtool --create "3ds-d2" "Diablo II LoD 1.14d on the n3DS" "3ds-d2" $(CTRULIB)/default_icon.png $@
 $(OUT)/3ds-d2-game.3dsx: $(OUT)/3ds-d2-game.elf $(OUT)/3ds-d2-game.smdh $(OUT)/romfs-3dsx/tls.bin

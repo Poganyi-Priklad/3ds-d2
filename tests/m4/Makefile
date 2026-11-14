@@ -27,6 +27,15 @@ else
 HOST := $(OUT)/m4_host
 endif
 LIB   := $(W)/build-arm/libwinx86$(LIBTAG).a
+# AOT=<dir> (scripts/docker.sh with D2_AOT_BUILD=1): the AOT spike's C,
+# generated there from the user's Game.exe (issue #113, tools/aot/), compiled
+# three ways (src/game/aot_rt.h) and linked into a binary of its own.
+AOT   ?=
+ifneq ($(AOT),)
+HOST   := $(HOST)_aot
+AOTOBJ := $(OUT)/aot/aot.o $(OUT)/aot/aotn.o $(OUT)/aot/aotj.o
+endif
+AOTCC := arm-linux-gnueabi-gcc -std=gnu17 -O2 -g $(ARCH) -I$(ROOT)/src -w
 GAME  ?= /game
 MS    ?= 20000
 CMD   ?= game.exe -w
@@ -50,11 +59,18 @@ $(W)/build-arm/libwinx86_prof.a: $(W)/build-arm/libwinx86.a FORCE
 	cd $(W) && TARGET=armv6 LIBTAG=_prof EXTRA=-DPROF_COUNTERS bash build.sh > $(abspath $(OUT))/lib-prof-build.log 2>&1 \
 	  || (grep -E 'error|Error' $(abspath $(OUT))/lib-prof-build.log | head -40; exit 1)
 
+$(OUT)/aot/aot.o: $(AOT)/aot_spike.c $(ROOT)/src/game/aot_rt.h
+	@mkdir -p $(@D); $(AOTCC) -c $< -o $@
+$(OUT)/aot/aotn.o: $(AOT)/aot_spike.c $(ROOT)/src/game/aot_rt.h
+	@mkdir -p $(@D); $(AOTCC) -DAOT_NOINLINE -c $< -o $@
+$(OUT)/aot/aotj.o: $(AOT)/aot_spike.c $(ROOT)/src/game/aot_rt.h
+	@mkdir -p $(@D); $(AOTCC) -DAOT_JOURNAL -c $< -o $@
+
 $(HOST): $(SRCS) png.h $(wildcard $(ROOT)/src/runtime/rt_*.h) $(wildcard $(ROOT)/src/game/*.h) \
-               $(wildcard $(ROOT)/src/game/bink/*.h) $(LIB)
+               $(wildcard $(ROOT)/src/game/bink/*.h) $(LIB) $(AOTOBJ)
 	@mkdir -p $(OUT)
 	$(CXX) -std=gnu++17 -O2 -g $(ARCH) -DD2RT_CPU_BOX86 $(PROFDEF) -Wall -Wextra -Wno-unused-parameter $(INC) \
-	  -static -o $@ $(SRCS) $(LIB) -lpthread -lm
+	  -static -o $@ $(SRCS) $(AOTOBJ) $(LIB) -lpthread -lm
 
 clean:
 	rm -rf $(OUT)

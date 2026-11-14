@@ -11,7 +11,13 @@
 //   native_cases <Game.exe> <cases dir> [Name ...]
 //
 // The native's own code runs: this file includes d2_native.cpp.
+//
+// Built with the AOT spike's compiled code (D2_AOT_CASES: scripts/docker.sh
+// test d2d with D2_AOT_BUILD=1, issue #113), a root's compiled C runs on the
+// cases of the native at its entry too (PathSearch's for A*), in all four
+// builds; a nested run of a callee not compiled counts as left to the game.
 #include "../../src/game/d2_native.cpp"
+#include "game/aot_rt.h"
 #include "runtime/bridge.h"
 
 #include <cstdio>
@@ -105,7 +111,46 @@ uint32_t dcc_cell_case(Cpu &c)
     return 0;
 }
 
+#ifdef D2_AOT_CASES
+}  // namespace
+}  // namespace game
+extern "C" const AotRoot aot_roots[], aotn_roots[];
+extern void (*aot_guest_hook)(uint32_t va, AotRegs *r);
+namespace game {
+namespace {
+bool g_aot_left = false;
+bool g_aot_trace = false;   // AOT_TRACE_CASE=<n>: case n's compiled entries (aot.o built with -DAOT_TRACE_ON)
+void aot_left(uint32_t, AotRegs *) { g_aot_left = true; }
+AotRootFn g_aot_fn = nullptr;
+// A compiled root, as the hook runs it: the registers in, the ones it
+// writes out (esp: the caller's, as the trap pops).
+uint32_t aot_case(Cpu &c)
+{
+    uint32_t r[8];
+    c.regs_gp(r);
+    aot_mem = g_base;
+    g_aot_fn(r);
+    for (int k = 0; k < 8; k++)
+        if (k != d2rt::R_ESP)
+            c.set_reg(k, r[k]);
+    return r[0];
+}
+#endif
+
 using NativeFn = uint32_t (*)(Cpu &);
+#ifdef D2_AOT_CASES
+}  // namespace
+}  // namespace game
+extern "C" void aot_trace(uint32_t va, uint32_t eax, uint32_t ecx, uint32_t edx, uint32_t ebx, uint32_t esp,
+                          uint32_t ebp, uint32_t esi, uint32_t edi)
+{
+    if (game::g_aot_trace)
+        std::printf("T %08x %08x %08x %08x %08x %08x %08x %08x %08x | %08x %08x %08x\n", va, eax, ecx, edx, ebx, esp,
+                    ebp, esi, edi, game::U32(esp + 4), game::U32(esp + 8), game::U32(esp + 12));
+}
+namespace game {
+namespace {
+#endif
 struct Native {
     const char *name;
     NativeFn fn;
@@ -245,7 +290,8 @@ bool load_image(const char *path, Image &img)
 }
 
 // One native's file: its cases, compared. Returns the number that differ.
-int run_file(const std::string &path, Image &img, TestCpu &cpu, int &total)
+int run_file(const std::string &path, Image &img, TestCpu &cpu, int &total, NativeFn as = nullptr,
+             const char *label = nullptr)
 {
     Reader r;
     if (!read_file(path, r.data) || r.data.size() < 8 || std::memcmp(r.data.data(), "D2NC", 4)) {
@@ -269,6 +315,9 @@ int run_file(const std::string &path, Image &img, TestCpu &cpu, int &total)
         std::printf("%s: no native %s in this runner\n", path.c_str(), name.c_str());
         return 1;
     }
+    Native other = {label ? label : native->name, as ? as : native->fn};
+    if (as)
+        native = &other;
     int bad = 0, left = 0;
     std::vector<uint8_t> expect;
     static const int kOrder[7] = {d2rt::R_EAX, d2rt::R_ECX, d2rt::R_EDX, d2rt::R_EBX,
@@ -341,6 +390,10 @@ int run_file(const std::string &path, Image &img, TestCpu &cpu, int &total)
             put32(esp + 4 + 4 * (uint32_t)k, c.args[k]);
         cpu.set_reg(d2rt::R_ESP, esp);
         const uint32_t t0 = rt::tick_ms();
+#ifdef D2_AOT_CASES
+        static const char *trace_case = std::getenv("AOT_TRACE_CASE");
+        g_aot_trace = trace_case && as && (uint32_t)std::atoi(trace_case) == i;
+#endif
         const uint32_t eax = native->fn(cpu);
         if (flags & kInline) {
             // Where the native goes on (its redirect, or on past its patch),
@@ -395,7 +448,12 @@ int run_file(const std::string &path, Image &img, TestCpu &cpu, int &total)
             if (t - t0 <= t1 - t0 && k + 4 <= expect.size())
                 std::memcpy(H(at), &expect[k], 4);
         }
-        if (rt::bridge().take_redirect()) {
+        bool left_now = rt::bridge().take_redirect() != 0;
+#ifdef D2_AOT_CASES
+        left_now |= g_aot_left;
+        g_aot_left = false;
+#endif
+        if (left_now) {
             left++;
         } else {
             uint32_t first = 0;
@@ -426,7 +484,7 @@ int run_file(const std::string &path, Image &img, TestCpu &cpu, int &total)
         std::printf("%-20s %5u cases, %d differ (in line: where it goes on, the live registers, memory)\n",
                     name.c_str(), count, bad);
     else
-        std::printf("%-20s %5u cases, %d differ, %d left to the game's code%s\n", name.c_str(), count, bad, left,
+        std::printf("%-20s %5u cases, %d differ, %d left to the game's code%s\n", native->name, count, bad, left,
                     (flags & 1) ? "" : " (EAX not compared: dead after the call)");
     return bad;
 }
@@ -476,6 +534,33 @@ int main(int argc, char **argv)
     int bad = 0, total = 0;
     for (const std::string &n : names)
         bad += game::run_file(std::string(argv[2]) + "/" + n + ".cases", img, cpu, total);
+#ifdef D2_AOT_CASES
+    // The compiled roots on their native's cases (the root's name is its
+    // native's: PathSearch), four builds each.
+    aot_guest_hook = game::aot_left;
+    if (std::getenv("AOT_NO_NATIVES"))   // the compiled 64d4e0 instead of CollisionCross (to trace)
+        game::g_aot_collision_cross = false;
+    for (int k = 0; aot_roots[k].va; k++) {
+        const std::string file = std::string(argv[2]) + "/" + aot_roots[k].name + ".cases";
+        if (FILE *f = std::fopen(file.c_str(), "rb"))
+            std::fclose(f);
+        else {
+            std::printf("%-20s no cases (no native's cases at %08x)\n", aot_roots[k].name, aot_roots[k].va);
+            continue;
+        }
+        const struct {
+            const char *what;
+            AotRootFn fn;
+        } builds[] = {{"aot-sig", aot_roots[k].sig}, {"aot-ctx", aot_roots[k].ctx},
+                      {"aot-sig-calls", aotn_roots[k].sig}, {"aot-ctx-calls", aotn_roots[k].ctx}};
+        for (const auto &b : builds) {
+            static char label[64];
+            std::snprintf(label, sizeof label, "%s/%s", aot_roots[k].name, b.what);
+            game::g_aot_fn = b.fn;
+            bad += game::run_file(file, img, cpu, total, game::aot_case, label);
+        }
+    }
+#endif
     std::printf("RESULT d2d.native_cases %s (%zu natives, %d cases)\n", bad ? "FAIL" : "PASS", names.size(), total);
     return bad ? 1 : 0;
 }

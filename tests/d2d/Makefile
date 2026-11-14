@@ -37,10 +37,26 @@ LIB     := $(W)/build-arm/libwinx86.a
 $(LIB): FORCE
 	$(MAKE) -C ../cpu VARIANT=armv6 lib
 
+# AOT=<dir> (scripts/docker.sh test d2d with D2_AOT_BUILD=1): the AOT spike's
+# C, generated there from the user's Game.exe (issue #113), linked into the
+# case runner, which then runs each compiled root on its native's cases.
+AOT ?=
+AOTCC := arm-linux-gnueabi-gcc -std=gnu17 -O2 -g $(ARCH) -I$(ROOT)/src -w $(AOTFLAGS)
+ifneq ($(AOT),)
+AOTOBJ := $(OUT)/aot/aot.o $(OUT)/aot/aotn.o
+AOTDEF := -DD2_AOT_CASES
+endif
+$(OUT)/aot/aot.o: $(AOT)/aot_spike.c $(ROOT)/src/game/aot_rt.h
+	@mkdir -p $(@D); $(AOTCC) -c $< -o $@
+$(OUT)/aot/aotn.o: $(AOT)/aot_spike.c $(ROOT)/src/game/aot_rt.h
+	@mkdir -p $(@D); $(AOTCC) -DAOT_NOINLINE -c $< -o $@
+$(OUT)/aot.cfg: FORCE
+	@mkdir -p $(@D); echo '$(AOT)' | cmp -s - $@ || echo '$(AOT)' > $@
+
 $(OUT)/walk_back $(OUT)/native_cases: $(OUT)/%: %.cpp $(SRC)/.prepared $(NATIVE_SRCS) $(ROOT)/src/game/d2_native.cpp \
-                  $(wildcard $(ROOT)/src/game/*.h) $(wildcard $(ROOT)/src/runtime/rt_*.h) $(LIB)
-	$(CXX) -std=gnu++17 -O2 -g $(ARCH) -DD2RT_CPU_BOX86 -Wall -Wextra -Wno-unused-parameter -Wno-psabi $(INC) \
-	  -static -o $@ $< $(NATIVE_SRCS) $(LIB) -lpthread -lm
+                  $(wildcard $(ROOT)/src/game/*.h) $(wildcard $(ROOT)/src/runtime/rt_*.h) $(LIB) $(AOTOBJ) $(OUT)/aot.cfg
+	$(CXX) -std=gnu++17 -O2 -g $(ARCH) -DD2RT_CPU_BOX86 $(AOTDEF) -Wall -Wextra -Wno-unused-parameter -Wno-psabi $(INC) \
+	  -static -o $@ $< $(NATIVE_SRCS) $(AOTOBJ) $(LIB) -lpthread -lm
 
 # Issue #109: cases for our natives made from the user's Game.exe under
 # Unicorn (gen_cases.py, through d2d's tools/emu), in build/d2d-cases (never
