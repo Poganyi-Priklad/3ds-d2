@@ -132,18 +132,30 @@ const Native kNatives[] = {
     {"Dc6Shadow", dc6_shadow},           {"LightGrid", light_grid},
     {"LightBlock", light_block},         {"FloorTile", floor_tile},
     {"DccPixelBuffer", dcc_pixel_buffer}, {"DccCell", dcc_cell_case},
+    {"SlotStepA", slot_step_ebx},        {"SlotStepB", slot_step_frame},
+    {"CellStepA", cells_step_a},         {"CellStepB", cells_step_b},
+    {"FloorRecordStep", floor_records_step}, {"WallCellStep", wall_cells_step},
+    {"PickUnitStep", pick_units_step},   {"WeatherStep", weather_step},
 };
 
 struct Span {
     uint32_t va;
     std::vector<uint8_t> bytes;
 };
+// An in-line native's case: where the game's code came to one of the
+// native's resume addresses, the registers live there and the memory then.
+struct Arrival {
+    uint32_t target, live, regs[7];
+    std::vector<Span> spans;
+};
 struct Case {
     uint32_t regs[7];   // eax ecx edx ebx ebp esi edi
     std::vector<uint32_t> args;
     std::vector<Span> before, after;
     uint32_t eax;
+    std::vector<Arrival> arrivals;
 };
+constexpr uint32_t kInline = 2;   // gen_cases.py's INLINE
 
 struct Reader {
     std::vector<uint8_t> data;
@@ -241,13 +253,14 @@ int run_file(const std::string &path, Image &img, TestCpu &cpu, int &total)
         return 1;
     }
     r.at = 4;
-    if (r.u32() != 1) {
+    if (r.u32() != 2) {
         std::printf("%s: another version of the cases file\n", path.c_str());
         return 1;
     }
     const std::vector<uint8_t> nb = r.bytes(r.u32());
     const std::string name(nb.begin(), nb.end());
     const uint32_t flags = r.u32(), count = r.u32();
+    const uint32_t fallthrough = (flags & kInline) ? r.u32() : 0;
     const Native *native = nullptr;
     for (const Native &n : kNatives)
         if (name == n.name)
@@ -258,6 +271,8 @@ int run_file(const std::string &path, Image &img, TestCpu &cpu, int &total)
     }
     int bad = 0, left = 0;
     std::vector<uint8_t> expect;
+    static const int kOrder[7] = {d2rt::R_EAX, d2rt::R_ECX, d2rt::R_EDX, d2rt::R_EBX,
+                                  d2rt::R_EBP, d2rt::R_ESI, d2rt::R_EDI};
     for (uint32_t i = 0; i < count && r.ok; i++) {
         Case c;
         for (uint32_t &v : c.regs)
@@ -268,31 +283,56 @@ int run_file(const std::string &path, Image &img, TestCpu &cpu, int &total)
         c.before = r.spans();
         c.eax = r.u32();
         c.after = r.spans();
+        if (flags & kInline) {
+            c.arrivals.resize(r.u32());
+            for (Arrival &a : c.arrivals) {
+                a.target = r.u32();
+                a.live = r.u32();
+                for (uint32_t &v : a.regs)
+                    v = r.u32();
+                a.spans = r.spans();
+            }
+        }
         if (!r.ok)
             break;
         // The memory as the game had it, then what the game left: expected.
         uint32_t win_hi = kCaseLo;
-        for (const auto *spans : {&c.before, &c.after})
-            for (const Span &s : *spans) {
+        auto reach = [&](const std::vector<Span> &spans) {
+            for (const Span &s : spans)
                 if (s.va >= kCaseLo)
                     win_hi = std::max(win_hi, s.va + (uint32_t)s.bytes.size());
-            }
+        };
+        reach(c.before);
+        reach(c.after);
+        for (const Arrival &a : c.arrivals)
+            reach(a.spans);
         for (const Span &s : c.before)
             std::memcpy(H(s.va), s.bytes.data(), s.bytes.size());
         const uint32_t data_n = img.data_hi - img.data_lo, win_n = win_hi - kCaseLo;
         expect.assign(H(img.data_lo), H(img.data_lo) + data_n);
         expect.insert(expect.end(), H(kCaseLo), H(kCaseLo) + win_n);
-        for (const Span &s : c.after) {
-            const size_t at = s.va >= kCaseLo ? data_n + (s.va - kCaseLo) : s.va - img.data_lo;
-            if (s.va < img.data_lo || at + s.bytes.size() > expect.size()) {
-                std::printf("%s case %u: the game wrote %08x, outside what is compared\n", name.c_str(), i, s.va);
-                continue;
+        const std::vector<uint8_t> base = expect;   // the memory before the call
+        auto apply = [&](std::vector<uint8_t> &to, const std::vector<Span> &spans) {
+            for (const Span &s : spans) {
+                const size_t at = s.va >= kCaseLo ? data_n + (s.va - kCaseLo) : s.va - img.data_lo;
+                if (s.va < img.data_lo || at + s.bytes.size() > to.size()) {
+                    std::printf("%s case %u: the game wrote %08x, outside what is compared\n", name.c_str(), i, s.va);
+                    continue;
+                }
+                std::memcpy(&to[at], s.bytes.data(), s.bytes.size());
             }
-            std::memcpy(&expect[at], s.bytes.data(), s.bytes.size());
-        }
+        };
+        apply(expect, c.after);
+        auto differ = [&](const std::vector<uint8_t> &want, uint32_t &first) {
+            uint32_t diffs = 0;
+            for (size_t k = 0; k < want.size(); k++) {
+                const uint32_t va = k < data_n ? img.data_lo + (uint32_t)k : kCaseLo + (uint32_t)(k - data_n);
+                if (*H(va) != want[k] && !diffs++)
+                    first = va;
+            }
+            return diffs;
+        };
         // The call: the registers, then the arguments above a return address.
-        static const int kOrder[7] = {d2rt::R_EAX, d2rt::R_ECX, d2rt::R_EDX, d2rt::R_EBX,
-                                      d2rt::R_EBP, d2rt::R_ESI, d2rt::R_EDI};
         for (int k = 0; k < 7; k++)
             cpu.set_reg(kOrder[k], c.regs[k]);
         const uint32_t esp = kStackTop - 4 - 4 * (uint32_t)c.args.size();
@@ -302,6 +342,50 @@ int run_file(const std::string &path, Image &img, TestCpu &cpu, int &total)
         cpu.set_reg(d2rt::R_ESP, esp);
         const uint32_t t0 = rt::tick_ms();
         const uint32_t eax = native->fn(cpu);
+        if (flags & kInline) {
+            // Where the native goes on (its redirect, or on past its patch),
+            // with its registers (EAX its return, as the bridge sets it),
+            // against the game's arrivals there.
+            uint32_t to = rt::bridge().take_redirect();
+            if (!to)
+                to = fallthrough;
+            uint32_t mine[7];
+            for (int k = 0; k < 7; k++)
+                mine[k] = k == 0 ? eax : cpu.reg(kOrder[k]);
+            bool ok = false;
+            std::string why = "no arrival at " + std::to_string(to);
+            for (const Arrival &a : c.arrivals) {
+                if (a.target != to)
+                    continue;
+                std::vector<uint8_t> want = base;
+                apply(want, a.spans);
+                uint32_t first = 0;
+                const uint32_t diffs = differ(want, first);
+                std::string regs;
+                for (int k = 0; k < 7; k++)
+                    if ((a.live >> k & 1) && mine[k] != a.regs[k])
+                        regs += std::string(" reg ") + std::to_string(k) + " native " + std::to_string(mine[k]) +
+                                ", game " + std::to_string(a.regs[k]) + ";";
+                if (!diffs && regs.empty()) {
+                    ok = true;
+                    break;
+                }
+                char buf[160];
+                std::snprintf(buf, sizeof buf, "at %08x:%s %u bytes differ (first at %08x)", to, regs.c_str(), diffs,
+                              first);
+                why = buf;
+            }
+            if (!ok) {
+                char last[64] = "";
+                if (!c.arrivals.empty())
+                    std::snprintf(last, sizeof last, " (the game's last arrival %08x)", c.arrivals.back().target);
+                if (++bad <= 5)
+                    std::printf("DIFF %s case %u: %s%s\n", name.c_str(), i, why.c_str(), last);
+            }
+            std::memcpy(H(img.data_lo), img.pristine.data() + (img.data_lo - kImageBase), data_n);
+            std::memset(H(kCaseLo), 0, kArenaEnd - kCaseLo);
+            continue;
+        }
         // SpriteCacheTouch's stamp: GetTickCount's in the game (the
         // emulator's 0), the slice's clock in the native; taken as equal
         // when the native's is that clock's.
@@ -314,12 +398,8 @@ int run_file(const std::string &path, Image &img, TestCpu &cpu, int &total)
         if (rt::bridge().take_redirect()) {
             left++;
         } else {
-            uint32_t first = 0, diffs = 0;
-            for (size_t k = 0; k < expect.size(); k++) {
-                const uint32_t va = k < data_n ? img.data_lo + (uint32_t)k : kCaseLo + (uint32_t)(k - data_n);
-                if (*H(va) != expect[k] && !diffs++)
-                    first = va;
-            }
+            uint32_t first = 0;
+            const uint32_t diffs = differ(expect, first);
             const bool eax_bad = (flags & 1) && eax != c.eax;
             if (diffs || eax_bad) {
                 if (++bad <= 5)
@@ -342,8 +422,12 @@ int run_file(const std::string &path, Image &img, TestCpu &cpu, int &total)
         return bad + 1;
     }
     total += (int)count;
-    std::printf("%-20s %5u cases, %d differ, %d left to the game's code%s\n", name.c_str(), count, bad, left,
-                (flags & 1) ? "" : " (EAX not compared: dead after the call)");
+    if (flags & kInline)
+        std::printf("%-20s %5u cases, %d differ (in line: where it goes on, the live registers, memory)\n",
+                    name.c_str(), count, bad);
+    else
+        std::printf("%-20s %5u cases, %d differ, %d left to the game's code%s\n", name.c_str(), count, bad, left,
+                    (flags & 1) ? "" : " (EAX not compared: dead after the call)");
     return bad;
 }
 

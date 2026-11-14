@@ -20,10 +20,15 @@ fatal-error path (an assertion) is left out and counted.
 The files (<out dir>/<Name>.cases) are made from the user's Game.exe: they
 stay in build/, never in the repository.
 
-File format, little-endian: "D2NC", version 1, the name's length and the
-name, flags (1: compare EAX), the case count; then per case: eax ecx edx ebx
+File format, little-endian: "D2NC", version 2, the name's length and the
+name, flags (1: compare EAX; 2: an in-line native; 4: its last arrival
+only), the case count, for an in-line native the address after its patch
+(where it goes on when it doesn't redirect); then per case: eax ecx edx ebx
 ebp esi edi, the argument count and arguments, the writes before (count;
-va, length, bytes each), the game's EAX, the game's writes (the same form).
+va, length, bytes each), the game's EAX, the game's writes (the same form);
+for an in-line native the arrivals (count; each its address, the mask of
+live registers in the order above, the seven registers, the memory written
+up to it in the same form).
 """
 import argparse
 import os
@@ -39,10 +44,18 @@ try:
     import emu   # noqa: E402  (d2d's harness, from the work tree)
 except ImportError as error:
     sys.exit(f"gen_cases: d2d's tools/emu not importable from {EMU_DIR} ({error}): run make -C tests/d2d prepare")
-from unicorn import UC_HOOK_MEM_WRITE, UC_PROT_ALL   # noqa: E402
+import unicorn   # noqa: E402
+from unicorn import UC_HOOK_CODE, UC_HOOK_MEM_WRITE, UC_PROT_ALL   # noqa: E402
+from unicorn.x86_const import UC_X86_REG_ESP, UC_X86_REG_FPCW   # noqa: E402
 
 CASE_LO, CASE_SIZE = 0x01000000, 0x00f00000   # the records' window; the runner's stack is above it
 COMPARE_EAX = 1
+INLINE = 2   # an in-line native: a loop's step patched in, its cases arrivals (Gen.run_inline)
+EXACT = 4    # the native must stop where the game's code starts work: the last arrival only
+# The x87 control word MSVC's runtime sets at start (53-bit precision, round
+# to nearest, exceptions masked): the game's on Windows, and what the
+# dynarec's doubles give. Unicorn starts at 0x37f (64-bit precision).
+FPCW = 0x27f
 REGS = ("eax", "ecx", "edx", "ebx", "ebp", "esi", "edi")
 
 
@@ -56,7 +69,7 @@ class Gen:
         self.image_lo = self.e.base
         self.image_hi = self.image_lo + ((self._size_of_image(exe) + 0xfff) & ~0xfff)
         self.pristine = self.e.read(self.image_lo, self.image_hi - self.image_lo)
-        self.writes, self.game = [], []
+        self.writes, self.game, self.values = [], [], []
         self.e.mu.hook_add(UC_HOOK_MEM_WRITE, self._on_write)
         # The emulator's own answers to the game's imports (wsprintfA's
         # output, say) write from Python, which the hook above doesn't see.
@@ -65,6 +78,7 @@ class Gen:
         def stub_write(addr, data):
             if self.recording:
                 self.game.append((addr, len(data)))
+                self.values.append(bytes(data))
             return mem_write(addr, data)
         self.e.mu.mem_write = stub_write
         self.recording = False
@@ -95,6 +109,7 @@ class Gen:
     def _on_write(self, mu, access, addr, size, value, _):
         if self.recording:
             self.game.append((addr, size))
+            self.values.append((value & ((1 << (8 * size)) - 1)).to_bytes(size, "little"))
 
     # ---- building a case's memory ---------------------------------------
     def alloc(self, n, align=16):
@@ -125,8 +140,9 @@ class Gen:
         or None if the game faulted or wrote outside the image and the window."""
         e = self.e
         before = [(a, e.read(a, n)) for a, n in merge(self.writes)]   # as the game is given it
-        self.game = []
+        self.game, self.values = [], []
         self.recording = True
+        e.mu.reg_write(UC_X86_REG_FPCW, FPCW)
         try:
             eax = e.call(addr, *args, ecx=regs.get("ecx", 0), edx=regs.get("edx", 0),
                          regs={k: v for k, v in regs.items() if k not in ("ecx", "edx")})
@@ -172,7 +188,180 @@ class Gen:
                 self.e.mu.mem_write(a, self.pristine[a - self.image_lo:hi - self.image_lo])
             elif CASE_LO <= a < CASE_LO + CASE_SIZE:
                 self.e.mu.mem_write(a, b"\0" * min(n, CASE_LO + CASE_SIZE - a))
-        self.writes, self.game = [], []
+        self.writes, self.game, self.values = [], [], []
+
+    # ---- an in-line native: the game's code from a patched site ------------------
+    def run_inline(self, site, targets, stops, exact, limit=64, **regs):
+        """The game's code from `site` (as Game.exe has it: the native's
+        patch is the port's), noting the state at each arrival at one of the
+        native's resume addresses (`targets`), until it reaches one of
+        `stops` (the loop's first work, or its exit). The case holds the last
+        arrival (exact) or every one (the native may stop early, and must
+        then match one of them): its address, the registers live there, and
+        the memory written up to it. None if the game faulted or wrote
+        outside first (with arrivals noted, a not-exact case keeps them)."""
+        e, mu = self.e, self.e.mu
+        before = [(a, e.read(a, n)) for a, n in merge(self.writes)]
+        self.game, self.values = [], []
+        arrivals, stopped = [], []
+
+        def on_code(uc, addr, size, _):
+            if addr in targets:
+                arrivals.append((addr, {r: uc.reg_read(getattr(unicorn.x86_const, "UC_X86_REG_" + r.upper()))
+                                         for r in REGS}, len(self.game)))
+                if len(arrivals) > limit:
+                    stopped.append(None)
+                    uc.emu_stop()
+            if addr in stops:
+                stopped.append(addr)
+                uc.emu_stop()
+        hooks = [mu.hook_add(UC_HOOK_CODE, on_code, None, a, a) for a in set(targets) | set(stops)]
+        mu.reg_write(UC_X86_REG_ESP, emu.STACK + emu.STACK_SIZE - 0x1000)
+        mu.reg_write(UC_X86_REG_FPCW, FPCW)
+        for r in REGS:
+            mu.reg_write(getattr(unicorn.x86_const, "UC_X86_REG_" + r.upper()), regs.get(r, 0) & 0xffffffff)
+        self.recording = True
+        failed = None
+        try:
+            mu.emu_start(site, 0xffffffff, count=5_000_000)
+        except KeyboardInterrupt:
+            raise
+        except BaseException as error:
+            failed = error
+        self.recording = False
+        for h in hooks:
+            mu.hook_del(h)
+        why = None
+        if failed is not None and (exact or not arrivals):
+            why = f"{type(failed).__name__}: {failed}"
+        elif failed is None and (not stopped or stopped[-1] is None):
+            why = "no stop reached"
+        elif not arrivals:
+            why = "no arrival"
+        scratch = ((emu.STACK, emu.STACK + emu.STACK_SIZE), (emu.TEB, emu.TEB + 0x10000),
+                   (emu.HEAP, emu.HEAP + emu.HEAP_SIZE))
+        kept = [(a, n, v) for (a, n), v in zip(self.game, self.values) if not any(lo <= a < hi for lo, hi in scratch)]
+        if why is None:
+            outside = [(a, n) for a, n, _ in kept if not (self.image_lo <= a and a + n <= self.image_hi or
+                                                          CASE_LO <= a and a + n <= CASE_LO + CASE_SIZE)]
+            if outside:
+                why = "the game wrote " + ", ".join(f"{a:08x}+{n}" for a, n in outside[:4])
+        if why is not None:
+            self.reset()
+            if os.environ.get("GEN_CASES_DEBUG"):
+                print(f"  left out: {why}", file=sys.stderr)
+            return None
+        # The memory at each arrival: the game's writes up to it, in order.
+        out = []
+        for addr, rs, k in (arrivals[-1:] if exact else arrivals):
+            mem = {}
+            for (a, n), v in zip(self.game[:k], self.values[:k]):
+                if any(lo <= a < hi for lo, hi in scratch):
+                    continue
+                for i, b in enumerate(v):
+                    mem[a + i] = b
+            spans, run = [], None
+            for a in sorted(mem):
+                if run and a == run[0] + len(run[1]):
+                    run[1].append(mem[a])
+                else:
+                    run = [a, bytearray([mem[a]])]
+                    spans.append(run)
+            out.append(dict(target=addr, live=live_mask(self.e, addr), regs=rs,
+                            spans=[(a, bytes(b)) for a, b in spans]))
+        case = dict(regs={r: regs.get(r, 0) for r in REGS}, args=[], before=before, eax=0, after=[], arrivals=out)
+        self.reset()
+        return case
+
+
+# The registers each resume address reads before writing them (the rest are
+# not compared there), from its code, by MSVC's conventions: every path
+# walked; at a return EAX (the result) and the callee-saved EBX, EBP, ESI and
+# EDI are live, ECX and EDX not (none of these functions returns 64 bits);
+# a direct call reads what its callee reads before writing (walked the same
+# way, its own return reading nothing more), one through an import slot (a
+# Win32 function) nothing, and either leaves EAX, ECX and EDX written; any
+# other indirect call or jump reads every register not yet written.
+_LIVE = {}
+_FULL = {}
+for _r in REGS:
+    _b = _r[1:]
+    for _n in (_r, _b) + ((_b[0] + "l", _b[0] + "h") if _r in ("eax", "ebx", "ecx", "edx") else ()):
+        _FULL[_n] = _r
+_AT_RET = {"eax", "ebx", "ebp", "esi", "edi"}
+
+
+def _live(e, addr, at_ret, calls, memo):
+    from capstone import Cs, CS_ARCH_X86, CS_MODE_32, CS_GRP_JUMP, CS_GRP_CALL, CS_GRP_RET
+    key = (addr, frozenset(at_ret))
+    if key in memo:
+        return memo[key]
+    memo[key] = set(REGS)   # a recursive call while walking: every register
+    md = Cs(CS_ARCH_X86, CS_MODE_32)
+    md.detail = True
+    live, seen = set(), set()
+
+    def walk(at, written, depth):
+        written = set(written)
+        while True:
+            if depth > 400:
+                live.update(set(REGS) - written)
+                return
+            if (at, frozenset(written)) in seen:
+                return
+            seen.add((at, frozenset(written)))
+            ins = next(md.disasm(bytes(e.read(at, 16)), at), None)
+            if ins is None:
+                live.update(set(REGS) - written)
+                return
+            depth += 1
+            read, wrote = ins.regs_access()
+            names = [md.reg_name(r) for r in read]
+            ops = ins.op_str.replace(" ", "").split(",")
+            if ins.mnemonic in ("xor", "sub") and len(ops) == 2 and ops[0] == ops[1]:
+                names = []   # xor r, r: a write only
+            if ins.group(CS_GRP_RET):
+                live.update(at_ret - written)
+                return
+            if ins.group(CS_GRP_CALL):
+                op = ins.operands[0]
+                if op.type == 2 and calls > 0:   # a direct call: what the callee reads first
+                    live.update(_live(e, op.imm, set(), calls - 1, memo) - written)
+                elif op.type == 3 and not op.mem.base and not op.mem.index and \
+                        emu.STUB <= struct.unpack("<I", bytes(e.read(op.mem.disp & 0xffffffff, 4)))[0] < emu.STUB + emu.STUB_SIZE:
+                    pass   # through an import slot: a Win32 function, no register arguments
+                else:
+                    live.update(set(REGS) - written)
+                written |= {"eax", "ecx", "edx"}
+                at += ins.size
+                continue
+            for n in names:
+                if _FULL.get(n) in REGS and _FULL[n] not in written:
+                    live.add(_FULL[n])
+            for r in wrote:
+                n = md.reg_name(r)
+                if _FULL.get(n) in REGS and len(n) == 3:   # a whole register written
+                    written.add(_FULL[n])
+            if ins.group(CS_GRP_JUMP):
+                op = ins.operands[0]
+                if op.type != 2:   # an indirect jump
+                    live.update(set(REGS) - written)
+                    return
+                if ins.mnemonic == "jmp":
+                    at = op.imm
+                    continue
+                walk(op.imm, written, depth)
+            at += ins.size
+    walk(addr, set(), 0)
+    memo[key] = live
+    return live
+
+
+def live_mask(e, addr):
+    if addr not in _LIVE:
+        live = _live(e, addr, _AT_RET, 3, {})
+        _LIVE[addr] = sum(1 << i for i, r in enumerate(REGS) if r in live)
+    return _LIVE[addr]
 
 
 def merge(spans):
@@ -186,21 +375,29 @@ def merge(spans):
     return out
 
 
-def write_cases(path, name, flags, cases):
+def write_cases(path, name, flags, cases, fallthrough=0):
     with open(path, "wb") as f:
         nb = name.encode()
-        f.write(b"D2NC" + struct.pack("<II", 1, len(nb)) + nb + struct.pack("<II", flags, len(cases)))
+        f.write(b"D2NC" + struct.pack("<II", 2, len(nb)) + nb + struct.pack("<II", flags, len(cases)))
+        if flags & INLINE:
+            f.write(struct.pack("<I", fallthrough))
+
+        def spans_out(spans):
+            f.write(struct.pack("<I", len(spans)))
+            for a, data in spans:
+                f.write(struct.pack("<II", a, len(data)) + data)
         for c in cases:
             f.write(struct.pack("<7I", *(c["regs"][r] & 0xffffffff for r in REGS)))
             f.write(struct.pack("<I", len(c["args"])) + b"".join(struct.pack("<I", v & 0xffffffff) for v in c["args"]))
-            for spans in (c["before"],):
-                f.write(struct.pack("<I", len(spans)))
-                for a, data in spans:
-                    f.write(struct.pack("<II", a, len(data)) + data)
+            spans_out(c["before"])
             f.write(struct.pack("<I", c["eax"] & 0xffffffff))
-            f.write(struct.pack("<I", len(c["after"])))
-            for a, data in c["after"]:
-                f.write(struct.pack("<II", a, len(data)) + data)
+            spans_out(c["after"])
+            if flags & INLINE:
+                f.write(struct.pack("<I", len(c["arrivals"])))
+                for a in c["arrivals"]:
+                    f.write(struct.pack("<II", a["target"], a["live"]))
+                    f.write(struct.pack("<7I", *(a["regs"][r] & 0xffffffff for r in REGS)))
+                    spans_out(a["spans"])
 
 
 # ---- the natives' inputs -------------------------------------------------------
@@ -1501,6 +1698,226 @@ def dcc_cell(g, rng, count):
         yield g.run(0x0060b7b0, (bit_stream(g, rng, 16), prev), ecx=pentry, edx=eq, esi=cell)
 
 
+# ---- the in-line natives: loops' steps ---------------------------------------------------
+# Each is a call patched over a loop's step (install_slot_steps); the game's
+# code runs from that site, as Game.exe has it. A frame in the window stands
+# for the function's (ebp), so its locals are compared too.
+
+SLOTS, SLOTS_END = 0x00882d38, 0x00883d38
+
+
+def frame(g):
+    f = g.block(0x100)
+    return f + 0x80   # ebp: locals below, arguments above
+
+
+def slot_values(g, rng):
+    """The 1024 slots: nearly all empty (0 or -1), some runs of them full."""
+    full = rng.choice((0.0, 0.002, 0.01, 0.1))
+    g.put(SLOTS, b"".join(struct.pack("<I", rng.getrandbits(32) if rng.random() < full else rng.choice((0, 0xffffffff)))
+                          for _ in range(1024)))
+
+
+def slot_step_a(g, rng, count):
+    """52fd2c (ebx the slot): to the next slot neither 0 nor -1, resumed at
+    the loop's top (52fc90; the game's work at 52fca3), or the exit."""
+    for _ in range(count):
+        g.begin()
+        slot_values(g, rng)
+        p = SLOTS + 4 * rng.choice((0, rng.randrange(1024), 1022, 1023))
+        yield g.run_inline(0x0052fd2c, {0x0052fc90, 0x0052fd3b}, {0x0052fca3, 0x0052fd3b}, True,
+                           limit=2048, ebx=p, ebp=frame(g), ecx=rng.getrandbits(32), eax=rng.getrandbits(32))
+
+
+def slot_step_b(g, rng, count):
+    """52fe94 ([ebp+8] and eax the slot): the same, resumed at 52fde5 (the
+    work at 52fdf8), or the exit."""
+    for _ in range(count):
+        g.begin()
+        slot_values(g, rng)
+        p = SLOTS + 4 * rng.choice((0, rng.randrange(1024), 1022, 1023))
+        f = frame(g)
+        g.w32(f + 8, p)
+        yield g.run_inline(0x0052fe94, {0x0052fde5, 0x0052fea8}, {0x0052fdf8, 0x0052fea8}, True,
+                           limit=2048, eax=p, ebp=f, ebx=rng.getrandbits(32))
+
+
+def cell_grid(g, rng, n, lists):
+    """n cells of 0x24 bytes, their lists at the given offsets mostly empty."""
+    cells = g.block(0x24 * n + 0x24)
+    busy = rng.choice((0.0, 0.01, 0.05, 0.3))
+    for k in range(n):
+        for o in lists:
+            if rng.random() < busy:
+                g.w32(cells + 0x24 * k + o, g.block(0x20))
+    return cells
+
+
+def cells_step_a(g, rng, count):
+    """4df1f0 (edi the cell's +0x14, ebx the cells left, [ebp-0x34] and
+    [ebp-0x1c] their copies): to the next cell with a +0x14 list (4df1ff)
+    or a +0x18 one (4df3f8; the work at 4df3ff), or the end (4df454)."""
+    for _ in range(count):
+        g.begin()
+        n = rng.choice((1, 2, 30, 400))
+        cells = cell_grid(g, rng, n, (0x14, 0x18))
+        k = rng.randrange(n)
+        f = frame(g)
+        edi = cells + 0x24 * k + 0x14
+        g.w32(f - 0x1c, edi)
+        g.w32(f - 0x34, n - k)
+        yield g.run_inline(0x004df1f0, {0x004df1ff, 0x004df3f8, 0x004df454}, {0x004df1ff, 0x004df3ff, 0x004df454},
+                           True, limit=4096, edi=edi, ebx=n - k, ebp=f, esi=rng.getrandbits(32))
+
+
+def cells_step_b(g, rng, count):
+    """4df543 ([ebp-8] the cell, esi and [ebp-0xc] the cells left): to the
+    next cell with a +0x10 list (4df557) or +0x14 set (4df5ff; the work, a
+    call, at 4df608), or the end (4df621)."""
+    for _ in range(count):
+        g.begin()
+        n = rng.choice((1, 2, 30, 400))
+        cells = cell_grid(g, rng, n, (0x10, 0x14))
+        k = rng.randrange(n)
+        f = frame(g)
+        g.w32(f - 8, cells + 0x24 * k)
+        g.w32(f - 0xc, n - k)
+        yield g.run_inline(0x004df543, {0x004df557, 0x004df5ff, 0x004df621}, {0x004df557, 0x004df608, 0x004df621},
+                           True, limit=4096, esi=n - k, ebp=f, ecx=rng.getrandbits(32), edi=rng.getrandbits(32))
+
+
+def floor_records_step(g, rng, count):
+    """4de91c (esi the record, [ebp-8] the records left, [ebp+8] the layer,
+    edi the floor): to the next record of the layer that 4de410 would not
+    return on at once (its +0x14 & 0x408, its place against the view's
+    rectangle [[edi+0x24]+0x14], its block's +0x14), resumed at the call's
+    setup (4de8ee; the work in 4de410 at 4de48b), or the end (4de92c)."""
+    for _ in range(count):
+        g.begin()
+        n = rng.choice((1, 2, 20, 200))
+        recs = g.block(0x30 * n + 0x30)
+        view = g.block(0x40)
+        rx, ry = rng.randint(-50, 50), rng.randint(-50, 50)
+        g.put(view + 0x14, struct.pack("<4i", rx, ry, rx + rng.randint(0, 120), ry + rng.randint(0, 120)))
+        this = g.block(0x50)
+        g.w32(this + 0x24, view)
+        g.w32(this + 0x3c, rng.randint(-20, 20)); g.w32(this + 0x40, rng.randint(-20, 20))
+        layer = rng.randrange(3)
+        for k in range(n):
+            r = recs + 0x30 * k
+            g.w32(r, rng.randint(-80, 200)); g.w32(r + 4, rng.randint(-80, 200))
+            g.w32(r + 8, rng.randint(0, 3)); g.w32(r + 0xc, rng.randint(0, 3))
+            g.w32(r + 0x14, (rng.choice((layer, layer, rng.randrange(8))) << 14) |
+                  rng.choice((0, 0, 0x8, 0x400, rng.getrandbits(14))))
+            blk = g.block(0x20)
+            g.w32(blk + 0x14, rng.random() < 0.3)
+            g.w32(r + 0x18, blk)
+        f = frame(g)
+        g.w32(f + 8, layer)
+        k = rng.randrange(n)
+        g.w32(f - 8, n - k)
+        g.w32(f - 0x30, g.block(0x100)); g.w32(f - 0x34, g.block(0x100))
+        yield g.run_inline(0x004de91c, {0x004de8ee, 0x004de92c}, {0x004de48b, 0x004de92c}, True, limit=4096,
+                           esi=recs + 0x30 * k, edi=this, ebp=f, ebx=rng.getrandbits(32))
+
+
+def wall_cells_step(g, rng, count):
+    """4deb00 (eax the cell's +0x1c and [ebp-0x18], ecx the cells left): to
+    the next cell with a +0x1c list (4deb18), or the layer's end (4decd6)."""
+    for _ in range(count):
+        g.begin()
+        n = rng.choice((1, 2, 30, 400))
+        cells = cell_grid(g, rng, n, (0x1c,))
+        k = rng.randrange(n)
+        f = frame(g)
+        at = cells + 0x24 * k + 0x1c
+        g.w32(f - 0x18, at)
+        yield g.run_inline(0x004deb00, {0x004deb18, 0x004decd6}, {0x004deb18, 0x004decd6}, True, limit=4096,
+                           eax=at, ecx=n - k, ebp=f, ebx=rng.getrandbits(32), edx=rng.getrandbits(32))
+
+
+def pick_units_step(g, rng, count):
+    """467d4d (esi the unit; [ebp-0x1c] the cursor's own, [ebp-0x20] the
+    last, [ebp-0x24] the count): over the room's next units (+0xe8) the hit
+    test passes (type 3, rejected by 466870), with the game's notes; resumed
+    at the loop's top (467bd0) or the room's end (467da3). The native stops
+    early where it can't tell (type 5, a unit seen twice, the count past
+    30000, the cursor's own), so a case keeps each arrival there."""
+    for _ in range(count):
+        g.begin()
+        room = relation_world(g, rng)
+        player = unit_record(g, rng, 0, room)
+        g.w32(player + 0xa8, g.block(0x80))
+        g.w32(PLAYER, player)
+        units = []
+        for _ in range(rng.choice((0, 1, 3, 10))):
+            u = unit_record(g, rng, rng.choice((0, 1, 1, 2, 3, 3, 4, 5)), room)
+            g.w32(u + 0xa8, g.block(0x80))
+            g.w32(u + 0xc4, rng.choice((1 << 21, 1 << 21, 0, rng.getrandbits(32))))
+            g.w32(u + 0xc8, rng.choice((0, 0x80, rng.getrandbits(32))))
+            units.append(u)
+        cur = unit_record(g, rng, 1, room)
+        chain = [cur] + units
+        for a, b in zip(chain, chain[1:]):
+            g.w32(a + 0xe8, b)
+        f = frame(g)
+        g.w32(f - 0x1c, rng.choice(units) if units and rng.random() < 0.2 else player)
+        g.w32(f - 0x20, rng.choice(units) if units and rng.random() < 0.1 else 0)
+        g.w32(f - 0x24, rng.choice((0, 5, 0x7530, 0x7531)))
+        yield g.run_inline(0x00467d4d, {0x00467bd0, 0x00467da3}, {0x00467c6a, 0x00467da3, 0x00467dc4, 0x00467da0},
+                           False, limit=64, esi=cur, ebp=f, ebx=rng.getrandbits(32), edi=rng.getrandbits(32))
+
+
+WEATHER, WIND, SINES = 0x007a8a04, 0x007a89c4, 0x00707800
+
+
+def weather_step(g, rng, count):
+    """473330 (esi the particle, ebx its index; [ebp-4] the fall speed): the
+    particles' steps (0x28 bytes from [[0x7a8a04]+0x11c], up to index
+    [..+0x110]), the wind ([0x7a89c4] into a table of 512 sines at
+    0x707800, random here), the sway ([0x7a8a14], [0x7a8a34]), the width
+    ([0x71146c]) and the scroll ([0x7a0678], [0x7a067c]); until a particle
+    comes to its end with its countdown run out (resumed at 473396; the
+    respawn at 47339d) or the last (47345d). _ftol2_sse takes its
+    cvttsd2si path, as the port patches it ([0x994c88] set)."""
+    for _ in range(count):
+        g.begin()
+        g.w32(0x00994c88, 1)
+        g.put(SINES, b"".join(struct.pack("<f", rng.uniform(-1, 1)) for _ in range(512)))
+        g.w32(WIND, rng.getrandbits(16))
+        g.w32(0x007a8a14, rng.random() < 0.5)
+        g.w32(0x007a8a34, rng.getrandbits(16))
+        width = rng.choice((640, 800))
+        g.w32(0x0071146c, width)
+        still = rng.random() < 0.3   # no scroll: still particles stay on the edges below
+        g.w32(0x007a0678, 0 if still else rng.randint(-5, 5)); g.w32(0x007a067c, rng.randint(-5, 5))
+        if still:
+            g.w32(0x007a8a14, 0)
+        n = rng.choice((1, 2, 10, 60))
+        parts = g.block(0x28 * n + 0x28)
+        for k in range(n):
+            q = parts + 0x28 * k
+            alive = rng.random() < 0.8
+            g.w16(q, alive)
+            g.w32(q + 4, rng.randint(-5, 805)); g.w32(q + 8, rng.randint(-50, 700)); g.w32(q + 0xc, rng.randint(0, 700))
+            g.w32(q + 0x14, rng.randint(0, 40)); g.w32(q + 0x18, rng.getrandbits(9))
+            if still and rng.random() < 0.5:   # speed 0: on the width's edge, or just left of 0
+                g.w32(q + 0x14, 0)
+                g.w32(q + 4, rng.choice((width, width - 1, -1, 0)))
+            ended = rng.random() < 0.15
+            g.w32(q + 0x1c, ended); g.w32(q + 0x20, rng.choice((0, 1, 5)) if ended else 0)
+        w = g.block(0x120)
+        g.w32(w + 0x110, n - 1); g.w32(w + 0x11c, parts)
+        g.w32(WEATHER, w)
+        f = frame(g)
+        g.put(f - 4, struct.pack("<f", rng.uniform(0.5, 3.0)))
+        k = rng.randrange(n)
+        # 473396 tests the countdown (+0x20) of every particle at its end;
+        # the respawn, the work, is past it (47339d).
+        yield g.run_inline(0x00473330, {0x00473396, 0x0047345d}, {0x0047339d, 0x0047345d}, True, limit=4096,
+                           esi=parts + 0x28 * k, ebx=k, ebp=f, edi=rng.getrandbits(32))
+
+
 # name: (generator, flags). EAX is dead after the light stamps (their one
 # caller overwrites it), so it is not compared there.
 NATIVES = {
@@ -1559,6 +1976,15 @@ NATIVES = {
     # A translation-time intrinsic: it changes no register its one caller
     # (0x60cbbe) reads (d2_native.cpp, at its install).
     "DccCell": (dcc_cell, 0),
+    # The in-line natives: (generator, flags, the address after the patch).
+    "SlotStepA": (slot_step_a, INLINE | EXACT, 0x0052fd3b),
+    "SlotStepB": (slot_step_b, INLINE | EXACT, 0x0052fea8),
+    "CellStepA": (cells_step_a, INLINE | EXACT, 0x004df1ff),
+    "CellStepB": (cells_step_b, INLINE | EXACT, 0x004df557),
+    "FloorRecordStep": (floor_records_step, INLINE | EXACT, 0x004de92c),
+    "WallCellStep": (wall_cells_step, INLINE | EXACT, 0x004deb13),
+    "PickUnitStep": (pick_units_step, INLINE, 0x00467d61),
+    "WeatherStep": (weather_step, INLINE | EXACT, 0x0047333a),
 }
 
 
@@ -1573,7 +1999,7 @@ def main():
     os.makedirs(args.out, exist_ok=True)
     names = args.only.split(",") if args.only else list(NATIVES)
     for name in names:
-        fn, flags = NATIVES[name]
+        fn, flags, *rest = NATIVES[name]
         g = Gen(args.exe)
         rng = random.Random(f"{args.seed}:{name}")
         cases, dropped = [], 0
@@ -1582,7 +2008,7 @@ def main():
                 dropped += 1
             else:
                 cases.append(case)
-        write_cases(os.path.join(args.out, f"{name}.cases"), name, flags, cases)
+        write_cases(os.path.join(args.out, f"{name}.cases"), name, flags, cases, *rest)
         print(f"{name}: {len(cases)} cases" + (f", {dropped} left out (the game asserted, faulted or wrote outside)" if dropped else ""))
     return 0
 
