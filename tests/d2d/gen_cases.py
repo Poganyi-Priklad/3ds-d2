@@ -1402,6 +1402,105 @@ def floor_tile(g, rng, count):
         yield g.run(0x004f8b80, (y, light), ecx=tile, edx=x)
 
 
+# ---- DCC: the pixel buffer and the cells -----------------------------------------------
+# A bit stream: +0 its first word, +4 the current word, +0xc the bit in it.
+
+def bit_stream(g, rng, words, pos=None):
+    data = g.alloc(4 * words + 16)
+    g.put(data, bytes(rng.getrandbits(8) for _ in range(4 * words + 16)))
+    st = g.block(0x10)
+    g.w32(st, data)
+    at = data + 4 * rng.randint(0, 2)
+    g.w32(st + 4, at)
+    g.w32(st + 0xc, rng.randint(0, 31) if pos is None else pos)
+    return st
+
+
+def dcc_pixel_buffer(g, rng, count):
+    """60b9a0([8]=frame set, [c]=cell slots, [10]=equal-cell stream or 0,
+    [14]=pixel-mask stream, [18]=encoding stream or 0, [1c]=raw pixels,
+    [20]=pixel codes, [24]=&{entries, bytes}, [28]=&code bits used): a frame
+    set (+4 its frames of 0x2c: +4 width, +8 height, +0xc x, +0x10 y, +0x20,
+    +0x24, +0x28 top-down; +8 / +0xc the set's box, +0x1c the frame count,
+    +0x28 cells a row), frames empty and not, cells with a last entry and
+    without; every stream at any bit."""
+    for _ in range(count):
+        g.begin()
+        nframes = rng.choice((0, 1, 1, 2, 5))
+        sx, sy = rng.randint(-5, 5), rng.randint(-5, 5)
+        frames = g.block(0x2c * max(nframes, 1))
+        extent_x = extent_y = 0
+        for k in range(nframes):
+            f = frames + 0x2c * k
+            empty = rng.random() < 0.15
+            w, h = (0, 0) if empty else (rng.randint(1, 40), rng.randint(1, 40))
+            if empty and rng.random() < 0.5:
+                w = rng.randint(1, 9)
+            bx, by = rng.randint(0, 20), rng.randint(0, 20)
+            topdown = rng.random() < 0.5
+            g.w32(f + 4, w); g.w32(f + 8, h)
+            g.w32(f + 0xc, bx + sx)
+            g.w32(f + 0x10, by + sy + (0 if topdown else h))
+            g.w32(f + 0x20, rng.getrandbits(16)); g.w32(f + 0x24, rng.randint(0, 64))
+            g.w32(f + 0x28, topdown)
+            extent_x, extent_y = max(extent_x, bx + w), max(extent_y, by + h)
+        cols = extent_x // 4 + 2
+        cells = cols * (extent_y // 4 + 2)
+        fs = g.block(0x30)
+        g.w32(fs + 4, frames); g.w32(fs + 8, sx); g.w32(fs + 0xc, sy)
+        g.w32(fs + 0x1c, nframes); g.w32(fs + 0x28, cols)
+        slots = g.block(20 * cells)
+        for k in range(cells):
+            if rng.random() < 0.5:
+                e = g.alloc(4)
+                g.put(e, bytes(rng.getrandbits(8) for _ in range(4)))
+                g.w32(slots + 20 * k, e)
+        words = 8 * cells + 16
+        eq = bit_stream(g, rng, words) if rng.random() < 0.7 else 0
+        enc = bit_stream(g, rng, words) if rng.random() < 0.6 else 0
+        streams = [bit_stream(g, rng, words) for _ in range(3)]   # mask, raw, codes
+        out = g.block(4 * cells + 16)
+        pbe = g.block(8)
+        g.w32(pbe, out)
+        used = g.block(4)
+        yield g.run(0x0060b9a0, (fs, slots, eq, streams[0], enc, streams[1], streams[2], pbe, used))
+
+
+def dcc_cell(g, rng, count):
+    """60b7b0(ecx=&entry, edx=equal-cell stream or 0, esi=cell, [8]=pixel
+    stream, [c]=previous cell): a cell (+0 its 4-colour entry, +4 pixels, +8
+    stride, +0xc width, +0x10 height; 1 to 5 each way) filled from the
+    entry's colours (0, 1 or 2 bits a pixel by its distinct leading
+    colours), or copied from the previous cell (sizes alike, the same
+    pixels, or not: cleared), or with no previous entry."""
+    for _ in range(count):
+        g.begin()
+        stride = rng.choice((5, 8, 64))
+        pix = g.alloc(stride * 6 + 16)
+        g.put(pix, bytes(rng.getrandbits(8) for _ in range(stride * 6 + 16)))
+        def cell_rec(w, h, pixels, entry):
+            c = g.block(0x14)
+            g.w32(c, entry); g.w32(c + 4, pixels); g.w32(c + 8, stride)
+            g.w32(c + 0xc, w); g.w32(c + 0x10, h)
+            return c
+        colors = bytes(rng.choice((rng.getrandbits(8), 7)) for _ in range(4))
+        entry = g.alloc(4)
+        g.put(entry, rng.choice((colors, colors[:1] * 4, colors[:2] + colors[1:2] * 2, colors[:1] * 2 + colors[2:])))
+        w, h = rng.randint(1, 5), rng.randint(1, 5)
+        cell = cell_rec(w, h, pix, entry)
+        palette = g.alloc(16)
+        g.put(palette, bytes(rng.getrandbits(8) for _ in range(16)))
+        pentry = g.block(4)
+        g.w32(pentry, palette)
+        prev_pix = rng.choice((pix, g.alloc(stride * 6 + 16)))
+        if prev_pix != pix:
+            g.put(prev_pix, bytes(rng.getrandbits(8) for _ in range(stride * 6 + 16)))
+        pw, ph = (w, h) if rng.random() < 0.6 else (rng.randint(1, 5), rng.randint(1, 5))
+        prev = cell_rec(pw, ph, prev_pix, entry if rng.random() < 0.8 else 0)
+        eq = bit_stream(g, rng, 4) if rng.random() < 0.6 else 0
+        yield g.run(0x0060b7b0, (bit_stream(g, rng, 16), prev), ecx=pentry, edx=eq, esi=cell)
+
+
 # name: (generator, flags). EAX is dead after the light stamps (their one
 # caller overwrites it), so it is not compared there.
 NATIVES = {
@@ -1455,6 +1554,11 @@ NATIVES = {
     "LightGrid": (light_grid, 0),
     "LightBlock": (light_block, 0),
     "FloorTile": (floor_tile, 0),
+    # Its one caller (60c9fc) overwrites EAX at once (60ca06).
+    "DccPixelBuffer": (dcc_pixel_buffer, 0),
+    # A translation-time intrinsic: it changes no register its one caller
+    # (0x60cbbe) reads (d2_native.cpp, at its install).
+    "DccCell": (dcc_cell, 0),
 }
 
 

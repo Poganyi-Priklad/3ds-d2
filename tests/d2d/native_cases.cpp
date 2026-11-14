@@ -98,6 +98,13 @@ struct TestEvent : d2rt::Waitable {
 };
 constexpr uint32_t kEventWaiting = 0x82000000, kEventSet = 0x82000001;
 
+// DccCell is an intrinsic (dcc_cell_intrin), not a hook: its work as a call.
+uint32_t dcc_cell_case(Cpu &c)
+{
+    dcc_cell_do(c.reg(R_ECX), c.reg(R_EDX), c.reg(R_ESI), c.arg(0), c.arg(1));
+    return 0;
+}
+
 using NativeFn = uint32_t (*)(Cpu &);
 struct Native {
     const char *name;
@@ -124,6 +131,7 @@ const Native kNatives[] = {
     {"Dc6Remap2", dc6_remap2},           {"Dc6Blend1", dc6_blend1},
     {"Dc6Shadow", dc6_shadow},           {"LightGrid", light_grid},
     {"LightBlock", light_block},         {"FloorTile", floor_tile},
+    {"DccPixelBuffer", dcc_pixel_buffer}, {"DccCell", dcc_cell_case},
 };
 
 struct Span {
