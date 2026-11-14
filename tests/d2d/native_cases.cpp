@@ -116,6 +116,13 @@ const Native kNatives[] = {
     {"SpriteCacheTouch", cache_touch},   {"SpritePath", sprite_path},
     {"LockedLookup", locked_lookup},     {"CurrentLookup", current_lookup},
     {"CurrentUnlock", current_unlock},   {"LoadsPending", loads_pending},
+    {"FloorIsoFlat", floor_iso_flat},    {"RleFlat", rle_flat},
+    {"RleFlatClipped", rle_flat_clipped}, {"WallBlockCopy", wall_block_copy},
+    {"Dc6Copy", dc6_copy},               {"Dc6CopyClipped", dc6_copy_clipped},
+    {"Dc6Blend", dc6_blend},             {"Dc6BlendClipped", dc6_blend_clipped},
+    {"Dc6Remap", dc6_remap},             {"Dc6RemapB", dc6_remap},
+    {"Dc6Remap2", dc6_remap2},           {"Dc6Blend1", dc6_blend1},
+    {"Dc6Shadow", dc6_shadow},
 };
 
 struct Span {

@@ -1103,6 +1103,213 @@ def loads_pending(g, rng, count):
         yield g.run(0x005ff2a0, ())
 
 
+# ---- the blitters -----------------------------------------------------------------------
+# A small frame buffer per case (random pixels: the blends read them), its
+# rows FB_PITCH apart, and streams that stay inside it.
+
+FB_PITCH = 512
+PITCH, FB_BASE, ROW_OFF = 0x007d544c, 0x007d5448, 0x007c9828
+CLIP_L, CLIP_R, CLIP_T, CLIP_B = 0x007ca318, 0x007d233c, 0x007d2334, 0x007c97a0
+
+
+def frame_buffer(g, rng, rows, palette=None):
+    fb = g.alloc(FB_PITCH * (rows + 4))
+    n = FB_PITCH * (rows + 4)
+    g.put(fb, bytes(rng.choice(palette) for _ in range(n)) if palette else bytes(rng.getrandbits(8) for _ in range(n)))
+    return fb
+
+
+def table(g, rng, n, palette=None):
+    """A remap table (256), or a blend table (0x10000, indexed by the frame
+    buffer's pixel * 256): with a palette (the frame buffer's only pixel
+    values) only its rows are written, the rest left zero; the cases stay
+    small, and both sides read the same table either way."""
+    t = g.alloc(n)
+    if n == 0x10000 and palette:
+        for v in sorted(set(palette)):
+            g.put(t + 256 * v, bytes(rng.getrandbits(8) for _ in range(256)))
+    else:
+        g.put(t, bytes(rng.getrandbits(8) for _ in range(n)))
+    return t
+
+
+def dc6_stream(rng, rows, width=300):
+    """DC6 rows: literals (0x00..0x7f and their bytes; 0 among them), skips
+    (0x81..0xff), each row ended by 0x80; at most `width` pixels a row."""
+    out = bytearray()
+    for _ in range(rows):
+        x = 0
+        for _ in range(rng.choice((0, 1, 2, 4, 8))):
+            if rng.random() < 0.4:
+                n = min(rng.choice((1, 2, 7, 8, 9, 50, 127)), width - x)
+                if n < 1:
+                    break
+                out.append(0x80 | n)
+            else:
+                n = min(rng.choice((0, 1, 3, 7, 8, 9, 15, 16, 17, 40, 127)), width - x)
+                out.append(n)
+                out += bytes(rng.getrandbits(8) for _ in range(n))
+            x += n
+        out.append(0x80)
+    return bytes(out)
+
+
+def dc6_call(g, rng, clipped, palette=None):
+    """A DC6 blit's common part: the stream, rows, the frame buffer and the
+    destination (bottom-up rows: the pitch negative, as the game's; or not),
+    and for the clipped ones x0, clipL, clipR around the row."""
+    rows = rng.choice((1, 2, 5, 16, 40))
+    fb = frame_buffer(g, rng, rows, palette)
+    stream = dc6_stream(rng, rows)
+    src = g.alloc(len(stream) + 16)
+    g.put(src, stream)
+    up = rng.random() < 0.7
+    x = rng.randint(0, FB_PITCH - 300)
+    dst = fb + FB_PITCH * ((rows + 1) if up else 1) + x
+    pitch = -FB_PITCH if up else FB_PITCH
+    args = [rows, pitch]
+    if clipped:
+        x0 = rng.randint(-100, 400)
+        cl = rng.choice((0, rng.randint(-50, 300), x0, x0 + 5))
+        cr = rng.choice((cl, cl + rng.randint(1, 300), rng.randint(-50, 640), 640))
+        args += [x0, cl, cr]
+    return src, dst, args
+
+
+def dc6_blit(addr, clipped, tables):
+    """A generator for one DC6 blitter at addr: tables are the sizes of its
+    table arguments (256: a remap, 0x10000: a blend)."""
+    def gen(g, rng, count):
+        for _ in range(count):
+            g.begin()
+            palette = [rng.getrandbits(8) for _ in range(8)] if 0x10000 in tables else None
+            src, dst, args = dc6_call(g, rng, clipped, palette)
+            args += [table(g, rng, n, palette) for n in tables]
+            yield g.run(addr, tuple(args), ecx=src, edx=dst)
+    gen.__doc__ = f"{addr:x}(ecx=src, edx=dst, [8]=rows, [c]=pitch{', x0, clipL, clipR' if clipped else ''}" \
+                  f"{''.join(', table' for _ in tables)})"
+    return gen
+
+
+def dc6_shadow(g, rng, count):
+    """608d60(ecx=frame, edx=dst, [8]=x, [c]=clipL, [10]=clipR, [14]=width,
+    [18]=rows to skip / 2, [1c]=rows, [20]=T, [24]=c): the frame's stream at
+    +0x20 (signed: b >= 0 a literal, 0x81..0xff a skip, 0x80 a row's end),
+    its first 2 * [18] rows passed over, then every other row drawn a row up
+    and a pixel left; clips both 0 (none) or not; a blend table or none."""
+    for _ in range(count):
+        g.begin()
+        rows, skip = rng.choice((1, 2, 5, 20)), rng.choice((0, 0, 1, 3))
+        palette = [rng.getrandbits(8) for _ in range(8)]
+        fb = frame_buffer(g, rng, rows, palette)
+        stream = dc6_stream(rng, 2 * skip + 2 * rows + 1, 200)
+        frame = g.alloc(0x20 + len(stream) + 16)
+        g.put(frame + 0x20, stream)
+        x = rng.randint(rows + 2, FB_PITCH - 210)
+        dst = fb + FB_PITCH * (rows + 1) + x
+        cl, cr = rng.choice(((0, 0), (0, 0), (rng.randint(0, 300), rng.randint(0, 640)), (x, x + 100)))
+        t = table(g, rng, 0x10000, palette) if rng.random() < 0.6 else 0
+        yield g.run(0x00608d60, (x, cl, cr, FB_PITCH, skip, rows, t, rng.getrandbits(8)), ecx=frame, edx=dst)
+
+
+def floor_globals(g, rng, fb, rows):
+    g.w32(PITCH, FB_PITCH)
+    g.w32(FB_BASE, fb)
+    g.w32(CLIP_L, rng.choice((0, rng.randint(0, 200))))
+    g.w32(CLIP_R, rng.choice((640, rng.randint(100, 640))))
+    g.w32(CLIP_T, rng.choice((0, rng.randint(0, rows))))
+    g.w32(CLIP_B, rng.choice((480, rng.randint(0, rows + 4))))
+
+
+def floor_iso_flat(g, rng, count):
+    """4f69b0(ecx=src, edx=dst, [8]=tbl): a 256-byte iso block, 15 rows of
+    the game's shape (its tables 0x72db48...), remapped, at the pitch
+    [0x7d544c]."""
+    for _ in range(count):
+        g.begin()
+        fb = frame_buffer(g, rng, 16)
+        g.w32(PITCH, FB_PITCH)
+        src = table(g, rng, 256)
+        yield g.run(0x004f69b0, (table(g, rng, 256),), ecx=src, edx=fb + rng.randint(0, FB_PITCH - 80))
+
+
+def rle_pairs(rng, rows, width=300):
+    """The floor's RLE: (skip, run) pairs and the run's bytes; (0, 0) ends a
+    row; runs of 0 and over 32 among them (drawn as nothing)."""
+    out = bytearray()
+    for _ in range(rows):
+        x = 0
+        for _ in range(rng.choice((0, 1, 2, 5))):
+            skip = rng.choice((0, 1, 5, 30))
+            run = rng.choice((0, 1, 4, 8, 31, 32, 33, 40))
+            if skip == 0 and run == 0:
+                run = 1
+            if x + skip + run > width:
+                break
+            out += bytes((skip, run)) + bytes(rng.getrandbits(8) for _ in range(run))
+            x += skip + run
+        out += b"\0\0"
+    return bytes(out)
+
+
+def rle_flat(g, rng, count):
+    """4f6f60(ecx=src, edx=dst, [8]=tbl, [c]=rows)."""
+    for _ in range(count):
+        g.begin()
+        rows = rng.choice((1, 2, 8, 32))
+        fb = frame_buffer(g, rng, rows)
+        g.w32(PITCH, FB_PITCH)
+        data = rle_pairs(rng, rows)
+        src = g.alloc(len(data) + 16)
+        g.put(src, data)
+        yield g.run(0x004f6f60, (table(g, rng, 256), rows), ecx=src, edx=fb + rng.randint(0, FB_PITCH - 300))
+
+
+def rle_flat_clipped(g, rng, count):
+    """4f7580(ecx=x0, edx=y0, [8]=src, [c]=dst, [10]=tbl, [14]=rows): the
+    window's clip ([0x7ca318] left, [0x7d233c] right, [0x7d2334] top,
+    [0x7c97a0] bottom) across the block's rows and columns."""
+    for _ in range(count):
+        g.begin()
+        rows = rng.choice((1, 2, 8, 32))
+        fb = frame_buffer(g, rng, rows)
+        floor_globals(g, rng, fb, rows)
+        data = rle_pairs(rng, rows)
+        src = g.alloc(len(data) + 16)
+        g.put(src, data)
+        x0 = rng.randint(-40, 400)
+        yield g.run(0x004f7580, (src, fb + rng.randint(0, FB_PITCH - 300), table(g, rng, 256), rows),
+                    ecx=x0, edx=rng.randint(-8, rows))
+
+
+def wall_block_copy(g, rng, count):
+    """4f7ea0(ecx=src, edx=x, [8]=y): a 32-row RLE block (runs copied as
+    they are, any length) at (x, y) through the row offsets ([0x7c9828]
+    [y]) from the frame buffer ([0x7d5448]); rejected outside one rectangle
+    (0x7d232c, 0x7c978c, 0x7c9794, 0x7d2324), drawn unclipped inside another
+    (0x7ca31c, 0x7c9790, 0x7d2328, 0x7c9784), else clipped by the window."""
+    for _ in range(count):
+        g.begin()
+        fb = frame_buffer(g, rng, 32)
+        floor_globals(g, rng, fb, 32)
+        y = rng.randint(0, 40) - 4
+        for k in range(32):   # [y + k]: the block's rows from the buffer's third
+            g.w32(ROW_OFF + 4 * (y + k), (k + 2) * FB_PITCH)
+        x = rng.randint(-20, FB_PITCH - 300)
+        # each edge on the block's corner, a step either side, or far
+        rect = lambda at: (rng.choice((at - 50, at - 1, at, at + 1)), rng.choice((at - 1, at, at + 1, at + 600)))
+        t, b = rect(y) if rng.random() < 0.3 else (y - 50, y + 600)
+        l, r = rect(x) if rng.random() < 0.3 else (x - 50, x + 600)
+        g.w32(0x007d232c, t); g.w32(0x007c978c, b); g.w32(0x007c9794, l); g.w32(0x007d2324, r)
+        it, ib = rect(y)
+        il, ir = rect(x)
+        g.w32(0x007ca31c, it); g.w32(0x007c9790, ib); g.w32(0x007d2328, il); g.w32(0x007c9784, ir)
+        data = rle_pairs(rng, 32, 250)
+        src = g.alloc(len(data) + 16)
+        g.put(src, data)
+        yield g.run(0x004f7ea0, (y,), ecx=src, edx=x)
+
+
 # name: (generator, flags). EAX is dead after the light stamps (their one
 # caller overwrites it), so it is not compared there.
 NATIVES = {
@@ -1132,6 +1339,23 @@ NATIVES = {
     "CurrentLookup": (current_lookup, COMPARE_EAX),
     "CurrentUnlock": (current_unlock, COMPARE_EAX),
     "LoadsPending": (loads_pending, COMPARE_EAX),
+    # The floor's and walls' EAX is dead: their callers return it to
+    # FloorTile's loop (4f8b80, overwritten at 4f8d8f) or to the renderer's
+    # calls through the tile table (0x72da60, from [0x7c914c]: +4 at 513065
+    # and 6c9365, +0x10 at 513287 and 6c9587, overwritten at once).
+    "FloorIsoFlat": (floor_iso_flat, 0),
+    "RleFlat": (rle_flat, 0),
+    "RleFlatClipped": (rle_flat_clipped, 0),
+    "WallBlockCopy": (wall_block_copy, 0),
+    "Dc6Copy": (dc6_blit(0x00606d40, False, ()), COMPARE_EAX),
+    "Dc6CopyClipped": (dc6_blit(0x00606da0, True, ()), COMPARE_EAX),
+    "Dc6Blend": (dc6_blit(0x00606e40, False, (256, 0x10000)), COMPARE_EAX),
+    "Dc6BlendClipped": (dc6_blit(0x00607060, True, (256, 0x10000)), COMPARE_EAX),
+    "Dc6Remap": (dc6_blit(0x00607e20, False, (256,)), COMPARE_EAX),
+    "Dc6RemapB": (dc6_blit(0x00607680, False, (256,)), COMPARE_EAX),
+    "Dc6Remap2": (dc6_blit(0x006072f0, False, (256, 256)), COMPARE_EAX),
+    "Dc6Blend1": (dc6_blit(0x00608110, False, (0x10000,)), COMPARE_EAX),
+    "Dc6Shadow": (dc6_shadow, COMPARE_EAX),
 }
 
 
