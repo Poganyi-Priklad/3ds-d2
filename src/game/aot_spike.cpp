@@ -59,8 +59,11 @@ constexpr double kTicksPerUs = 1000.0;
 
 // What Bench times: Box86 (the original from its trampoline, nested), the
 // four builds of the compiled code, and our native where there is one.
-enum Variant { kBox86, kSig, kCtx, kSigCalls, kCtxCalls, kNative, kVariants };
-constexpr const char *kVariantNames[kVariants] = {"box86", "sig", "ctx", "sig-calls", "ctx-calls", "native"};
+// kHandedBack: the native's turns it handed back (they then ran nested under
+// Box86, the attempt included), kept apart from Box86's own.
+enum Variant { kBox86, kSig, kCtx, kSigCalls, kCtxCalls, kNative, kHandedBack, kVariants };
+constexpr const char *kVariantNames[kVariants] = {"box86", "sig", "ctx", "sig-calls", "ctx-calls", "native",
+                                                  "handed-back"};
 
 struct Root {
     const AotRoot *r = nullptr, *calls = nullptr, *journal = nullptr;
@@ -180,7 +183,7 @@ uint32_t enter(Root &R, Cpu &c)
     AotMode m = g_mode;
     Variant v = kSig;
     if (m == AotMode::Bench) {
-        const int n = R.native ? kVariants : kNative;
+        const int n = R.native ? kHandedBack : kNative;
         v = (Variant)(R.turn++ % (uint32_t)n);
         if (v == kBox86 && (R.turn & 63) == 1 && g_empty) {   // now and then, the cost of a nested run itself
             uint32_t e[8];
@@ -217,7 +220,7 @@ uint32_t enter(Root &R, Cpu &c)
                 for (int k = 0; k < 8; k++)
                     c.set_reg(k, regs[k]);
                 nested_run(c, R.tramp, regs);
-                v = kBox86;
+                v = kHandedBack;
             } else {
                 c.regs_gp(regs);
                 regs[0] = eax;
