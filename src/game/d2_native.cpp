@@ -3578,8 +3578,8 @@ uint32_t skill_level_checked(Cpu &c)
 // b: 0 or 1. Outside a town (the level of a's room: 6426a0's table), only
 // reads:
 //   a unit of type 1 the roster knows (0x7bb5bc: +8 id, +0xc its player,
-//   next +0x30) counts as that player (type 0); so does a unit with +0xc8's
-//   bit 10 while b's +0x94 is 0 (its +0x98's); b likewise;
+//   next +0x30) counts as that player (type 0); so does a monster with
+//   +0xc8's bit 10 while b's +0x94 is 0 (its +0x98's); b likewise;
 //   the same type and id: 0;
 //   b a monster: 1 for its monstats flag 4, 0 for flag 5 (4638a0);
 //   a player and b of type 2 or 4: 1;
@@ -3652,16 +3652,16 @@ bool unit_relation(uint32_t a, uint32_t b, uint32_t &r)
             return false;
     }
     uint32_t at = U32(a), aid = U32(a + 0xc), bt = U32(b), bid = U32(b + 0xc);
-    if (at == 1) {
+    if (at == 1) {   // as for b: only a monster (465d37), found in the roster or not
         const uint32_t m = roster_player(aid);
         if (m != 0xffffffffu) {
             at = 0;
             aid = m;
         }
-    }
-    if ((U32(a + 0xc8) >> 10 & 1) && !U32(b + 0x94)) {
-        at = 0;
-        aid = U32(a + 0x98);
+        if ((U32(a + 0xc8) >> 10 & 1) && !U32(b + 0x94)) {
+            at = 0;
+            aid = U32(a + 0x98);
+        }
     }
     if (bt == 1) {
         const uint32_t m = roster_player(bid);

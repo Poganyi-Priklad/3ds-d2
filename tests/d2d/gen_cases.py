@@ -616,6 +616,211 @@ def pk_explode(g, rng, count):
         yield g.run(0x0041e000, (src, len(data)), ecx=dst, edx=size)
 
 
+# ---- units: their relation, skill levels and the cursor's filter ---------------------
+# A unit: +0 type (0 player, 1 monster, 2 object, 3 missile, 4 item, 5 tile),
+# +4 class, +0xc id, +0x2c its path (types 2, 4, 5: [path] the room; others
+# [path+0x1c]), +0x5c its stat holder, +0x94, +0x98, +0xc4 and +0xc8 flags.
+# A stat holder: +0x10 (sign bit: the full list at +0x48, else the base list
+# at +0x24: (stat << 16 | layer, value) pairs sorted, (int16)[list+4] of
+# them), +0x3c and +0x40 its stat lists (each a holder, +0x14 its state,
+# +0x2c the next), +0x44 its owner, +0x58 the state bits.
+
+TOWNS = (1, 40, 75, 103, 109)
+
+
+def stat_rows(g, rng, tables, nrows):
+    rows = g.block(nrows * 0x144)
+    g.w32(tables + 0xbcc, rows)
+    g.w32(tables + 0xbd4, nrows)
+    for r in range(nrows):
+        if rng.random() < 0.2:
+            g.w8(rows + r * 0x144 + 5, rng.getrandbits(8))
+            g.w8(rows + r * 0x144 + 0x18, rng.randint(0, 8))
+            g.w32(rows + r * 0x144 + 0x2c, rng.randint(-5, 20))
+    g.w8(0x006ce270, rng.getrandbits(8))
+
+
+def stat_holder(g, rng, keys, full=None, owner_type=None):
+    """A holder with values for the given keys (stat << 16 | layer), and a
+    few others; its full or base list."""
+    h = g.block(0x80)
+    full = rng.random() < 0.6 if full is None else full
+    g.w32(h + 0x10, (0x80000000 if full else 0) | rng.getrandbits(16))
+    keys = sorted({k for k in keys if rng.random() < 0.7} | {rng.getrandbits(24) for _ in range(rng.randint(0, 3))})
+    pairs = g.block(max(len(keys), 1) * 8)
+    for k, key in enumerate(keys):
+        g.w32(pairs + 8 * k, key)
+        g.w32(pairs + 8 * k + 4, rng.choice((0, 1, 2, 3, 4, rng.randint(-3, 30), rng.randint(0, 0x7fff))))
+    lst = h + (0x48 if full else 0x24)
+    g.w32(lst, pairs)
+    g.w16(lst + 4, len(keys))
+    if owner_type is not None or rng.random() < 0.5:
+        owner = g.block(0x10)
+        g.w32(owner, rng.randint(0, 3) if owner_type is None else owner_type)
+        g.w32(h + 0x44, owner)
+    return h
+
+
+def unit_record(g, rng, utype, room=None):
+    u = g.block(0x100)
+    g.w32(u, utype)
+    g.w32(u + 4, rng.randint(0, 6) if utype == 0 else rng.randint(0, 40))
+    g.w32(u + 0xc, rng.choice((1, 2, 3, rng.randint(0, 40), rng.getrandbits(32))))
+    path = g.block(0x40)
+    g.w32(u + 0x2c, path)
+    if room is not None:
+        g.w32(path if utype in (2, 4, 5) else path + 0x1c, room)
+    return u
+
+
+def relation_world(g, rng):
+    """The tables the relation reads: monstats (+0xa78 rows of 0x1a8, +0xa80
+    of them; +0x18 the index into +0xa90's rows of 0x134, +0xa98 of them,
+    flags at +4), the stat table (stat 0xac), and a room on a level, a town
+    sometimes."""
+    tables = g.block(0xc00)
+    g.w32(0x00744304, tables)
+    nmon, nflag = rng.choice((0, 41, 41)), rng.choice((0, 20, 20))
+    mon, flg = g.block(max(nmon, 1) * 0x1a8), g.block(max(nflag, 1) * 0x134)
+    g.w32(tables + 0xa78, mon); g.w32(tables + 0xa80, nmon)
+    g.w32(tables + 0xa90, flg); g.w32(tables + 0xa98, nflag)
+    for k in range(nmon):
+        g.w16(mon + k * 0x1a8 + 0x18, rng.choice((rng.randrange(max(nflag, 1)),) * 4 + (-1, nflag)))
+    for k in range(nflag):
+        g.w8(flg + k * 0x134 + 4, rng.choice((0, 0x10, 0x20, 0x30, rng.getrandbits(8))))
+    stat_rows(g, rng, tables, rng.choice((0xad, 0xad, 0x10)))
+    level = g.block(0x200)
+    g.w32(level + 0x1d0, rng.choice(TOWNS) if rng.random() < 0.15 else rng.choice((0, 0x6e, rng.randint(1, 0x6d))))
+    room2 = g.block(0x80)
+    g.w32(room2 + 0x58, level)
+    room = g.block(0x80)
+    g.w32(room + 0x10, room2)
+    return room
+
+
+def relation_unit(g, rng, room):
+    """A unit for the relation: any type; sometimes in the roster as a player,
+    sometimes with +0xc8's bit 10 (a summoned unit, its owner at +0x98), and
+    sometimes an alignment (stat 0xac of a state 0x69 list)."""
+    u = unit_record(g, rng, rng.choice((0, 0, 1, 1, 1, 1, 2, 3, 4)), room)
+    if rng.random() < 0.2:
+        g.w32(u + 0xc8, 1 << 10)
+    g.w32(u + 0x94, rng.choice((0, 0, 1)))
+    g.w32(u + 0x98, rng.choice((1, 2, rng.randint(0, 40))))
+    if rng.random() < 0.8:
+        h = g.block(0x80)
+        g.w32(h + 0x10, 0x80000000 if rng.random() < 0.8 else 0)
+        g.w32(u + 0x5c, h)
+        prev = None
+        for at in (0x3c, 0x40):
+            for _ in range(rng.choice((0, 1, 2))):
+                lst = stat_holder(g, rng, [0xac << 16] * 3)
+                g.w32(lst + 0x14, rng.choice((0x69, 0x69, 3, 0)))
+                if prev is None:
+                    g.w32(h + at, lst)
+                else:
+                    g.w32(prev + 0x2c, lst)
+                prev = lst
+            prev = None
+    return u
+
+
+def unit_relation(g, rng, count):
+    """465c60(ecx=a, edx=b): units of every type, the same unit twice, ids
+    alike and not, the roster ([0x7bb5bc]: +8 id, +0xc its player, +0x30 the
+    next), monsters with flags 4 and 5, alignments; a town and two players
+    (both left to the game's code), a null unit."""
+    for i in range(count):
+        g.begin()
+        room = relation_world(g, rng)
+        a = relation_unit(g, rng, room)
+        b = a if rng.random() < 0.08 else relation_unit(g, rng, room)
+        if rng.random() < 0.3:   # the same id
+            g.put(b + 0xc, g.e.read(a + 0xc, 4))
+        prev = None
+        for _ in range(rng.choice((0, 0, 1, 3))):
+            e = g.block(0x40)
+            g.put(e + 8, g.e.read(rng.choice((a, b)) + 0xc, 4) if rng.random() < 0.6 else struct.pack("<I", rng.randint(0, 40)))
+            g.w32(e + 0xc, rng.choice((1, 2, 3, rng.randint(0, 40))))
+            if prev is None:
+                g.w32(0x007bb5bc, e)
+            else:
+                g.w32(prev + 0x30, e)
+            prev = e
+        if i % 31 == 0:
+            a = 0
+        yield g.run(0x00465c60, (), ecx=a, edx=b)
+
+
+def unit_pick_filter(g, rng, count):
+    """466870(ecx=unit, edx, [8], [c]): units with and without +0xc4's bit 21
+    and +0xc8's bit 7 (those the native answers; the rest go on to the
+    game's code), a null unit; the player ([0x7a6a70]) in a room, which the
+    game's code after the tests asks about."""
+    for i in range(count):
+        g.begin()
+        room = relation_world(g, rng)
+        player = unit_record(g, rng, 0, room)
+        g.w32(player + 0xa8, g.block(0x80))   # its inventory (620190 asserts one)
+        g.w32(PLAYER, player)
+        u = unit_record(g, rng, rng.randint(0, 5), room)
+        g.w32(u + 0xa8, g.block(0x80))
+        g.w32(u + 0xc4, rng.getrandbits(32) & rng.choice((0xffffffff, ~(1 << 21) & 0xffffffff, 1 << 21)))
+        g.w32(u + 0xc8, rng.getrandbits(32) & rng.choice((0xffffffff, ~0x80 & 0xffffffff, 0x80)))
+        yield g.run(0x00466870, (rng.getrandbits(8), rng.getrandbits(8)), ecx=0 if i % 29 == 0 else u,
+                    edx=rng.getrandbits(8))
+
+
+def skill_level(g, rng, count):
+    """644180(esi=unit, [8]=skill): the skill's base level (+0x2c), +0x28, its
+    record ([skill]: the id at +0, the class at +0xc, +0x1dc), the skills
+    table (+0xb98 rows of 0x23c, +0xba0 of them; +0x194 the description's
+    index into +0xb8c's rows of 0x120, +0xb94 of them; the tab at +2), state
+    0x86 (+0xc states: holder +0x58's bits), and the unit's stats 0x7f, 0x53,
+    0xbc, 0x61, 0x7e, 0x6b; players of the skill's class and not, monsters,
+    no description (left to the game's code), null records."""
+    for i in range(count):
+        g.begin()
+        tables = g.block(0xc00)
+        g.w32(0x00744304, tables)
+        stat_rows(g, rng, tables, rng.choice((0xbd, 0xbd, 0x80)))
+        g.w32(tables + 0xc4, rng.choice((0x87, 0x100, 0x40)))
+        nskill, ndesc = rng.choice((1, 10, 40)), rng.choice((0, 5, 40))
+        skills, descs = g.block(nskill * 0x23c), g.block(max(ndesc, 1) * 0x120)
+        g.w32(tables + 0xb98, skills); g.w32(tables + 0xba0, nskill)
+        g.w32(tables + 0xb8c, descs); g.w32(tables + 0xb94, ndesc)
+        for k in range(nskill):
+            row = skills + k * 0x23c
+            g.w16(row, k)
+            g.w8(row + 0xc, rng.choice((0, 1, 2, 3, 4, 5, 6, 0xff)) if rng.random() < 0.4 else 3)   # often the unit's
+            g.w8(row + 0x1dc, rng.choice((0, 0, rng.randint(1, 40))))
+            g.w16(row + 0x194, rng.choice((rng.randrange(max(ndesc, 1)), rng.randrange(max(ndesc, 1)), -1, ndesc)))
+        for k in range(ndesc):
+            g.w8(descs + k * 0x120 + 2, rng.choice((0, 1, 2, 3)))
+        sid = rng.choice((rng.randrange(nskill), rng.randrange(nskill), -1, nskill))
+        skill = g.block(0x40)
+        if i % 19:
+            rec = skills + (sid % nskill) * 0x23c if 0 <= sid < nskill else g.block(0x200)
+            if not 0 <= sid < nskill:
+                g.w16(rec, sid)
+            g.w32(skill, rec)
+        g.w32(skill + 0x2c, rng.randint(0, 30))
+        g.w32(skill + 0x28, rng.choice((0, 0, 1, -1)))
+        utype = rng.choice((0, 0, 0, 0, 1, 1, 3, 2))
+        unit = unit_record(g, rng, utype)
+        g.w32(unit + 4, rng.choice((0, 1, 2, 3, 4, 5, 6)) if rng.random() < 0.4 else 3)
+        cls = struct.unpack("<I", g.e.read(unit + 4, 4))[0]
+        keys = [0x7f << 16, 0x53 << 16 | cls] + [0xbc << 16 | (t + cls * 8 - 1) & 0xffff for t in (1, 2, 3)] + \
+            [0x61 << 16 | (sid & 0xffff), 0x6b << 16 | (sid & 0xffff)] + [0x7e << 16 | k for k in range(1, 41)][:rng.randint(0, 40)]
+        if rng.random() < 0.9:
+            h = stat_holder(g, rng, keys)
+            bits = g.block(0x40)
+            g.put(bits, bytes(rng.getrandbits(8) for _ in range(0x40)))
+            g.w32(h + 0x58, bits)
+            g.w32(unit + 0x5c, h)
+        yield g.run(0x00644180, (skill,), esi=0 if i % 37 == 0 else unit)
+
+
 # name: (generator, flags). EAX is dead after the light stamps (their one
 # caller overwrites it), so it is not compared there.
 NATIVES = {
@@ -634,6 +839,9 @@ NATIVES = {
     # 0x41e885): it is SMemFree's leftover in the game, not a result.
     "HuffmanDecode": (huffman, 0),
     "PkExplode": (pk_explode, 0),
+    "UnitRelation": (unit_relation, COMPARE_EAX),
+    "UnitPickFilter": (unit_pick_filter, COMPARE_EAX),
+    "SkillLevel": (skill_level, COMPARE_EAX),
 }
 
 

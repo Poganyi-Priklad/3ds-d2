@@ -73,6 +73,8 @@ const Native kNatives[] = {
     {"UnitWalk", unit_walk},             {"PathSearch", path_search},
     {"AdpcmDecode", adpcm_decode},       {"HuffmanDecode", huffman_decode},
     {"PkExplode", pk_decode},
+    {"UnitRelation", unit_relation_native}, {"UnitPickFilter", unit_pick_filter},
+    {"SkillLevel", skill_level_native},
 };
 
 struct Span {
