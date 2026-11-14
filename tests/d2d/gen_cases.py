@@ -364,7 +364,7 @@ def light_stamp_occluded(g, rng, count):
 # at +0x24, its collision at +0x20 (+0 x, +4 y, +8 width, +0xc height, +0x20
 # a word per subtile), its bounds in subtiles at +0x4c, +0x50, +0x54, +0x58.
 
-MASKS = (0x1, 0x4, 0x804, 0x1805, 0x3c01, 0x1c09, 0x3f11, 0xffff)
+MASKS = (0x1, 0x2, 0x4, 0x20, 0x22, 0x804, 0x1805, 0x3c01, 0x1c09, 0x3f11, 0xffff)
 
 
 def world(g, rng):
@@ -1310,6 +1310,98 @@ def wall_block_copy(g, rng, count):
         yield g.run(0x004f7ea0, (y,), ecx=src, edx=x)
 
 
+# ---- the light grid's cells and the floor's tiles ---------------------------------------
+
+def light_grid(g, rng, count):
+    """4756d0(): the light grid's cells (48 x 48 from [0x7b0a54], [0x7b0a58])
+    whose subtile's collision has 0x22 set, through the rooms from the
+    player's ([0x7a6a70], its path's room): the grid on the rooms, across
+    their edges, off them; no player, a player without a room."""
+    for i in range(count):
+        g.begin()
+        rooms, (x0, y0, x1, y1) = world(g, rng)
+        light_globals(g, rng)
+        g.w32(GRID_X, (rng.randint(x0 - 60, x1 + 10)) >> 0)
+        g.w32(GRID_Y, (rng.randint(y0 - 60, y1 + 10)) >> 0)
+        if i % 23:
+            player = unit_record(g, rng, 0, rng.choice(rooms)[0] if i % 29 else None)
+            g.w32(PLAYER, player)
+        yield g.run(0x004756d0, ())
+
+
+def light_block(g, rng, count):
+    """4ddef0(eax=dst, [8]=tx, [c]=ty, [10]=ambient 0): the light of 8 x 8
+    subtiles around a tile from the light grid (byte 4, and 5-7 with
+    coloured light), cells on, across and off the grid's edges. (With an
+    ambient source the native calls two of the game's functions itself:
+    not cased here.)"""
+    for _ in range(count):
+        g.begin()
+        gx, gy = light_globals(g, rng)
+        dst = g.alloc(64 * 12 + 16)
+        g.put(dst, bytes(rng.getrandbits(8) for _ in range(64 * 12 + 16)))
+        tx, ty = gx + rng.randint(-3, 50), gy + rng.randint(-3, 50)
+        yield g.run(0x004ddef0, (tx, ty, 0), eax=dst)
+
+
+SHADES, FLAT_LIGHT, NO_GOURAUD = 0x007d2348, 0x007d2340, 0x0072da50
+REJ = (0x007d2330, 0x007d2338, 0x007c9788, 0x007c9798)      # top, bottom, left, right
+INSIDE = (0x007c9780, 0x007c979c, 0x007c97a4, 0x007d2320)
+
+
+def floor_tile(g, rng, count):
+    """4f8b80(ecx=tile, edx=x, [8]=y, [c]=light buffer): a tile's blocks
+    (+0x50 of them, 20 bytes each from +0x54: offset, light cell, flags 1
+    drawn and 4 RLE, pixels at +0x10), iso and RLE, drawn or not; each
+    rejected outside one rectangle, drawn unclipped inside another, else
+    clipped by the window; flat light only (the buffer's cell, interpolation
+    off, or the four neighbours within 10): interpolated light runs the
+    game's own blitters from the native, which this runner cannot."""
+    for _ in range(count):
+        g.begin()
+        rows = 60
+        fb = frame_buffer(g, rng, rows)
+        g.w32(PITCH, FB_PITCH)
+        g.w32(FB_BASE, fb)
+        g.put(SHADES, bytes(rng.getrandbits(8) for _ in range(32 * 256)))
+        mode = rng.randrange(3)
+        g.w32(FLAT_LIGHT, mode == 0)
+        g.w32(NO_GOURAUD, mode == 1)
+        base = rng.getrandbits(8)
+        light = g.alloc(1072 + 16)
+        g.put(light, bytes(max(0, min(255, base + rng.randint(0, 2))) if mode == 2 else rng.getrandbits(8)
+                           for _ in range(1072 + 16)))
+        x, y = rng.randint(0, 64), rng.randint(0, 8)
+        n = rng.choice((0, 1, 4, 10))
+        blocks = g.block(20 * max(n, 1))
+        for k in range(n):
+            e = blocks + 20 * k
+            ex, ey = rng.randint(0, 200), rng.randint(0, 30)
+            g.w16(e, ex); g.w16(e + 2, ey)
+            g.w8(e + 6, rng.randint(0, 7)); g.w8(e + 7, rng.randint(0, 6))
+            rle = rng.random() < 0.4
+            g.w8(e + 8, (1 if rng.random() < 0.9 else 0) | (4 if rle else 0) | rng.getrandbits(1) << 1)
+            if rle:
+                data = rle_pairs(rng, 15, 64)
+            else:
+                data = bytes(rng.getrandbits(8) for _ in range(256))
+            src = g.alloc(len(data) + 16)
+            g.put(src, data)
+            g.w32(e + 0x10, src)
+        tile = g.block(0x60)
+        g.w32(tile + 0x50, n)
+        g.w32(tile + 0x54, blocks)
+        sx, sy = x + 100, y + 15   # about the blocks' middle, in screen terms
+        far = lambda at: (rng.choice((at - 400, at - rng.randint(0, 120))), rng.choice((at + 400, at + rng.randint(0, 120))))
+        for (t, b), (l, r), where in ((far(sy), far(sx), REJ), (far(sy), far(sx), INSIDE)):
+            g.w32(where[0], t); g.w32(where[1], b); g.w32(where[2], l); g.w32(where[3], r)
+        g.w32(CLIP_L, rng.choice((0, rng.randint(0, 250))))
+        g.w32(CLIP_R, rng.choice((640, rng.randint(50, 320))))
+        g.w32(CLIP_T, rng.choice((0, rng.randint(0, 40))))
+        g.w32(CLIP_B, rng.choice((480, rng.randint(5, 60))))
+        yield g.run(0x004f8b80, (y, light), ecx=tile, edx=x)
+
+
 # name: (generator, flags). EAX is dead after the light stamps (their one
 # caller overwrites it), so it is not compared there.
 NATIVES = {
@@ -1356,6 +1448,13 @@ NATIVES = {
     "Dc6Remap2": (dc6_blit(0x006072f0, False, (256, 256)), COMPARE_EAX),
     "Dc6Blend1": (dc6_blit(0x00608110, False, (0x10000,)), COMPARE_EAX),
     "Dc6Shadow": (dc6_shadow, COMPARE_EAX),
+    # Dead EAX too: LightGrid's one caller (475888) calls 475780 next, which
+    # sets EAX first (4f5210); LightBlock's two (4de4d9, 4dec1b) overwrite it;
+    # FloorTile is renderer entry 31, called only from 4f68e0, whose two
+    # callers (4de5b2, 4dec9c) overwrite it before reading it.
+    "LightGrid": (light_grid, 0),
+    "LightBlock": (light_block, 0),
+    "FloorTile": (floor_tile, 0),
 }
 
 

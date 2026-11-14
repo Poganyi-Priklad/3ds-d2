@@ -4330,8 +4330,8 @@ bool install_ftol(Cpu &c, bool check)
 }
 
 // The game's tables the natives keep a copy of: the iso floor's rows, the
-// ADPCM steps and index moves, the DCC bit masks, SpritePath's monster class
-// tables. Read once g_base is set (install_d2_native; tests/d2d's case runner
+// ADPCM steps and index moves, the DCC bit masks and bits, SpritePath's
+// monster class tables. Read once g_base is set (install_d2_native; tests/d2d's case runner
 // too).
 void load_native_tables()
 {
@@ -4346,6 +4346,8 @@ void load_native_tables()
         g_adpcm_adj[i] = I32(kAdpcmIndexAdj + 4 * i);
     for (int i = 0; i <= 32; i++)
         g_dcc_mask[i] = U32(kDccMasks + 4 * i);
+    for (int i = 0; i < 4; i++)
+        g_dcc_bit[i] = U32(0x006ce268 + 4 * i);
     g_mon_tables = read_class_table(0x005fe85c, 0x005fe850, g_mon_lo, sizeof g_mon_lo) &&
                    read_class_table(0x005fe8e8, 0x005fe8dc, g_mon_hi, sizeof g_mon_hi);
 }
@@ -4435,8 +4437,6 @@ int install_d2_native(Cpu &c)
     static const uint8_t k60b7b0[] = {0x55, 0x8b, 0xec, 0x83, 0xec, 0x30, 0xa1, 0xe0, 0x9d, 0x74, 0x00};
     uint8_t cell_have[sizeof k60b7b0];
     g_cpu = &c;
-    for (int i = 0; i < 4; i++)
-        g_dcc_bit[i] = U32(0x006ce268 + 4 * i);
     if ((mask & bit) && c.read(0x0060b7b0, cell_have, sizeof cell_have) && !std::memcmp(cell_have, k60b7b0, sizeof cell_have) &&
         dyn86_intrin_add(0x0060b7b0, dcc_cell_intrin, 8, DYN86_IR_CX | DYN86_IR_DX | DYN86_IR_SI, 0, "DccCell")) {
         g_dcc_intrin = &dyn86_intrin_tbl[dyn86_intrin_n - 1];

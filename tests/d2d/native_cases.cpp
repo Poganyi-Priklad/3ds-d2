@@ -122,7 +122,8 @@ const Native kNatives[] = {
     {"Dc6Blend", dc6_blend},             {"Dc6BlendClipped", dc6_blend_clipped},
     {"Dc6Remap", dc6_remap},             {"Dc6RemapB", dc6_remap},
     {"Dc6Remap2", dc6_remap2},           {"Dc6Blend1", dc6_blend1},
-    {"Dc6Shadow", dc6_shadow},
+    {"Dc6Shadow", dc6_shadow},           {"LightGrid", light_grid},
+    {"LightBlock", light_block},         {"FloorTile", floor_tile},
 };
 
 struct Span {
