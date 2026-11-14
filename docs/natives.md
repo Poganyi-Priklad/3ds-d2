@@ -90,7 +90,7 @@ Checked wrappers call back into the game, so they are never served in line.
 **Run it:**
 
 ```sh
-D2_NATIVE_CHECK=1 M4_SCRIPT=tests/m4/scripts/fight.txt scripts/docker.sh test m4 <game-dir> <guest-ms>
+D2_NATIVE_CHECK=1 M4_VIRTUAL_CLOCK=1 WX86_FAKETSC=1 M4_SCRIPT="$(cat tests/m4/scripts/fight.txt)" scripts/docker.sh test m4 <game-dir> 170000
 grep -r "native check" build/m4/
 ```
 
