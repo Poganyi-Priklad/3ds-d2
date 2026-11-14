@@ -27,6 +27,7 @@
 #include "game/cinematics.h"
 #include "game/controls.h"
 #include "game/d2_memory.h"
+#include "game/aot_spike.h"
 #include "game/d2_native.h"
 #include "game/d2_state.h"
 #include "game/d2_units.h"
@@ -1399,6 +1400,14 @@ void present(const rt::Frame &f)
                 game::frame_trace_note(lock ? "frame lock: on" : "frame lock: off");
         }
     }
+    {   // the OPTIONS page's AOT bench (issue #113): only a build with the compiled code has it
+        const game::AotMode want =
+            (g_ss.port_options() & game::kPortAotBench) && game::aot_linked() ? game::AotMode::Bench : game::AotMode::Off;
+        if (game::aot_mode() != want && g_guest_cpu) {
+            game::set_aot_mode(*g_guest_cpu, want);
+            logline(want == game::AotMode::Bench ? "aot bench: on" : "aot bench: off");
+        }
+    }
     {   // the OPTIONS page's native sprite decoder (issue #83)
         const game::DccMode want = native_dcc() ? game::DccMode::Offload : game::DccMode::Off;
         if (game::dcc_mode() != want) {
@@ -2274,6 +2283,11 @@ void hitch_heartbeat(const game::SpriteCacheWindow &w)
     logline_held(line);
     // The native sprite decoder (issue #83): the window's groups by who decoded them.
     static game::DccStats dcc_mark;
+    for (const std::string &l : game::aot_lines()) {   // the AOT spike's bench (issue #113)
+        char aot[360];
+        std::snprintf(aot, sizeof aot, "[rt] %s", l.c_str());
+        logline_held(aot);
+    }
     const game::DccStats d = game::dcc_stats();
     std::snprintf(line, sizeof line,
                   "[rt] dcc: %s; groups native %u (on the frame thread %u, the worker full %u), on the worker %u, "

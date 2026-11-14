@@ -34,6 +34,11 @@ enum PortOption : uint32_t {
     // The floor, wall and roof tiles of the rooms near the player read on
     // core 2 before their first draw needs them (tiles_ahead.h, issue #89).
     kPortTilePrefetch = 1u << 4,
+    // The AOT spike's bench (issue #113, aot_spike.h): in a build with the
+    // compiled code (D2_AOT_BUILD=1), each call of a compiled function runs
+    // one way in turn (Box86, the four builds, the native) and is timed,
+    // into game.log's "aot:" lines. Nothing in any other build.
+    kPortAotBench = 1u << 5,
 };
 
 struct PortOptionInfo {
@@ -52,6 +57,7 @@ inline constexpr PortOptionInfo kPortOptions[] = {
     {kPortFrameLock, "framelock", "frame lock at 50 Hz", "game frames timed by the screen"},
     {kPortNativeDcc, "dcc", "native sprite decoder", "new sprites decoded off core 0"},
     {kPortTilePrefetch, "tiles", "read tiles ahead", "tiles near the player read on core 2"},
+    {kPortAotBench, "aotbench", "AOT spike: time each way", "an AOT build only: aot: in game.log"},
 };
 inline constexpr int kPortOptionCount = sizeof kPortOptions / sizeof kPortOptions[0];
 
@@ -65,7 +71,8 @@ constexpr bool port_options_fit(int i = 0)
 }
 static_assert(port_options_fit(), "an OPTIONS label or note is longer than the 36 characters the page shows");
 inline constexpr uint32_t kPortDefault = kPortCore2Draw | kPortScreen50 | kPortNativeDcc | kPortTilePrefetch;
-inline constexpr uint32_t kPortAll = kPortCore2Draw | kPortScreen50 | kPortNativeDcc | kPortFrameLock | kPortTilePrefetch;
+inline constexpr uint32_t kPortAll =
+    kPortCore2Draw | kPortScreen50 | kPortNativeDcc | kPortFrameLock | kPortTilePrefetch | kPortAotBench;
 // The options of the first "port=" lines, which named only those on.
 inline constexpr uint32_t kPortFirst = kPortCore2Draw;
 

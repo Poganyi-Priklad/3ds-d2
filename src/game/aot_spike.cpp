@@ -297,6 +297,17 @@ int install_aot(Cpu &c)
             rt::logf("aot: %s at %08x: the bytes differ from the build's Game.exe, not hooked", r->name, r->va);
             continue;
         }
+        // D2_AOT_ONLY=<name,...> (the lane): only those roots. Each hooked
+        // root changes the lane's thread switches from its first call on,
+        // and with them the world the virtual clock makes.
+        if (const char *only = std::getenv("D2_AOT_ONLY")) {
+            const size_t len = std::strlen(r->name);
+            const char *at = std::strstr(only, r->name);
+            if (!at || (at[len] != 0 && at[len] != ',')) {
+                rt::logf("aot: %s not hooked (D2_AOT_ONLY)", r->name);
+                continue;
+            }
+        }
         Root &R = g_roots[g_root_count++];
         R.r = r;
         R.calls = aotn_roots ? &aotn_roots[k] : r;

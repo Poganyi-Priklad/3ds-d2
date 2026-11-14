@@ -1288,7 +1288,7 @@ class Emitter:
         fill = ", ".join(REGS[r] for r in range(8))
         if self.mode == "sig":
             s = self.p.callee_summary(t)
-            back = " ".join("%s = t.r[%d];" % (REGS[r], r) for r in range(8) if r not in s.preserved)
+            back = " ".join("%s = t.r[%d];" % (REGS[r], r) for r in range(8) if r == ESP or r not in s.preserved)
         else:
             back = " ".join("%s = t.r[%d];" % (REGS[r], r) for r in range(8))
         return "{ AotRegs t = {{%s}}; aot_guest_call(0x%08xu, &t); %s }" % (fill, t, back)
@@ -1714,10 +1714,28 @@ def compile_set(img, starts, roots, extra, mode_list, outdir, names=None):
         insns += f.stats["insns"]
         falls = sorted({t for t in f.calls.values() if isinstance(t, int) and t not in compiled
                         and t not in INTRINSICS})
+        ranges = []
+        for a in f.order:
+            e = a + f.insns[a].size
+            if ranges and ranges[-1][1] == a:
+                ranges[-1][1] = e
+            else:
+                ranges.append([a, e])
         report["functions"]["%08x" % va] = {
-            "insns": f.stats["insns"], "bytes": f.stats["bytes"], "sig": sigs[va],
+            "insns": f.stats["insns"], "bytes": f.stats["bytes"], "sig": sigs[va], "ranges": ranges,
             "switches": len(f.switches), "natives": sorted("%08x" % t for t in falls if t in NATIVES),
             "box86": sorted("%08x" % t for t in falls if t not in NATIVES)}
+    trees = {}
+    for r in roots:
+        seen, work = set(), [r]
+        while work:
+            v = work.pop()
+            if v in seen or v not in compiled:
+                continue
+            seen.add(v)
+            work += [t for t in prog.func(v).calls.values() if isinstance(t, int)]
+        trees["%08x" % r] = sorted("%08x" % v for v in seen)
+    report["trees"] = trees
     report["x86_insns"] = insns
     report["x86_bytes"] = sum(prog.func(va).stats["bytes"] for va in compiled)
     report["analysis_s"] = round(t1 - t0, 3)
@@ -1743,6 +1761,7 @@ def survey(img, starts, tsv):
     res = collections.Counter()
     why = collections.Counter()
     x87_unknown = []
+    flags_live = []
     for va in sorted(sizes):
         f = prog.func(va)
         if f.refused:
@@ -1759,20 +1778,39 @@ def survey(img, starts, tsv):
             s = str(e)
             if "from a call or the entry" in s:
                 res["flags_live_at_call_or_ret"] += 1
+                flags_live.append(va)
             else:
                 res["flags_other"] += 1
                 why["flags: " + s.split(" at ")[0]] += 1
-        # x87: is the stack depth known at each instruction?
-        d = x87_depth(f, prog)
-        if d is None:
+    # x87: is the stack depth known at each instruction? Each function's
+    # depth at its rets (a float result leaves one) to a fixed point first.
+    deltas = {}
+    for _ in range(20):
+        changed = False
+        for va in sorted(sizes):
+            f = prog.func(va)
+            if f.refused:
+                continue
+            _, dl = x87_depth(f, prog, deltas)
+            if deltas.get(va, 0) != dl:
+                deltas[va] = dl
+                changed = True
+        if not changed:
+            break
+    for va in sorted(sizes):
+        f = prog.func(va)
+        if f.refused:
+            continue
+        st, _ = x87_depth(f, prog, deltas)
+        if st is None:
             x87_unknown.append(va)
-        elif d:
+        elif st:
             res["x87_known"] += 1
     # Switches the guard rule doesn't bound, from the refusals.
     res["switches_unbounded"] = why["a switch"] if "a switch" in why else sum(
         v for k, v in why.items() if k.startswith("a switch"))
     res["x87_unknown"] = len(x87_unknown)
-    return res, why, x87_unknown
+    return res, why, x87_unknown, flags_live
 
 
 X87_PUSH = {"fld", "fild", "fld1", "fldz", "fldpi", "fldl2e", "fldln2", "fldlg2", "fldl2t"}
@@ -1781,13 +1819,20 @@ X87_POP1 = {"fstp", "fistp", "faddp", "fsubp", "fsubrp", "fmulp", "fdivp", "fdiv
 X87_POP2 = {"fcompp", "fucompp"}
 
 
-def x87_depth(f, prog):
-    """0: no x87; 1: the stack depth is known at every instruction (from 0 at
-    entry, a call leaving it as it was); None: not known somewhere."""
-    if not any(i.mnemonic.startswith("f") and i.mnemonic not in ("fs",) for i in f.insns.values()):
-        return 0
+def x87_depth(f, prog, deltas):
+    """(state, delta): state 0 no x87 at all, 1 the depth is known at every
+    instruction (0 at entry; a call moves it by its callee's delta, known
+    from deltas), None not known somewhere; delta the depth at its rets
+    (None: not known, or rets that disagree)."""
+    has = any(i.mnemonic.startswith("f") for i in f.insns.values())
+    if not has:
+        # No x87 of its own: a float a callee left would stay on the stack,
+        # which MSVC's code never does (it pops an unused result), so its
+        # callees' results are popped where they're made: 0 at its rets.
+        return 0, 0
     depth = {f.entry: 0}
     work = [f.entry]
+    at_ret = set()
     while work:
         b = work.pop()
         d = depth[b]
@@ -1797,22 +1842,23 @@ def x87_depth(f, prog):
             m = i.mnemonic
             if m in X87_PUSH:
                 d += 1
-            elif m in X87_POP1 or (m.startswith("f") and m.endswith("p") and m not in ("fstp",) and
-                                   m not in X87_POP2 and m != "fxtractp"):
-                d -= 1
             elif m in X87_POP2:
                 d -= 2
+            elif m in X87_POP1 or (m.startswith("f") and m.endswith("p") and m not in X87_POP2):
+                d -= 1
             elif m in ("fninit", "finit"):
                 d = 0
             elif va in f.calls:
-                # A callee may return a float in st(0): not known without its type.
                 t = f.calls[va]
                 if isinstance(t, int) and t not in prog.intrinsics:
-                    g = prog.func(t)
-                    if not g.refused and any(x.mnemonic in X87_PUSH for x in g.insns.values()):
-                        return None
+                    dt = deltas.get(t, 0)
+                    if dt is None:
+                        return None, None
+                    d += dt
+            if va in f.rets:
+                at_ret.add(d)
             if d < 0 or d > 8:
-                return None
+                return None, None
             succ = f.succ[va]
             nxt = va + i.size
             if len(succ) == 1 and succ[0] == nxt and nxt not in f.leaders:
@@ -1823,9 +1869,10 @@ def x87_depth(f, prog):
                     depth[t] = d
                     work.append(t)
                 elif depth[t] != d:
-                    return None
+                    return None, None
             break
-    return 1
+    delta = at_ret.pop() if len(at_ret) == 1 else (0 if not at_ret else None)
+    return (1 if has else 0), delta
 
 
 def parse_vas(s):
@@ -1854,9 +1901,11 @@ def main():
     img = Image(a.exe)
     starts = load_starts(img, a.functions)
     if a.survey:
-        res, why, x87u = survey(img, starts, a.functions)
+        res, why, x87u, live = survey(img, starts, a.functions)
         for k in sorted(res):
             print("%-28s %d" % (k, res[k]))
+        print("flags live at a call or ret:", " ".join("%08x" % v for v in live))
+        print("x87 depth not known:", " ".join("%08x" % v for v in x87u[:40]), "..." if len(x87u) > 40 else "")
         print("refusals:")
         for k, v in why.most_common(20):
             print("  %6d  %s" % (v, k))

@@ -44,6 +44,7 @@
 #include "game/cinematics.h"
 #include "game/controls.h"
 #include "game/d2_memory.h"
+#include "game/aot_spike.h"
 #include "game/d2_native.h"
 #include "game/d2_state.h"
 #include "game/second_screen.h"
@@ -287,6 +288,8 @@ int main(int argc, char **argv)
         const game::SpriteCacheWindow w = game::sprite_cache_window(*guest_cpu);
         for (const std::string &l : game::frame_reads_lines())   // "[rt] ..." lines: logf adds the prefix
             rt::logf("%s", l.c_str() + (l.compare(0, 5, "[rt] ") == 0 ? 5 : 0));
+        for (const std::string &l : game::aot_lines())   // the AOT spike (issue #113): "aot: ..."
+            rt::logf("%s", l.c_str());
         if (game::dcc_mode() != game::DccMode::Off) {
             const game::DccStats d = game::dcc_stats();
             rt::logf("dcc: native %u, offloaded %u, the game's %u (refused %u), native %llu ms; checked %u, differed %u",
