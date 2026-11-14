@@ -2455,6 +2455,7 @@ constexpr uint32_t kDirChars = 0x006dcc34, kDirMonsters = 0x006d6cac, kDirObject
 // to the .dcc choice; read from its jump tables at install.
 enum : uint8_t { kKeepDcc, kDc6, kDc6IfNoMode };
 uint8_t g_mon_lo[0x7e], g_mon_hi[0xa6];
+bool g_mon_tables = false;   // both read as expected (load_native_tables)
 
 bool read_class_table(uint32_t index, uint32_t targets, uint8_t *out, uint32_t n)
 {
@@ -4329,8 +4330,9 @@ bool install_ftol(Cpu &c, bool check)
 }
 
 // The game's tables the natives keep a copy of: the iso floor's rows, the
-// ADPCM steps and index moves, the DCC bit masks. Read once g_base is set
-// (install_d2_native; tests/d2d's case runner too).
+// ADPCM steps and index moves, the DCC bit masks, SpritePath's monster class
+// tables. Read once g_base is set (install_d2_native; tests/d2d's case runner
+// too).
 void load_native_tables()
 {
     for (int r = 0; r < 15; r++) {
@@ -4344,6 +4346,8 @@ void load_native_tables()
         g_adpcm_adj[i] = I32(kAdpcmIndexAdj + 4 * i);
     for (int i = 0; i <= 32; i++)
         g_dcc_mask[i] = U32(kDccMasks + 4 * i);
+    g_mon_tables = read_class_table(0x005fe85c, 0x005fe850, g_mon_lo, sizeof g_mon_lo) &&
+                   read_class_table(0x005fe8e8, 0x005fe8dc, g_mon_hi, sizeof g_mon_hi);
 }
 
 }  // namespace
@@ -4466,8 +4470,7 @@ int install_d2_native(Cpu &c)
          !check);
     // SpritePath: only with its class tables as expected.
     static const uint8_t k5fe610[] = {0x55, 0x8b, 0xec, 0x8b, 0x4d, 0x08, 0x83, 0xec, 0x08, 0x80, 0x39, 0x00};
-    if (read_class_table(0x005fe85c, 0x005fe850, g_mon_lo, sizeof g_mon_lo) &&
-        read_class_table(0x005fe8e8, 0x005fe8dc, g_mon_hi, sizeof g_mon_hi))
+    if (g_mon_tables)
         HOOK(c, 0x005fe610, k5fe610, sizeof k5fe610, 1, check ? sprite_path_checked : sprite_path, "SpritePath",
              !check);
     else

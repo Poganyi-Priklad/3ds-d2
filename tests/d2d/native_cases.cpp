@@ -60,6 +60,44 @@ struct TestCpu : d2rt::Cpu {
     uint32_t fault_addr() const override { return 0; }
 };
 
+// A scheduler with one thread, the current one: what LoadsPending asks
+// (the current thread, for an event's state) and the locks' owner.
+struct TestScheduler : d2rt::ThreadScheduler {
+    d2rt::GuestThread thread;
+    TestScheduler() { thread.id = 1; }
+    d2rt::GuestThread *create_thread(uint32_t, uint32_t, uint32_t, bool) override { return nullptr; }
+    void resume(d2rt::GuestThread *) override {}
+    d2rt::GuestThread *current() override { return &thread; }
+    void yield() override {}
+    uint32_t wait(d2rt::Waitable *, uint32_t) override { return 0x102; }
+    void notify(d2rt::Waitable *) override {}
+    void exit_current(uint32_t) override {}
+    void run() override {}
+    int live_count() override { return 1; }
+    void wait_noresult(d2rt::Waitable *, uint32_t) override {}
+    uint32_t wait_timeout_result(d2rt::Waitable *, uint32_t, uint32_t r) override { return r; }
+    void set_no_preempt(bool) override {}
+    void request_shutdown() override {}
+    d2rt::GuestThread *thread_by_id(uint32_t id) override { return id == 1 ? &thread : nullptr; }
+    std::vector<uint32_t> live_thread_ids() override { return {1}; }
+    int live_thread_count() override { return 1; }
+    void dump_threads_to(void (*)(const char *)) override {}
+    d2rt::GuestThread *set_main(uint32_t, uint32_t, uint32_t) override { return &thread; }
+    void set_fault_dispatcher(FaultFn) override {}
+    void set_time_sink(std::function<void(uint64_t)>) override {}
+    const char *stop_reason() const override { return ""; }
+};
+
+// gen_cases.py's EVENT_WAITING and EVENT_SET.
+struct TestEvent : d2rt::Waitable {
+    bool set;
+    explicit TestEvent(bool s) : set(s) {}
+    bool try_acquire(d2rt::GuestThread *) override { return set; }
+    bool ready(d2rt::GuestThread *) override { return set; }
+    const char *kind() const override { return "event"; }
+};
+constexpr uint32_t kEventWaiting = 0x82000000, kEventSet = 0x82000001;
+
 using NativeFn = uint32_t (*)(Cpu &);
 struct Native {
     const char *name;
@@ -74,7 +112,10 @@ const Native kNatives[] = {
     {"AdpcmDecode", adpcm_decode},       {"HuffmanDecode", huffman_decode},
     {"PkExplode", pk_decode},
     {"UnitRelation", unit_relation_native}, {"UnitPickFilter", unit_pick_filter},
-    {"SkillLevel", skill_level_native},
+    {"SkillLevel", skill_level_native},  {"LangLookup", lang_lookup},
+    {"SpriteCacheTouch", cache_touch},   {"SpritePath", sprite_path},
+    {"LockedLookup", locked_lookup},     {"CurrentLookup", current_lookup},
+    {"CurrentUnlock", current_unlock},   {"LoadsPending", loads_pending},
 };
 
 struct Span {
@@ -243,7 +284,17 @@ int run_file(const std::string &path, Image &img, TestCpu &cpu, int &total)
         for (size_t k = 0; k < c.args.size(); k++)
             put32(esp + 4 + 4 * (uint32_t)k, c.args[k]);
         cpu.set_reg(d2rt::R_ESP, esp);
+        const uint32_t t0 = rt::tick_ms();
         const uint32_t eax = native->fn(cpu);
+        // SpriteCacheTouch's stamp: GetTickCount's in the game (the
+        // emulator's 0), the slice's clock in the native; taken as equal
+        // when the native's is that clock's.
+        if (native->fn == cache_touch && c.regs[2]) {
+            const uint32_t at = c.regs[2] + 0x10, t = U32(at), t1 = rt::tick_ms();
+            const size_t k = at >= kCaseLo ? data_n + (at - kCaseLo) : at - img.data_lo;
+            if (t - t0 <= t1 - t0 && k + 4 <= expect.size())
+                std::memcpy(H(at), &expect[k], 4);
+        }
         if (rt::bridge().take_redirect()) {
             left++;
         } else {
@@ -298,6 +349,13 @@ int main(int argc, char **argv)
     static game::TestCpu cpu;
     static d2rt::Bridge bridge(&cpu);
     rt::set_bridge_for_tests(&bridge);
+    static game::TestScheduler sched;
+    wx86_set_scheduler(&sched);
+    static game::TestEvent waiting(false), set(true);
+    if (wx86_handle_add(&waiting) != game::kEventWaiting || wx86_handle_add(&set) != game::kEventSet) {
+        std::fprintf(stderr, "native_cases: WinVita's first handles are not gen_cases.py's events\n");
+        return 2;
+    }
     std::vector<std::string> names;
     for (int k = 3; k < argc; k++)
         names.push_back(argv[k]);

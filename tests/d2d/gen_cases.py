@@ -58,6 +58,15 @@ class Gen:
         self.pristine = self.e.read(self.image_lo, self.image_hi - self.image_lo)
         self.writes, self.game = [], []
         self.e.mu.hook_add(UC_HOOK_MEM_WRITE, self._on_write)
+        # The emulator's own answers to the game's imports (wsprintfA's
+        # output, say) write from Python, which the hook above doesn't see.
+        mem_write = self.e.mu.mem_write
+
+        def stub_write(addr, data):
+            if self.recording:
+                self.game.append((addr, len(data)))
+            return mem_write(addr, data)
+        self.e.mu.mem_write = stub_write
         self.recording = False
         self.brk = CASE_LO
 
@@ -76,6 +85,12 @@ class Gen:
             self.e.hook(0x00413020, lambda e: e.alloc(e.arg(0)), 4)
             self.e.hook(0x00412650, lambda e: 1, 4)
             self._storm_heap = True
+
+    def answer(self, name, fn):
+        """The game's import `name` answered by fn(e) -> (eax, stack dwords)."""
+        for a, (n, _) in list(self.e.slots.items()):
+            if n == name:
+                self.e.slots[a] = (n, fn)
 
     def _on_write(self, mu, access, addr, size, value, _):
         if self.recording:
@@ -821,6 +836,273 @@ def skill_level(g, rng, count):
         yield g.run(0x00644180, (skill,), esi=0 if i % 37 == 0 else unit)
 
 
+# ---- string tables ---------------------------------------------------------------------
+
+def elf_hash(key, size):
+    """5249e0: the ELF hash of the key's (signed) bytes, modulo size."""
+    h = 0
+    for b in key:
+        h = ((h << 4) + (b - 256 if b >= 0x80 else b)) & 0xffffffff
+        hi = h & 0xf0000000
+        if hi:
+            h = ((hi >> 24) ^ h) & 0x0fffffff
+    return h % size
+
+
+def lang_lookup(g, rng, count):
+    """524c60(edi=table, [8]=string pointers, [c]=key, [10]=&string): a D2Lang
+    table (+2 the index array's count, +4 the nodes, +0xd the probe limit; at
+    +0x15 the index array, then nodes of 17 bytes: +0 used, +1 the string's
+    index, +7 the key's offset from the table), filled as the game fills it
+    (from the key's bucket to the next free node); keys present, missing,
+    twice (the nearer one is the answer), far from their bucket (past the
+    limit), with high bytes; limits from 0 to past the size. Each case's table
+    sits at its own address: the native keeps an index per table address and
+    shape, which the game's tables (loaded once) never change under it."""
+    for i in range(count):
+        g.begin()
+        g.alloc(16 * (i + 1))   # a new address each case
+        size = rng.choice((1, 2, 7, 64, 300, 1500))
+        nkeys = rng.randint(0, size)
+        words = []
+        for _ in range(nkeys):
+            n = rng.randint(1, 12)
+            w = bytes(rng.choice((rng.randint(0x61, 0x7a), rng.randint(0x30, 0x39), 0x5f, rng.randint(0x80, 0xff)))
+                      for _ in range(n))
+            words.append(w if not words or rng.random() > 0.25 else rng.choice(words))   # some keys twice
+        index_n = rng.randint(0, 8)
+        table = g.alloc(0x15 + 2 * index_n + 17 * size + 16 + sum(len(w) + 1 for w in words) + 64)
+        nodes = table + 0x15 + 2 * index_n
+        text = nodes + 17 * size + 16
+        body = bytearray(17 * size)
+        used = [False] * size
+        at = text
+        dists = {}
+        for k, w in enumerate(words):
+            j = elf_hash(w, size)
+            if rng.random() < 0.05:
+                j = rng.randrange(size)   # somewhere else: out of its bucket's reach, perhaps
+            for _ in range(size):
+                if not used[j]:
+                    break
+                j = (j + 1) % size
+            else:
+                break
+            used[j] = True
+            g.put(at, w + b"\0")
+            dists.setdefault(w, []).append((j - elf_hash(w, size)) % size)
+            body[17 * j] = 1 if rng.random() < 0.97 else 2
+            struct.pack_into("<H", body, 17 * j + 1, rng.getrandbits(16))
+            struct.pack_into("<I", body, 17 * j + 7, at - table)
+            at += len(w) + 1
+        g.put(nodes, body)
+        strings = g.alloc(4 * size)
+        g.put(strings, b"".join(struct.pack("<I", rng.randint(0x01000000, 0x01ffffff)) for _ in range(size)))
+        if words and rng.random() < 0.6:
+            key_text = rng.choice(words)
+        else:
+            key_text = bytes(rng.randint(0x61, 0x7a) for _ in range(rng.randint(0, 10)))
+        probes = rng.choice((0, 1, 3, size // 2, size, size, size + 5))
+        if key_text in dists and rng.random() < 0.4:   # the limit at the key's nodes: just in reach or just not
+            probes = rng.choice(dists[key_text]) + rng.choice((0, 1))
+        hdr = bytearray(0x15 + 2 * index_n)
+        struct.pack_into("<H", hdr, 2, index_n)
+        struct.pack_into("<I", hdr, 4, size)
+        struct.pack_into("<I", hdr, 0xd, probes)
+        g.put(table, hdr)
+        key = g.alloc(len(key_text) + 1)
+        g.put(key, key_text + b"\0")
+        out = g.block(4)
+        yield g.run(0x00524c60, (strings, key, out), edi=table)
+
+
+# ---- the sprite cache and the locked lookups -------------------------------------------
+
+def cache_touch(g, rng, count):
+    """5ff5b0(ecx=cache, edx=entry): the cache (+0xc on, +0x4c hits, +0x14 /
+    +0x18 the main list's head and tail, +0x1c / +0x20 the other's) and its
+    entries (+0xc flags: bit 0 the other list, bit 1 a pinned head; +0x14
+    next, +0x18 previous, +0x10 the stamp): an entry at either list's head,
+    tail or middle, alone, in no list; pinned heads; the cache off. The stamp
+    is GetTickCount's (the emulator's 0; the runner takes the native's clock
+    for it)."""
+    for _ in range(count):
+        g.begin()
+        cache = g.block(0x60)
+        g.w32(cache + 0xc, rng.random() < 0.9)
+        g.w32(cache + 0x4c, rng.getrandbits(16))
+        entries = []
+        for head_at, flag in ((0x14, 0), (0x1c, 1)):
+            n = rng.choice((0, 1, 2, 3, 8))
+            lst = [g.block(0x20) for _ in range(n)]
+            for k, e in enumerate(lst):
+                g.w32(e + 0xc, flag | (2 if k == 0 and rng.random() < 0.2 else 0) | rng.getrandbits(4) << 4)
+                g.w32(e + 0x10, rng.getrandbits(32))
+                g.w32(e + 0x14, lst[k + 1] if k + 1 < n else 0)
+                g.w32(e + 0x18, lst[k - 1] if k else 0)
+            if lst:
+                g.w32(cache + head_at, lst[0])
+                g.w32(cache + head_at + 4, lst[-1])
+            entries += lst
+        loose = g.block(0x20)
+        g.w32(loose + 0xc, rng.getrandbits(2))
+        entry = rng.choice(entries) if entries and rng.random() < 0.9 else loose
+        yield g.run(0x005ff5b0, (), ecx=cache, edx=entry)
+
+
+USE_DCC, LOCALE_CHANGED, DC6_NAME = 0x00741efc, 0x0096dfe4, 0x006e363c
+
+
+def sprite_path(g, rng, count):
+    """5fe610(ebx=out, esi=sprite info, [8]=name): the file's path for units
+    of every type (+8; 3, 4, 6 go on to the game's code), classes the
+    monster tables single out (0xf2..0x16f, 0x209, 0x220..0x2c5) and the
+    objects' (0x156, 0x233), mode 0 and not (+0x10), tokens with spaces
+    (+0x18, +0x1c), .dcc on and off ([0x741efc]), the one .dc6 name in any
+    case, an empty name."""
+    dc6 = bytes(g.e.read(DC6_NAME, 32)).split(b"\0")[0]
+    for _ in range(count):
+        g.begin()
+        g.w32(USE_DCC, rng.random() < 0.8)
+        g.w32(LOCALE_CHANGED, rng.random() < 0.05)
+        info = g.block(0x50)
+        utype = rng.choice((0, 0, 1, 1, 1, 1, 2, 2, 3, 4, 5, 6))
+        g.w32(info + 8, utype)
+        if utype == 1:
+            cls = rng.choice((rng.randint(0xf0, 0x171), rng.randint(0x21e, 0x2c7), 0x209, rng.randint(0, 0x300)))
+        elif utype == 2:
+            cls = rng.choice((0x156, 0x233, rng.randint(0, 0x300)))
+        else:
+            cls = rng.randint(0, 8)
+        g.w32(info + 0xc, cls)
+        g.w32(info + 0x10, rng.choice((0, 0, 1, rng.randint(2, 20))))
+        tok = lambda: bytes(rng.choice((rng.randint(0x41, 0x5a), rng.randint(0x30, 0x39), 0x20)) for _ in range(3))
+        g.put(info + 0x18, tok() + b"\0")
+        g.put(info + 0x1c, tok() + b"\0")
+        g.w32(info + 0x44, rng.getrandbits(4))
+        kind = rng.random()
+        if kind < 0.05:
+            text = b""
+        elif kind < 0.2:
+            text = bytes(c ^ 0x20 if 0x41 <= (c | 0x20) - 0x20 <= 0x5a and rng.random() < 0.5 else c for c in dc6)
+        else:
+            text = bytes(rng.randint(0x61, 0x7a) for _ in range(rng.randint(1, 40)))
+        name = g.alloc(len(text) + 1)
+        g.put(name, text + b"\0")
+        out = g.block(0x200)
+        yield g.run(0x005fe610, (name,), ebx=out, esi=info)
+
+
+LOCK_TABLE, CUR_ENTRY, CUR_ID = 0x00883d38, 0x00882d34, 0x00882d38
+
+
+def lock_table(g, rng):
+    """[0x883d38]: +0x1c buckets of 12 bytes (+0 the link's offset in an
+    entry, +8 the first entry; the next at link + 4, a list ending at <= 0),
+    +0x24 the mask; entries' id at +0, their lock at +0x18. Returns the ids."""
+    if rng.random() < 0.05:
+        return []
+    table = g.block(0x60)
+    g.w32(LOCK_TABLE, table)
+    mask = rng.choice((0, 1, 7, 63))
+    buckets = g.block(12 * (mask + 1))
+    g.w32(table + 0x1c, buckets)
+    g.w32(table + 0x24, mask)
+    ids = []
+    for b in range(mask + 1):
+        off = rng.choice((0x20, 0x28, 0x30))
+        g.w32(buckets + 12 * b, off)
+        prev = None
+        for _ in range(rng.choice((0, 0, 1, 2, 5))):
+            e = g.block(0x40)
+            eid = rng.randrange(1 << 16) * (mask + 1) + b
+            ids.append(eid)
+            g.w32(e, eid)
+            g.w32(e + 0x18, g.block(0x18) if rng.random() < 0.97 else 0)
+            g.w32(e + off + 4, rng.choice((0, 0, 0xfffffff0)))   # the end: 0 or below
+            if prev is None:
+                g.w32(buckets + 12 * b + 8, e)
+            else:
+                g.w32(prev + off + 4, e)
+            prev = e
+        if prev is None and rng.random() < 0.2:
+            g.w32(buckets + 12 * b + 8, 0xffffff00)   # an empty bucket's end mark
+    return ids
+
+
+def locked_lookup(g, rng, count):
+    """52e860(ecx=id): ids in the table, missing, in a bucket's list at
+    either end; no table; an entry without its lock (the game's fatal
+    error)."""
+    for _ in range(count):
+        g.begin()
+        ids = lock_table(g, rng)
+        eid = rng.choice(ids) if ids and rng.random() < 0.7 else rng.getrandbits(rng.choice((4, 20, 32)))
+        yield g.run(0x0052e860, (), ecx=eid)
+
+
+def current_lookup(g, rng, count):
+    """52f6e0(): the current id ([0x882d38]; 0 and -1 none) looked up, the
+    entry stored at [0x882d34]."""
+    for _ in range(count):
+        g.begin()
+        ids = lock_table(g, rng)
+        g.w32(CUR_ID, rng.choice(ids) if ids and rng.random() < 0.7 else rng.choice((0, 0xffffffff, rng.getrandbits(16))))
+        g.w32(CUR_ENTRY, rng.getrandbits(32))
+        yield g.run(0x0052f6e0, ())
+
+
+def current_unlock(g, rng, count):
+    """52df40(): LeaveCriticalSection on the current entry's lock; no entry
+    is the game's fatal error."""
+    for i in range(count):
+        g.begin()
+        e = g.block(0x40) if i % 13 else 0
+        if e:
+            g.w32(e + 0x18, g.block(0x18) if i % 7 else 0)
+        g.w32(CUR_ENTRY, e)
+        yield g.run(0x0052df40, ())
+
+
+SPRITE_LIST, LOAD_MAGIC = 0x0089db7c, 0x41737960
+# Two events the runner registers (WinVita's first handles): one never
+# signalled, one signalled. Any other handle is unknown to both sides.
+EVENT_WAITING, EVENT_SET = 0x82000000, 0x82000001
+
+
+def loads_pending(g, rng, count):
+    """5ff2a0(): the sprite loads not done, over the cache's list
+    ([0x89db7c], next at +0x14): entries without a sprite, sprites marked
+    (+0x20 bit 0), loads (+0xb0) done (+0x48: the magic, bit 0). A load not
+    done polls its event (+0x38, the handle's address) with
+    WaitForSingleObject(h, 0): the waiting event times out, and the native
+    counts it; the signalled one, or a handle the native doesn't know, goes
+    on to the game's code (which finishes the load)."""
+    g.answer("WaitForSingleObject", lambda e: (0x102 if e.arg(0) == EVENT_WAITING else 0, 2))
+    for _ in range(count):
+        g.begin()
+        prev = None
+        for _ in range(rng.choice((0, 1, 3, 10, 40))):
+            e = g.block(0x20)
+            r = rng.random()
+            if r > 0.1:
+                sp = g.block(0xc0)
+                g.w8(sp + 0x20, rng.random() < 0.3)
+                ld = g.block(0x50)
+                g.w32(sp + 0xb0, ld)
+                g.w32(ld + 0x48, LOAD_MAGIC | (1 if rng.random() < 0.6 else 0) | rng.getrandbits(3) << 1)
+                event = g.block(4)
+                g.w32(event, rng.choice((EVENT_WAITING,) * 12 + (EVENT_SET, rng.randint(0x100, 0x1000))))
+                g.w32(ld + 0x38, event)
+                g.w32(e, sp)
+            if prev is None:
+                g.w32(SPRITE_LIST, e)
+            else:
+                g.w32(prev + 0x14, e)
+            prev = e
+        yield g.run(0x005ff2a0, ())
+
+
 # name: (generator, flags). EAX is dead after the light stamps (their one
 # caller overwrites it), so it is not compared there.
 NATIVES = {
@@ -842,6 +1124,14 @@ NATIVES = {
     "UnitRelation": (unit_relation, COMPARE_EAX),
     "UnitPickFilter": (unit_pick_filter, COMPARE_EAX),
     "SkillLevel": (skill_level, COMPARE_EAX),
+    "LangLookup": (lang_lookup, COMPARE_EAX),
+    # Its only caller reads no register after it.
+    "SpriteCacheTouch": (cache_touch, 0),
+    "SpritePath": (sprite_path, COMPARE_EAX),
+    "LockedLookup": (locked_lookup, COMPARE_EAX),
+    "CurrentLookup": (current_lookup, COMPARE_EAX),
+    "CurrentUnlock": (current_unlock, COMPARE_EAX),
+    "LoadsPending": (loads_pending, COMPARE_EAX),
 }
 
 
