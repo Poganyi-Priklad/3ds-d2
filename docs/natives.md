@@ -90,7 +90,7 @@ Checked wrappers call back into the game, so they are never served in line.
 **Run it:**
 
 ```sh
-D2_NATIVE_CHECK=1 M4_SCRIPT=tests/m4/scripts/fight.txt scripts/docker.sh test m4 <game-dir> <guest-ms>
+D2_NATIVE_CHECK=1 M4_VIRTUAL_CLOCK=1 WX86_FAKETSC=1 M4_SCRIPT="$(cat tests/m4/scripts/fight.txt)" scripts/docker.sh test m4 <game-dir> 170000
 grep -r "native check" build/m4/
 ```
 
@@ -99,7 +99,7 @@ grep -r "native check" build/m4/
 - `M4_FRAMEHASH=<file>` writes one hash per presented frame. The same script must give the same hashes with and without a native that is meant to be exact.
 - The scripts in [tests/m4/scripts/](../tests/m4/scripts/) cover the Act I town walk, a fight, the Cold Plains, area loads, and Act II's town, oasis and the way east.
 
-The natives in `g_remap_check`, and the sprite cache's and the locked lookups' own checks, all ran with no difference before they were merged. Their call counts are in their PRs and in [hardware-test.md](hardware-test.md). d2decomped's emulator-made cases check natives on the host too (#108): `scripts/docker.sh test d2d <game-dir>` runs `UnitWalk`'s plan on its 800 walk-back cases (`tests/d2d/walk_back.cpp`). d2d has such cases for no other native of ours; generated cases for every native are planned (#109).
+The natives in `g_remap_check`, and the sprite cache's and the locked lookups' own checks, all ran with no difference before they were merged. Their call counts are in their PRs and in [hardware-test.md](hardware-test.md). d2decomped's emulator-made cases check natives on the host too (#108): `scripts/docker.sh test d2d <game-dir>` runs `UnitWalk`'s plan on its 800 walk-back cases (`tests/d2d/walk_back.cpp`). Cases made from the user's own Game.exe under Unicorn check every native (#109): the 39 hooks, the `DccCell` intrinsic and the eight loop steps patched in line. They don't cover the paths where a native calls the game's own functions (`LightBlock` with an ambient source, `FloorTile`'s blocks with interpolated light). `FtolCheck`, `FloorQueueArm` and `FloorQueueEnd` and the renderer guard's entries compute nothing of their own; the lane checks them. See [build-and-run.md](build-and-run.md#cases-for-the-natives-from-gameexe), which also says how to add a native's.
 
 ## Measuring
 

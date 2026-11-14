@@ -54,6 +54,20 @@ d2decomped (`third_party/d2d`, GPL-3.0-or-later, #105) is used the same way, for
 - The `hosttest` image has its emulator harness's Python modules (`tools/emu`: Unicorn, Capstone, pefile), at the versions in its `uv.lock`. It has none of d2d's desktop dependencies.
 - The submodule is fetched with its history: about 27 MB of git objects and 30 MB of files, about 10 s to fetch when measured (2026-11-13). A shallow fetch is no smaller, because the pin is not upstream's newest commit: `clone --recursive` then fetched 58 MB. A new pin is a deliberate change, made with that history (`git log <old>..<new>`); it also updates `third_party/deps.lock` and THIRD_PARTY_NOTICES.md.
 
+### Cases for the natives from Game.exe
+
+`scripts/docker.sh test d2d <game-dir>` also checks every native in `d2_native.cpp` against the user's own Game.exe (#109):
+- `tests/d2d/gen_cases.py` runs each native's game code under Unicorn, through d2d's `tools/emu/emu.py` imported from `build/d2d/d2d` (never copied). Its inputs aim at the edges: off the grid, empty lists, the largest radii, values at a table's limits.
+- A case is the memory the generator wrote before the call, the registers and stack arguments, then the game's EAX and every byte it wrote, including what the emulator's own answers to imports write (wsprintfA's output). The records sit in a window above the image (`0x01000000`), so the runner can hold the same addresses.
+- `tests/d2d/native_cases.cpp` includes `d2_native.cpp` and runs each native on the same memory through a test `Cpu`, with a one-thread scheduler. It compares every byte of Game.exe's writable sections and the case's window, and EAX where the caller reads it. A native that hands the call back to the game's code is counted, not compared.
+- **EAX:** where the generator doesn't compare it, its comment in `NATIVES` cites the callers' disassembly showing they overwrite it first.
+- **In-line natives** (the loops' steps patched in by `install_slot_steps`): the game's code runs from the patched site. The generator notes the state at each arrival at the native's resume addresses, and stops at the loop's first work or its exit. The runner compares where the native goes on, the registers live there and the memory against the last arrival. For `PickUnitStep`, which can stop early, it compares against any arrival. A walk of the code decides which registers are live, by MSVC's conventions.
+- **The game's environment:** x87 at 53-bit precision (MSVC's runtime), `_ftol2_sse` on its SSE path (as the port patches it), Storm's allocator served by the emulator. Cases where the game faults or takes its fatal-error path are left out and counted (`GEN_CASES_DEBUG=1` says why).
+- **Not covered:** the paths where a native calls the game's own functions (`LightBlock` with an ambient source, `FloorTile`'s blocks with interpolated light), which the host runner can't run.
+- The cases are written to `build/d2d-cases/` (about 300 MB at 400 a native). They are made from the user's Game.exe, so they never go in the repository.
+- `CASES=<n>` sets the cases per native (default 400), `ONLY=<Name,...>` picks natives: `CASES=50 ONLY=StatGet scripts/docker.sh test d2d dist/game`.
+- **Adding a native:** a generator function in `gen_cases.py` (its inputs, in the form of the others) and its entry in `NATIVES`, then the native's function in `native_cases.cpp`'s `kNatives`. An in-line native uses `Gen.run_inline` with its resume addresses and work points. Check that the cases can fail: break the native on purpose and see them differ.
+
 ## Run in Azahar
 
 ```sh

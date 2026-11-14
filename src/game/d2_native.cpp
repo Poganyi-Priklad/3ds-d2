@@ -2455,6 +2455,7 @@ constexpr uint32_t kDirChars = 0x006dcc34, kDirMonsters = 0x006d6cac, kDirObject
 // to the .dcc choice; read from its jump tables at install.
 enum : uint8_t { kKeepDcc, kDc6, kDc6IfNoMode };
 uint8_t g_mon_lo[0x7e], g_mon_hi[0xa6];
+bool g_mon_tables = false;   // both read as expected (load_native_tables)
 
 bool read_class_table(uint32_t index, uint32_t targets, uint8_t *out, uint32_t n)
 {
@@ -3578,8 +3579,8 @@ uint32_t skill_level_checked(Cpu &c)
 // b: 0 or 1. Outside a town (the level of a's room: 6426a0's table), only
 // reads:
 //   a unit of type 1 the roster knows (0x7bb5bc: +8 id, +0xc its player,
-//   next +0x30) counts as that player (type 0); so does a unit with +0xc8's
-//   bit 10 while b's +0x94 is 0 (its +0x98's); b likewise;
+//   next +0x30) counts as that player (type 0); so does a monster with
+//   +0xc8's bit 10 while b's +0x94 is 0 (its +0x98's); b likewise;
 //   the same type and id: 0;
 //   b a monster: 1 for its monstats flag 4, 0 for flag 5 (4638a0);
 //   a player and b of type 2 or 4: 1;
@@ -3652,16 +3653,16 @@ bool unit_relation(uint32_t a, uint32_t b, uint32_t &r)
             return false;
     }
     uint32_t at = U32(a), aid = U32(a + 0xc), bt = U32(b), bid = U32(b + 0xc);
-    if (at == 1) {
+    if (at == 1) {   // as for b: only a monster (465d37), found in the roster or not
         const uint32_t m = roster_player(aid);
         if (m != 0xffffffffu) {
             at = 0;
             aid = m;
         }
-    }
-    if ((U32(a + 0xc8) >> 10 & 1) && !U32(b + 0x94)) {
-        at = 0;
-        aid = U32(a + 0x98);
+        if ((U32(a + 0xc8) >> 10 & 1) && !U32(b + 0x94)) {
+            at = 0;
+            aid = U32(a + 0x98);
+        }
     }
     if (bt == 1) {
         const uint32_t m = roster_player(bid);
@@ -4328,6 +4329,29 @@ bool install_ftol(Cpu &c, bool check)
     return true;
 }
 
+// The game's tables the natives keep a copy of: the iso floor's rows, the
+// ADPCM steps and index moves, the DCC bit masks and bits, SpritePath's
+// monster class tables. Read once g_base is set (install_d2_native; tests/d2d's case runner
+// too).
+void load_native_tables()
+{
+    for (int r = 0; r < 15; r++) {
+        g_xoff[r] = I32(kIsoXoff + 4 * r);
+        g_width[r] = I32(kIsoWidth + 4 * r);
+        g_soff[r] = I32(kIsoSoff + 4 * r);
+    }
+    for (int i = 0; i < 89; i++)
+        g_adpcm_step[i] = U32(kAdpcmSteps + 4 * i);
+    for (int i = 0; i < 32; i++)
+        g_adpcm_adj[i] = I32(kAdpcmIndexAdj + 4 * i);
+    for (int i = 0; i <= 32; i++)
+        g_dcc_mask[i] = U32(kDccMasks + 4 * i);
+    for (int i = 0; i < 4; i++)
+        g_dcc_bit[i] = U32(0x006ce268 + 4 * i);
+    g_mon_tables = read_class_table(0x005fe85c, 0x005fe850, g_mon_lo, sizeof g_mon_lo) &&
+                   read_class_table(0x005fe8e8, 0x005fe8dc, g_mon_hi, sizeof g_mon_hi);
+}
+
 }  // namespace
 
 int install_d2_native(Cpu &c)
@@ -4337,11 +4361,7 @@ int install_d2_native(Cpu &c)
     if (!p)
         return 0;
     g_base = p - 0x00400000;
-    for (int r = 0; r < 15; r++) {
-        g_xoff[r] = I32(kIsoXoff + 4 * r);
-        g_width[r] = I32(kIsoWidth + 4 * r);
-        g_soff[r] = I32(kIsoSoff + 4 * r);
-    }
+    load_native_tables();
     // First bytes of each original (push ebp; mov ebp,esp; ...): only this
     // build of Game.exe gets hooked.
     static const uint8_t k4f69b0[] = {0x55, 0x8b, 0xec, 0x51, 0x53, 0x56, 0x8b, 0x75, 0x08};
@@ -4401,10 +4421,6 @@ int install_d2_native(Cpu &c)
     HOOK(c, 0x004ddef0, k4ddef0, sizeof k4ddef0, 3, light_block, "LightBlock");
     static const uint8_t k4f8b80[] = {0x55, 0x8b, 0xec, 0x83, 0xec, 0x48, 0x53, 0x8b, 0x1d};
     HOOK(c, 0x004f8b80, k4f8b80, sizeof k4f8b80, 2, draw_census_wrap("FloorTile", floor_tile), "FloorTile");
-    for (int i = 0; i < 89; i++)
-        g_adpcm_step[i] = U32(kAdpcmSteps + 4 * i);
-    for (int i = 0; i < 32; i++)
-        g_adpcm_adj[i] = I32(kAdpcmIndexAdj + 4 * i);
     static const uint8_t k41dce0[] = {0x55, 0x8b, 0xec, 0x83, 0xec, 0x1c, 0x53, 0x56, 0x8b, 0x75, 0x0c};
     HOOK(c, 0x0041dce0, k41dce0, sizeof k41dce0, 3, adpcm_decode, "AdpcmDecode", true);
     static const uint8_t k41f9e0[] = {0x55, 0x8b, 0xec, 0xb8, 0x80, 0x3a, 0x00, 0x00, 0xe8};
@@ -4413,8 +4429,6 @@ int install_d2_native(Cpu &c)
     HOOK(c, 0x0041e000, k41e000, sizeof k41e000, 3, pk_decode, "PkExplode", true);
     static const uint8_t k524c60[] = {0x55, 0x8b, 0xec, 0x83, 0xec, 0x08, 0x0f, 0xb7, 0x47, 0x02};
     HOOK(c, 0x00524c60, k524c60, sizeof k524c60, 3, lang_lookup, "LangLookup", true);
-    for (int i = 0; i <= 32; i++)
-        g_dcc_mask[i] = U32(kDccMasks + 4 * i);
     // DccCell: a translation-time intrinsic, not a hook. ecx, edx and esi
     // are its register arguments (stored for it), ret 8; it changes no guest
     // register the caller reads. Its only entry is the call at 0x60cbbe, and
@@ -4423,8 +4437,6 @@ int install_d2_native(Cpu &c)
     static const uint8_t k60b7b0[] = {0x55, 0x8b, 0xec, 0x83, 0xec, 0x30, 0xa1, 0xe0, 0x9d, 0x74, 0x00};
     uint8_t cell_have[sizeof k60b7b0];
     g_cpu = &c;
-    for (int i = 0; i < 4; i++)
-        g_dcc_bit[i] = U32(0x006ce268 + 4 * i);
     if ((mask & bit) && c.read(0x0060b7b0, cell_have, sizeof cell_have) && !std::memcmp(cell_have, k60b7b0, sizeof cell_have) &&
         dyn86_intrin_add(0x0060b7b0, dcc_cell_intrin, 8, DYN86_IR_CX | DYN86_IR_DX | DYN86_IR_SI, 0, "DccCell")) {
         g_dcc_intrin = &dyn86_intrin_tbl[dyn86_intrin_n - 1];
@@ -4458,8 +4470,7 @@ int install_d2_native(Cpu &c)
          !check);
     // SpritePath: only with its class tables as expected.
     static const uint8_t k5fe610[] = {0x55, 0x8b, 0xec, 0x8b, 0x4d, 0x08, 0x83, 0xec, 0x08, 0x80, 0x39, 0x00};
-    if (read_class_table(0x005fe85c, 0x005fe850, g_mon_lo, sizeof g_mon_lo) &&
-        read_class_table(0x005fe8e8, 0x005fe8dc, g_mon_hi, sizeof g_mon_hi))
+    if (g_mon_tables)
         HOOK(c, 0x005fe610, k5fe610, sizeof k5fe610, 1, check ? sprite_path_checked : sprite_path, "SpritePath",
              !check);
     else
