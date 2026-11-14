@@ -87,7 +87,6 @@ uint32_t g_empty_n = 0;
 uint64_t g_empty_ticks = 0;
 uint32_t g_nested = 0;           // nested runs from compiled code (callees not compiled)
 std::map<uint32_t, uint32_t> g_nested_by;   // ... by callee, this window
-uint32_t g_bad = 0;
 
 struct NativeAt {
     uint32_t va;
