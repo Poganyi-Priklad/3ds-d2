@@ -168,9 +168,11 @@ AOT code has to be checked function by function, as natives are (`D2_NATIVE_CHEC
 - **The build ID** has to cover the AOT step: the recompiler's version and a short hash of the key, never Game.exe itself.
 - **Game.exe from the official patch, optionally** (#116): taking Game.exe out of a `LODPatch_114d.exe` the user supplies, so a user with another version only needs their MPQs. Its format isn't studied yet (see Open questions).
 
-**Build time.** *Estimate:* 5 to 30 minutes on a 4–8 core PC for all 878,540 instructions, once per Game.exe. Basis: each x86 instruction becomes one to three lines of C, about 1 to 3 million lines in all, and gcc -O2 on large generated functions manages tens of thousands of lines per core-minute. The spike measures seconds per 1,000 x86 instructions on its subsystem and scales from that.
+**Build time.** Measured by the spike (5,722 x86 instructions, one build of the C):
+- **gcc** (devkitARM, -O2, ARM mode): 0.95 s per 1,000 x86 instructions for the signatures' C, 1.28 s for the context fallback's, on one core. For all 878,540 instructions that is about 14 minutes on one core, so 2 to 4 minutes on a 4–8 core PC, as files compile in parallel.
+- **The recompiler** (Python): 0.07 s per 1,000 instructions to write the C, but 39 s of analysis, because the spike works out summaries for every function its trees reach (541) to a fixed point, again for each compiled set. Over the whole binary that analysis runs once: the survey's decoding and flags pass over d2d's 13,048 functions took 97 s. The summaries' fixed point needs a faster form (each function analysed once per round, only those whose callees changed) before #115.
 
-**CIA size.** *Estimate:* 5 to 11 MB more code, for a CIA of about 7 to 13 MB in sdcard mode (about 2 MB now). Basis: 1.5 to 3 ARM instructions (4 bytes each) per x86 instruction of 2.96 bytes is 2.0 to 4.1 ARM bytes per x86 byte, against Box86's 7.22, over d2d's 2.6 MB of functions.
+**CIA size.** Measured by the spike: 2.6 (A*) and 3.1 (CofParams) ARM bytes per x86 byte with the signatures, 3.6 and 4.5 with the context fallback, against Box86's 7.8 and 10.3 for the same functions (devkitARM -O2, ARM mode; Box86's from its blocks on the lane, backend patch 0061). The review's band of 2 to 5 holds. With the signatures and x87, string and switch code still to come, *estimate* 3 to 4.5 ARM bytes per x86 byte: 8 to 12 MB more code over d2d's 2.6 MB of functions, for a CIA of about 11 to 15 MB in sdcard mode (about 3.4 MB now).
 
 ## Memory
 
@@ -178,15 +180,15 @@ The 3DS loads an app's whole code segment at start, so the compiled code is resi
 
 | Part | Today | With AOT (*estimate*) | Basis |
 | --- | --- | --- | --- |
-| Game code | 14 MiB pool, filled as code runs | 5–11 MiB in the image, all of it | the CIA size above |
+| Game code | 14 MiB pool, filled as code runs | 8–12 MiB in the image, all of it | the CIA size above |
 | Box86's code pool, for the fallback | (above) | 2–4 MiB | the lane's `fight.txt` ran exactly with a 6 MiB pool and thrashed at 4 MiB ([memory-budget.md](memory-budget.md)); the fallback runs a small share of that |
 | Jump tables | about 12 MiB | 1–3 MiB | 256 KiB per 64 KiB page the fallback runs in; how many is for #115 to measure |
 | Block records | 3–4 MiB | about 0.5 MiB | the fallback's blocks only |
 | Scratch and first-level tables | about 1.4 MiB | about 1.4 MiB | unchanged |
 | Sparse target table | none | about 0.7 MiB | 90,000 entries of 8 bytes |
-| **In all** | **about 31 MiB** | **about 11–21 MiB** | |
+| **In all** | **about 31 MiB** | **about 14–22 MiB** | |
 
-*Estimate:* AOT would save about 10 to 20 MiB. It also ends the pool filling in long sessions (#23) and the hitches of translating new code. Where the saving goes (the guest arena, the sprite cache, the port's buffers) is for after #115's measurements.
+*Estimate:* AOT would save about 9 to 17 MiB. It also ends the pool filling in long sessions (#23) and the hitches of translating new code. Where the saving goes (the guest arena, the sprite cache, the port's buffers) is for after #115's measurements.
 
 ## Distribution
 
@@ -196,29 +198,54 @@ The 3DS loads an app's whole code segment at start, so the compiled code is resi
 - **Releases stay JIT-only.** The project's own CIA and `.3dsx` never contain AOT code.
 - **d2d's list** is read from its submodule at build time and never copied. The CIA contains no d2d code either way. Whether its GPL-3.0 list should be a build input at all, or only a cross-check, is an open question (below).
 
-## The spike's scope (#113)
+## The spike (#113)
 
-Proposed for agreement:
+The scope agreed on #112 (the review's proposal): A* with its real call tree, plus one call-heavy hot function without a native, each built with register signatures and with the context fallback, checked on the host and on the lane, measured.
 
-1. **The subsystem:** the monsters' A* search, `0x67b850` and its helpers (`0x67b200`, `0x67b440`, `0x67ae00`, `0x67ae50`). It is self-contained, it has a hand-written native to compare against (`PathSearch`), and d2d checks its own version against it in Unicorn (`tools/emu/moves.py`), which #108 brings to our natives.
-2. **The recompiler's first cut:** Python with Capstone, and only what this call tree needs: integer instructions, the flags pass, direct calls, `ret`, and the guest memory helpers. No switch tables, no x87, no thread switches inside (the tree doesn't block).
-3. **Linked as a native:** the compiled entry is registered as an in-line native at `0x67b850`, through the existing `HOOK` path. No dispatcher or target table yet.
-4. **Checked:** against Box86 on the lane (`fight.txt`, `act2-east.txt`) with the native check's trampoline, and against Unicorn on the host with #108's cases.
-5. **Measured:**
-   - guest bytes on the lane (`WX86_HOTPROF`);
-   - time per call on the console against Box86 and against `PathSearch`;
-   - the compiled code's size against Box86's for the same functions;
-   - the compile time per 1,000 x86 instructions.
-6. **Answered from the whole binary, by the recompiler's analysis alone:**
-   - how many functions have flags live at a call or a `ret`;
-   - how many switch tables its guard rule bounds;
-   - how many functions have an x87 stack depth that isn't known at each instruction.
+**What was compiled** (`tools/aot/spike.args`):
+- **A*** (`0x67b850`, the root named `PathSearch`): its 21 functions as the review listed them, including the 0x64d910 chain and the switch tables in 0x64d910 and 0x64d4e0, plus 61a010, 64cc30 and 64cdf0 on the same paths. 23 compiled functions, 4,491 x86 bytes. RoomFind is called in C. CollisionCross is called in C and hands a room's edge back to the compiled 0x64d4e0. `_memset`, `_memcpy` (as `memmove`: MSVC's handles overlap) and `__alloca_probe` are written in line.
+- **CofParams** (`0x4db7b0`, d2d's `cof_build_params`), picked from the lane's block counter (`fight.txt`). Its own share is 0.27%, but with its tree up to 3.9%, the most of any function without a native whose tree has no indirect calls. It makes 26 direct calls, and its hot callees are small item and inventory lookups (6335f0, 63add0, 63c050, 629fe0): the flat, many-small-calls code where the review said AOT has to win. Its tree to depth 3 plus the four callees the bench found it still ran nested (628700, 62a1e0, 6289c0, 628980): 95 compiled functions, 11,103 x86 bytes.
+- **Left to Box86:** two error-path tail calls (408a60, 40d8d0) and the C runtime's 681d27. Neither tree has `fs:`, `rep`, `fldcw`, `cpuid`, `rdtsc` or x87 code (see Instruction kinds).
+- **Hooked** at each root as a native not served in line, installed before the natives, so PathSearch's hook doesn't go in over it.
 
-Not in the spike: the target table, exits to the dispatcher, return-site entries, imports, packaging. Those come with #115 and #116 once the spike shows a gain.
+**Checked:**
+- **On the host** (#125's case runner, Unicorn): the compiled A* on PathSearch's 400 cases, in all four builds (signatures, context, and both without inlining between compiled functions). 400 match the game's code, none left to the game, including the 168 that PathSearch itself hands back. The same with the compiled 0x64d4e0 in place of CollisionCross. CofParams has no cases: its inputs (a unit, its inventory, the item tables) need a generator of their own, so the lane checks it.
+- **On the lane** (`D2_AOT=5`: the compiled code with its stores journaled, memory put back, the original from a trampoline under Box86, compared: eax, the callee-saved registers, every byte the compiled code wrote outside the dead stack). A byte only Box86 wrote isn't seen there; the host cases compare every byte.
+
+| Run | Root | Calls checked | Differ |
+| --- | --- | --- | --- |
+| `fight.txt` | A* | 38,800 | 0 |
+| `act2-east.txt` | A* | 20 (few monsters on the way) | 0 |
+| `fight.txt` | CofParams | 243,115 | 0 |
+| `act2-east.txt` | CofParams | 257,225 | 0 |
+
+- **What the checks found:** Capstone's missing flags for `test` with memory (Flags, above), a push of `esi` taken for a save when it was an argument, and `esp` not read back after a nested run in the signatures' build. All three are fixed.
+
+**Measured** (the lane's figures are qemu's ARM11 model: counts are exact, times only indicative; the console's are the bench's, below):
+
+| | A* | CofParams |
+| --- | --- | --- |
+| Guest bytes on the lane (`fight.txt`, `WX86_HOTPROF`) | 44.15 G with Box86 (A*'s tree 75% of them), 9.57 G compiled: 78% of the run off Box86 | 12.45 G, 11.57 G compiled: 7% off (its callees are shared with code Box86 still runs) |
+| Time per call, qemu: Box86 / signatures / context / signatures without inlining / context without inlining | 2,470 / 600 / 720 / 665 / 815 µs | 37.5 / 12.9 / 15.3 / 14.7 / 18.5 µs |
+| Time per call on the console | pending (the bench) | pending (the bench) |
+| Code, ARM bytes per x86 byte: signatures / context / Box86 | 2.60 / 3.64 / 7.76 | 3.14 / 4.51 / 10.27 |
+| Compile time per 1,000 x86 instructions | see Build time | |
+
+- **Box86's time** in the bench includes one nested run, which costs 13–18 µs alone. For CofParams that is half of Box86's figure: without it, Box86 takes about 20 µs, the signatures 12.9.
+- **What the calls cost:** the context fallback is 20% slower than the signatures on A* and 19% on CofParams. Without inlining between compiled functions, the signatures lose 11% and 14%, and the context fallback 13% and 21% more. gcc inlines most of CofParams' small callees, which is where the signatures matter most when it can't.
+- **PathSearch on the console** times as `native` in the bench. In the lane's A*-heavy world it handed every call back (another size class, or a room's edge), and the bench counts those apart (`handed-back`).
+- **A nested Box86 run per call** cost the compiled CofParams more than it saved (50 µs against Box86's 36 before its four callees were compiled). A full build must compile what its functions call, or reach it through the target table, not a nested run.
+
+**The whole binary** (`recompile.py --survey`, d2d's 13,048 functions; 12,864 decode with the spike's rules):
+- **Flags live at a call or a `ret`:** 12 functions read flags their caller or a callee left (0050fad0, 0050fbd0, 00586d88, 005913c8, 006879dd, 00687b18, 00687c6d, 00687ef8, 006885e8, 00688718, 006bb870, 006bba00). They stay with Box86. 25 more read flags of instructions the spike doesn't model (`repe cmpsb`, `sahf`, `bt` and others).
+- **Switch tables:** the guard rule bounds 490. 19 jumps through a table aren't bounded by it, and 9 tables overlap code as decoded. 155 functions have another indirect jump.
+- **x87 depth:** of the 206 functions with x87 code, 131 have a known depth at every instruction (0 at entry, a call moving it by its callee's own depth at its rets) and 75 don't.
+
+**Not in the spike,** as agreed: the target table, exits to the dispatcher, return-site entries, imports, packaging, and x87. The results and the go/no-go recommendation are on #113.
 
 ## Open questions
 
-- **Is the gain there?** Box86 with `callret` and its register cache is not naive. The spike's time per call decides whether to go on.
+- **Is the gain there?** Box86 with `callret` and its register cache is not naive. On the lane the compiled code is 4.1× Box86 on A* and about 1.6× on CofParams. The console's bench decides (#113).
 - **The site table:** the hooks and code patches move from `install_*` code into one table that both the app and the recompiler read. Is that change acceptable before the spike, or only after it?
 - **Does the game write its own code?** If anything other than our patches writes into `.text` at run time, the AOT code for it is stale. Box86's invalidations of `.text` on the lane answer this.
 - **Exceptions:** does any function rely on Windows exception handling for a fault (an access violation caught by `__try`)? If one does, it stays with Box86.
