@@ -1581,6 +1581,62 @@ def root_head(img, va):
     return keep, [img.u8(va + k) for k in range(16)]
 
 
+def rel32_targets(img, want):
+    """Of the addresses in `want`, those a call, jmp or jcc with a 32-bit
+    displacement anywhere in .text could reach: a raw sweep, so it
+    over-approximates (a byte sequence that only looks like one counts too)."""
+    hit = set()
+    lo = img.text_lo - img.base
+    mem = img.mem[lo:lo + (img.text_hi - img.text_lo)]
+    for k in range(len(mem) - 5):
+        b = mem[k]
+        if b in (0xE8, 0xE9):
+            n = k + 5
+            d = int.from_bytes(mem[k + 1:k + 5], "little", signed=True)
+        elif b == 0x0F and 0x80 <= mem[k + 1] <= 0x8F and k + 6 <= len(mem):
+            n = k + 6
+            d = int.from_bytes(mem[k + 2:k + 6], "little", signed=True)
+        else:
+            continue
+        t = (img.text_lo + n + d) & 0xffffffff
+        if t in want:
+            hit.add(t)
+    return hit
+
+
+def hookable(img, prog, compiled, sweep):
+    """Each compiled function's entry, for the check (issue #114): (keep,
+    head) when its first whole instructions (5 bytes or more) can go to a
+    trampoline and a jump can take their place, else the reason why not:
+    a branch among them, a ret whose pops aren't known, or a branch from
+    anywhere into the bytes the jump would cover."""
+    heads, why = {}, {}
+    for va in sorted(compiled):
+        try:
+            keep, head = root_head(img, va)
+        except Refused as e:
+            why[va] = str(e)
+            continue
+        if prog.summ[va].pops is None:
+            why[va] = "its ret pops aren't known"
+            continue
+        heads[va] = (keep, head)
+    inner = {va + k: va for va, (keep, _) in heads.items() for k in range(1, keep)}
+    region = {**inner, **{va: va for va in heads}}   # the entry too: its own fall-through is no branch
+    for f in prog.funcs.values():
+        for src, succ in f.succ.items():
+            i = f.insns.get(src)
+            for t in succ:
+                if t in inner and not (i is not None and t == src + i.size and region.get(src) == inner[t]):
+                    why[inner[t]] = "a branch from %08x into its first bytes (%08x)" % (src, t)
+        for src, t in list(f.calls.items()) + list(f.tails.items()):
+            if isinstance(t, int) and t in inner:
+                why[inner[t]] = "a call or jump from %08x into its first bytes (%08x)" % (src, t)
+    for t in sweep(set(inner)):
+        why.setdefault(inner[t], "a 32-bit branch somewhere in .text could reach its first bytes (%08x)" % t)
+    return {va: h for va, h in heads.items() if va not in why}, why
+
+
 def compile_set(img, starts, roots, extra, mode_list, outdir, names=None):
     names = names or {}
     t0 = time.time()
@@ -1694,6 +1750,38 @@ def compile_set(img, starts, roots, extra, mode_list, outdir, names=None):
                     body.append(" ".join("r[%d] = o[%d];" % (x, k) for k, x in enumerate(outs_)))
             chunks.append("static uint32_t AOT_SYM(%s_root_%08x)(uint32_t *r)\n{\n    %s\n    return r[0];\n}\n" % (
                 mode, va, "\n    ".join(body)))
+    # The check's table (issue #114), in the journaled build only: every
+    # compiled function with a register entry of its own, the registers its
+    # compiled callers read after it (out) and those it keeps (preserved),
+    # and where it can be hooked.
+    heads, why = hookable(img, prog, compiled, lambda w: rel32_targets(img, w))
+    if "sig" in mode_list:
+        em = Emitter(prog, compiled, "sig", sigs)
+        chunks.append("#ifdef AOT_JOURNAL")
+        for va in sorted(compiled):
+            sig = sigs[va]
+            args = ", ".join(["r[4]"] + ["r[%d]" % x for x in sig["in"]])
+            outs_ = sig["out"]
+            if len(outs_) == 1:
+                body = "r[%d] = %s(%s);" % (outs_[0], em.name(va), args)
+            elif len(outs_) == 2:
+                body = "uint64_t t = %s(%s); r[%d] = (uint32_t)t; r[%d] = (uint32_t)(t >> 32);" % (
+                    em.name(va), args, outs_[0], outs_[1])
+            else:
+                body = "uint32_t o[8]; %s(%s%s); %s" % (em.name(va), args, ", o" if outs_ else "",
+                                                        " ".join("r[%d] = o[%d];" % (x, k) for k, x in enumerate(outs_)))
+            chunks.append("static uint32_t aotj_fn_%08x(uint32_t *r) { %s return r[0]; }" % (va, body))
+        chunks.append("const AotFunc aotj_funcs[] = {")
+        for va in sorted(compiled):
+            keep, head = heads.get(va, (0, [0] * 16))
+            mask = lambda regs: sum(1 << x for x in regs if x != ESP)
+            chunks.append("    {0x%08xu, aotj_fn_%08x, \"%s\", %d, %d, 0x%02x, 0x%02x, %d, {%s}}," % (
+                va, va, names.get(va, "%08x" % va), keep, prog.summ[va].pops or 0, mask(sigs[va]["out"]),
+                mask(sigs[va]["preserved"]), 1 if va in roots else 0, ", ".join("0x%02x" % b for b in head)))
+        chunks.append("    {0, 0, 0, 0, 0, 0, 0, 0, {0}}")
+        chunks.append("};")
+        chunks.append("#endif")
+    report["hooks"] = {"hookable": len(heads), "not": {"%08x" % k: v for k, v in sorted(why.items())}}
     chunks.append("const AotRoot AOT_SYM(roots)[] = {")
     for va in roots:
         if va in compiled:

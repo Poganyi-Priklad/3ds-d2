@@ -29,7 +29,7 @@ uint8_t *aot_mem = nullptr;
 // without it.
 extern const AotRoot aot_roots[] __attribute__((weak));
 extern const AotRoot aotn_roots[] __attribute__((weak));
-extern const AotRoot aotj_roots[] __attribute__((weak));
+extern const AotFunc aotj_funcs[] __attribute__((weak));
 }
 
 using d2rt::Cpu;
@@ -66,7 +66,7 @@ constexpr const char *kVariantNames[kVariants] = {"box86", "sig", "ctx", "sig-ca
                                                   "handed-back"};
 
 struct Root {
-    const AotRoot *r = nullptr, *calls = nullptr, *journal = nullptr;
+    const AotRoot *r = nullptr, *calls = nullptr;
     uint32_t tramp = 0;          // the game's first instructions, then a jump back
     uint32_t trap = 0;           // our native entry
     uint8_t before[5] = {};      // what was at the entry before our jump
@@ -157,58 +157,134 @@ struct Store {
 std::vector<Store> g_journal;
 std::vector<uint8_t> g_old;
 
-// D2_AOT=5: the compiled code journaled, its writes put back, then the
-// original under Box86 from the same registers and esp; compared: eax, the
-// callee-saved registers, and every byte the compiled code wrote, except the
-// stack below the entry's esp + 4 (dead once the call returns). A byte only
-// Box86 wrote isn't seen here; the host cases (Unicorn) compare every byte.
-void check(Root &R, Cpu &c, uint32_t *regs)
+// D2_AOT=5, the check (issue #114): every compiled function whose entry can
+// be hooked is, and each of its calls, from the game's code or from inside
+// another check's run of the original, runs twice. First its compiled code,
+// journaled, with its writes put back after; then the original from its
+// trampoline under Box86, from the same registers and esp. Compared: the
+// registers its compiled callers read after it (out), those it keeps
+// (preserved), and every byte the compiled code wrote, except the stack below
+// the entry's esp + 4 (dead once the call returns). A byte only Box86 wrote
+// isn't seen here; the host cases (Unicorn) compare every byte. The game
+// keeps Box86's result, so a call inside the original's run is checked in its
+// turn, at every depth.
+//
+// The compiled code's own calls to compiled functions are C calls, checked
+// as part of it. A call it makes to Box86 (a callee not compiled) writes
+// memory the journal doesn't see: that call keeps the compiled result,
+// nothing is put back or run twice, and it counts as unchecked.
+struct Fn {
+    const AotFunc *f = nullptr;
+    uint32_t tramp = 0, trap = 0;
+    uint8_t before[5] = {};
+    bool hooked = false;
+    uint32_t checked = 0, differ = 0, unchecked = 0;           // this window
+    uint32_t checked_all = 0, differ_all = 0, unchecked_all = 0;
+};
+std::vector<Fn> g_fns;           // sized once at install: entries keep their address
+int g_journaling = 0;            // inside a journaled compiled run
+bool g_impure = false;           // ... which called Box86
+uint32_t g_differ_logged = 0;
+
+const char *reg_name(int k)
 {
+    static const char *const n[8] = {"eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi"};
+    return n[k & 7];
+}
+
+void check_fn(Fn &F, Cpu &c, uint32_t *regs)
+{
+    if (g_journaling) {   // from Box86 inside a journaled run: the original, unchecked
+        g_impure = true;
+        nested_run(c, F.tramp, regs);
+        return;
+    }
     uint32_t a[8], b[8];
     std::memcpy(a, regs, sizeof a);
     std::memcpy(b, regs, sizeof b);
     g_journal.clear();
     g_old.clear();
-    R.journal->sig(a);
-    std::vector<uint8_t> now(g_old.size());
-    for (const Store &s : g_journal)
-        std::memcpy(&now[s.at], aot_mem + s.va, s.n);
-    for (size_t k = g_journal.size(); k-- > 0;)
-        std::memcpy(aot_mem + g_journal[k].va, &g_old[g_journal[k].at], g_journal[k].n);
-    nested_run(c, R.tramp, b);
+    g_impure = false;
+    g_journaling++;
+    F.f->sig(a);
+    g_journaling--;
+    if (g_impure) {
+        F.unchecked++;
+        F.unchecked_all++;
+        std::memcpy(regs, a, sizeof a);
+        return;
+    }
+    // This check's journal, apart: a check inside the original's run below
+    // starts one of its own.
+    std::vector<Store> journal;
+    std::vector<uint8_t> old, now(g_old.size());
+    journal.swap(g_journal);
+    old.swap(g_old);
+    for (const Store &st : journal)
+        std::memcpy(&now[st.at], aot_mem + st.va, st.n);
+    for (size_t k = journal.size(); k-- > 0;)
+        std::memcpy(aot_mem + journal[k].va, &old[journal[k].at], journal[k].n);
+    nested_run(c, F.tramp, b);
     const uint32_t esp = regs[4];
-    bool bad = a[0] != b[0] || a[3] != b[3] || a[5] != b[5] || a[6] != b[6] || a[7] != b[7];
+    int bad_reg = -1;
+    for (int k = 0; k < 8 && bad_reg < 0; k++)
+        if (k != 4 && ((F.f->out | F.f->preserved) >> k & 1) && a[k] != b[k])
+            bad_reg = k;
     uint32_t first = 0;
-    for (const Store &s : g_journal) {
-        for (uint32_t k = 0; k < s.n; k++) {
-            const uint32_t va = s.va + k;
+    uint8_t mine = 0;
+    bool bad_mem = false;
+    for (size_t j = 0; j < journal.size() && !bad_mem; j++) {
+        const Store &st = journal[j];
+        for (uint32_t k = 0; k < st.n && !bad_mem; k++) {
+            const uint32_t va = st.va + k;
             if (va < esp + 4 && va + 0x40000 > esp)
                 continue;   // the dead stack
-            // A later store to the same byte wins: compare against the last.
-            if (aot_mem[va] != now[s.at + k]) {
-                bool later = false;
-                for (const Store &t : g_journal)
-                    if (&t > &s && va >= t.va && va < t.va + t.n)
-                        later = true;
-                if (!later && !bad) {
-                    bad = true;
-                    first = va;
-                }
+            if (aot_mem[va] == now[st.at + k])
+                continue;
+            bool later = false;   // a later store to the same byte wins: compare against the last
+            for (size_t t = j + 1; t < journal.size() && !later; t++)
+                later = va >= journal[t].va && va < journal[t].va + journal[t].n;
+            if (!later) {
+                bad_mem = true;
+                first = va;
+                mine = now[st.at + k];
             }
         }
     }
-    R.checked++;
-    R.checked_all++;
-    if (bad) {
-        R.differ++;
-        if (++R.differ_all <= 10)
-            rt::logf("aot check: %s differs (call %u): eax %08x / Box86 %08x, ebx %08x/%08x esi %08x/%08x "
-                     "edi %08x/%08x ebp %08x/%08x, first byte %08x",
-                     R.r->name, R.checked_all, a[0], b[0], a[3], b[3], a[6], b[6], a[7], b[7], a[5], b[5], first);
+    F.checked++;
+    F.checked_all++;
+    if (bad_reg >= 0 || bad_mem) {
+        F.differ++;
+        F.differ_all++;
+        if (++g_differ_logged <= 20) {
+            char what[96];
+            if (bad_reg >= 0)
+                std::snprintf(what, sizeof what, "%s %08x, Box86 %08x", reg_name(bad_reg), a[bad_reg], b[bad_reg]);
+            else
+                std::snprintf(what, sizeof what, "the byte at %08x: %02x, Box86 %02x", first,
+                              mine, aot_mem[first]);
+            rt::logf("aot check: %s (%08x) differs on its call %u: %s; in eax %08x ecx %08x edx %08x ebx %08x "
+                     "esp %08x ebp %08x esi %08x edi %08x",
+                     F.f->name, F.f->va, F.checked_all, what, regs[0], regs[1], regs[2], regs[3], regs[4], regs[5],
+                     regs[6], regs[7]);
+        }
     }
-    if ((R.checked_all & (R.checked_all - 1)) == 0)
-        rt::logf("aot check: %s %u calls, %u differ", R.r->name, R.checked_all, R.differ_all);
     std::memcpy(regs, b, sizeof b);   // the game's result is kept
+}
+
+uint32_t enter_fn(Fn &F, Cpu &c)
+{
+    uint32_t regs[8];
+    c.regs_gp(regs);
+    g_cpu = &c;
+    if (g_mode == AotMode::Check)
+        check_fn(F, c, regs);
+    else
+        nested_run(c, F.tramp, regs);   // hooked only in Check; between modes, the original
+    for (int k = 0; k < 8; k++)
+        if (k != 4)
+            c.set_reg(k, regs[k]);
+    return regs[0];
 }
 
 uint32_t enter(Root &R, Cpu &c)
@@ -236,7 +312,6 @@ uint32_t enter(Root &R, Cpu &c)
     case AotMode::Ctx: R.r->ctx(regs); break;
     case AotMode::SigCalls: R.calls->sig(regs); break;
     case AotMode::CtxCalls: R.calls->ctx(regs); break;
-    case AotMode::Check: check(R, c, regs); break;
     case AotMode::Bench:
         switch (v) {
         case kBox86: nested_run(c, R.tramp, regs); break;
@@ -275,27 +350,31 @@ uint32_t enter(Root &R, Cpu &c)
     return regs[0];
 }
 
-void hook(Root &R, Cpu &c)
+// A jump to `trap` at va, what was there kept in before[5].
+void hook_at(Cpu &c, uint32_t va, uint32_t trap, uint8_t *before, bool &hooked)
 {
-    if (R.hooked)
+    if (hooked)
         return;
-    c.read(R.r->va, R.before, 5);
+    c.read(va, before, 5);
     uint8_t jmp[5] = {0xE9};
-    const uint32_t rel = R.trap - (R.r->va + 5);
+    const uint32_t rel = trap - (va + 5);
     std::memcpy(jmp + 1, &rel, 4);
-    c.write(R.r->va, jmp, 5);
-    c.invalidate_code(R.r->va, 5);
-    R.hooked = true;
+    c.write(va, jmp, 5);
+    c.invalidate_code(va, 5);
+    hooked = true;
 }
 
-void unhook(Root &R, Cpu &c)
+void unhook_at(Cpu &c, uint32_t va, const uint8_t *before, bool &hooked)
 {
-    if (!R.hooked)
+    if (!hooked)
         return;
-    c.write(R.r->va, R.before, 5);
-    c.invalidate_code(R.r->va, 5);
-    R.hooked = false;
+    c.write(va, before, 5);
+    c.invalidate_code(va, 5);
+    hooked = false;
 }
+
+void hook(Root &R, Cpu &c) { hook_at(c, R.r->va, R.trap, R.before, R.hooked); }
+void unhook(Root &R, Cpu &c) { unhook_at(c, R.r->va, R.before, R.hooked); }
 
 }  // namespace
 
@@ -312,6 +391,61 @@ void aot_set_native(uint32_t va, AotNativeFn fn)
 }
 
 void set_aot_wanted(AotMode mode) { g_wanted = mode; }
+
+namespace {
+// The check's entries (issue #114): one per compiled function whose entry
+// can be hooked, each with a trampoline and a trap of its own. Hooked only
+// in Check (set_aot_mode).
+void install_fns(Cpu &c)
+{
+    if (!aotj_funcs)
+        return;
+    size_t n = 0, all = 0;
+    for (const AotFunc *f = aotj_funcs; f->va; f++, all++)
+        n += f->keep ? 1 : 0;
+    if (!n)
+        return;
+    const uint32_t bytes = (uint32_t)((32 * n + 0xfff) & ~(size_t)0xfff);
+    const uint32_t at = rt::va_alloc(bytes, 0x0067b850);
+    if (!at) {
+        rt::logf("aot check: no memory for %u trampolines", (unsigned)n);
+        return;
+    }
+    g_fns.reserve(n);
+    std::string skipped;
+    uint32_t moved = 0;
+    for (const AotFunc *f = aotj_funcs; f->va; f++) {
+        if (!f->keep) {
+            if (skipped.size() < 160)
+                skipped += (skipped.empty() ? "" : ", ") + std::string(f->name);
+            continue;
+        }
+        uint8_t have[16];
+        c.read(f->va, have, 16);
+        if (std::memcmp(have, f->head, f->keep) != 0) {   // a native's hook there already, or another Game.exe
+            moved++;
+            continue;
+        }
+        g_fns.emplace_back();
+        Fn &F = g_fns.back();
+        F.f = f;
+        F.tramp = at + 32 * (uint32_t)(g_fns.size() - 1);
+        uint8_t t[32];
+        std::memcpy(t, f->head, f->keep);
+        t[f->keep] = 0xe9;
+        const uint32_t rel = (f->va + f->keep) - (F.tramp + f->keep + 5);
+        std::memcpy(t + f->keep + 1, &rel, 4);
+        c.write(F.tramp, t, f->keep + 5u);
+        Fn *Fp = &F;
+        const std::string trap_name = std::string("aotcheck:") + f->name;
+        F.trap = rt::native_entry(trap_name.c_str(), f->pops / 4, [Fp](Cpu &cc) { return enter_fn(*Fp, cc); });
+    }
+    c.invalidate_code(at, bytes);
+    rt::logf("aot check: %u of %u compiled functions can be hooked%s%s%s", (unsigned)g_fns.size(), (unsigned)all,
+             moved ? " (some had other bytes at their entry)" : "", skipped.empty() ? "" : "; not: ",
+             skipped.c_str());
+}
+}  // namespace
 
 int install_aot(Cpu &c)
 {
@@ -355,7 +489,6 @@ int install_aot(Cpu &c)
         Root &R = g_roots[g_root_count++];
         R.r = r;
         R.calls = aotn_roots ? &aotn_roots[k] : r;
-        R.journal = aotj_roots ? &aotj_roots[k] : nullptr;
         R.tramp = at + 32 * k;
         uint8_t t[32];
         std::memcpy(t, r->head, r->keep);
@@ -376,22 +509,31 @@ int install_aot(Cpu &c)
         n++;
     }
     c.invalidate_code(at, 0x1000);
+    install_fns(c);
     set_aot_mode(c, mode);
-    rt::logf("aot: %d compiled roots%s, mode %d", n, aotj_roots ? " (with the check build)" : "", (int)mode);
+    rt::logf("aot: %d compiled roots%s, mode %d", n, aotj_funcs ? " (with the check build)" : "", (int)mode);
     return n;
 }
 
 void set_aot_mode(Cpu &c, AotMode mode)
 {
-    if (mode == AotMode::Check && !aotj_roots)
+    if (mode == AotMode::Check && g_fns.empty())
         mode = AotMode::Sig;
     g_mode = mode;
+    // Check hooks every function it can (the roots among them); the other
+    // modes the roots alone.
+    for (Fn &F : g_fns)
+        if (mode != AotMode::Check)
+            unhook_at(c, F.f->va, F.before, F.hooked);
     for (int k = 0; k < g_root_count; k++) {
-        if (mode == AotMode::Off)
+        if (mode == AotMode::Off || mode == AotMode::Check)
             unhook(g_roots[k], c);
         else
             hook(g_roots[k], c);
     }
+    for (Fn &F : g_fns)
+        if (mode == AotMode::Check)
+            hook_at(c, F.f->va, F.trap, F.before, F.hooked);
 }
 
 std::vector<std::string> aot_lines()
@@ -419,6 +561,28 @@ std::vector<std::string> aot_lines()
         std::memset(R.calls_n, 0, sizeof R.calls_n);
         std::memset(R.ticks_n, 0, sizeof R.ticks_n);
         R.checked = R.differ = 0;
+    }
+    if (g_mode == AotMode::Check && !g_fns.empty()) {
+        uint32_t calls = 0, differ = 0, unchecked = 0, fns = 0, calls_all = 0, differ_all = 0, unchecked_all = 0,
+                 fns_all = 0;
+        for (Fn &F : g_fns) {
+            calls += F.checked;
+            differ += F.differ;
+            unchecked += F.unchecked;
+            fns += (F.checked || F.unchecked) ? 1 : 0;
+            calls_all += F.checked_all;
+            differ_all += F.differ_all;
+            unchecked_all += F.unchecked_all;
+            fns_all += (F.checked_all || F.unchecked_all) ? 1 : 0;
+            F.checked = F.differ = F.unchecked = 0;
+        }
+        char line[256];
+        std::snprintf(line, sizeof line,
+                      "aot check: %u calls checked (%u functions), %u differ, %u unchecked (a call to Box86 inside); "
+                      "since the start %u calls of %u of %u functions, %u differ, %u unchecked",
+                      calls, fns, differ, unchecked, calls_all, fns_all, (unsigned)g_fns.size(), differ_all,
+                      unchecked_all);
+        out.push_back(line);
     }
     if (g_nested) {
         char line[256];
@@ -454,6 +618,8 @@ void aot_guest_call(uint32_t va, AotRegs *r)
 {
     game::g_nested++;
     game::g_nested_by[va]++;
+    if (game::g_journaling)
+        game::g_impure = true;   // the check (issue #114): Box86's writes aren't journaled
     if (aot_guest_hook) {
         aot_guest_hook(va, r);
         return;

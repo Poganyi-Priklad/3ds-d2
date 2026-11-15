@@ -245,6 +245,24 @@ The scope agreed on #112 (the review's proposal): A* with its real call tree, pl
 
 **Not in the spike,** as agreed: the target table, exits to the dispatcher, return-site entries, imports, packaging, and x87. The results and the go/no-go recommendation are on #113.
 
+## The check (#114)
+
+The spike's check compared the two roots only. `D2_AOT=5` now checks every compiled function whose entry can be hooked, at every call, wherever it comes from: the game's code, or the original's run inside another check.
+
+- **The table:** the journaled build (`AOT_JOURNAL`) has `aotj_funcs`: each compiled function with a register entry of its own (its signature code, called with all eight registers as a root is), the registers its compiled callers read after it (out), those it keeps (preserved), and its entry's first whole instructions for a trampoline.
+- **What can be hooked** (`recompile.py`'s `hookable()`): a function whose first 5 bytes or more are whole instructions with no branch among them, whose ret pops a known amount, and whose first bytes no branch reaches. The last is checked against every decoded function's branches and a raw sweep of `.text` for 32-bit calls and jumps, which over-approximates. Of the spike's 117 functions, 99 qualify. The other 18 start with a call or a branch: their code is still checked inside their callers' checks.
+- **One call checked:** the compiled code runs journaled. Its writes are put back, then the original runs from its trampoline under Box86 from the same registers. Compared: the out and preserved registers, and every byte the compiled code wrote outside the dead stack. The game keeps Box86's result, so a hooked function the original calls is checked in its turn: each check keeps its own journal.
+- **Unchecked calls:** when the compiled code calls Box86 (a callee not compiled), Box86's writes aren't journaled, so nothing can be put back. That call keeps the compiled result, runs once, and counts as unchecked. In the spike's set, these are the allocator wrappers (`0040b380`, `0040b430`, which call `0040a080`).
+- **The test:** `scripts/docker.sh test aot <game-dir> [<save-dir>]` (build-and-run.md).
+
+| Script | Calls checked | Functions reached (of 98 hooked) | Differ | Unchecked |
+| --- | --- | --- | --- | --- |
+| `town-walk.txt` (70 s) | 12,080,093 | 83 | 0 | 21,791 |
+| `fight.txt` (120 s) | 30,539,023 | 83 | 0 | 23,028 |
+| `act2-east.txt` (150 s, BeforeCh1End) | 32,018,886 | 85 | 0 | 35,842 |
+
+98 were hooked on the lane, not 99: one entry had other bytes there when the hooks went in.
+
 ## Open questions
 
 - **Is the gain there?** Yes, on the console: about 5× Box86 on A* and 3–4.7× on CofParams (#113). The lane's qemu showed 4.1× and 1.6×. What a full build gains depends on how much of a frame's code it covers (#115), and on its calls to code it doesn't compile going through the target table rather than a nested run.
