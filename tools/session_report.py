@@ -13,8 +13,12 @@ tools/profile_windows.py the same way tools/profile_report.py picks them
 A window is the heartbeat's four lines: `prof:` (frames, idle, thread
 switches, cache syncs), `prof intrin:` (DCC cells decoded so far), `prof
 files:` (reads, disk time) and `t=` (memory). The state comes from the last
-`game state:` line before it. Windows with no frames and no switches are
-suspends (HOME menu, lid) and are left out of the play figures. The cells
+`game state:` line before it. Windows with no frames and no switches, and
+windows a suspend (HOME menu, lid) fell in, are left out of the play
+figures: a `home:` line, logged on the return just before the `prof:` line
+of the window it fell in, gives the suspend's length, and that window's time
+includes it (a 757 s HOME trip made a 0.2 fps window in 3DS-D2-Z). A
+window's fps is over its time less its suspends. The cells
 decoded in a window are a count of sprite loads: sprites new to the game,
 and sprites the cache evicted and the game drew again (issue #31).
 
@@ -78,7 +82,7 @@ HITCH = re.compile(r"prof hitch: frames \d+, <=50ms \d+, <=100ms \d+, <=250ms (\
                    r"sprites in \d+ out \d+, (?:read wait (\d+) ms|wait (\d+) ms, ready (\d+) ms, host (\d+) ms, "
                    r"heartbeat (\d+) ms), skipped (\d+), famine (\d+)")
 
-FIELDS = ["t", "state", "ms", "frames", "fps", "idle_ms", "switches", "cache_syncs", "cache_sync_us", "cells",
+FIELDS = ["t", "state", "ms", "suspends", "suspend_ms", "frames", "fps", "idle_ms", "switches", "cache_syncs", "cache_sync_us", "cells",
           "reads", "opened", "load", "disk_reads", "disk_kib", "disk_ms", "heap_kib", "heap_peak_kib", "va_kib", "va_peak_kib",
           "free_kib", "jit_kib", "jit_used_kib", "meta_kib", "host_kib", "sprite_kib", "sprite_limit_kib", "sprites", "sprites_in",
           "sprites_out", "wait_ms", "wait_frame_ms", "stall_ms", "decodes", "decode_ms", "hitches", "hitches_250",
@@ -89,7 +93,13 @@ FIELDS = ["t", "state", "ms", "frames", "fps", "idle_ms", "switches", "cache_syn
 
 def parse(path):
     rows, cur, state, cells_before, opened_before = [], None, "start", None, None
+    suspends, suspend_ms = 0, 0   # the home: lines since the last prof: line
     for line in open(path, encoding="utf-8", errors="replace"):
+        m = profile_windows.HOME.search(line)
+        if m:
+            suspends += 1
+            suspend_ms += round(float(m.group(1)) * 1000)
+            continue
         m = STATE.search(line)
         if m:
             state = m.group(1)
@@ -97,8 +107,11 @@ def parse(path):
         m = PROF.search(line)
         if m:
             ms, frames, idle, switches, syncs, sync_us = map(int, m.groups())
-            cur = dict(state=state, ms=ms, frames=frames, fps=frames * 1000 / ms, idle_ms=idle, switches=switches,
+            live_ms = max(ms - suspend_ms, 1)
+            cur = dict(state=state, ms=ms, suspends=suspends, suspend_ms=suspend_ms, frames=frames,
+                       fps=frames * 1000 / live_ms, idle_ms=idle, switches=switches,
                        cache_syncs=syncs, cache_sync_us=sync_us, cells=0)
+            suspends, suspend_ms = 0, 0
             continue
         if cur is None:
             continue
@@ -211,11 +224,14 @@ def report(rows):
     if not rows:
         print("no heartbeat windows found")
         return
-    suspended = [r for r in rows if r["frames"] == 0 and r["switches"] == 0]
+    suspended = [r for r in rows if (r["frames"] == 0 and r["switches"] == 0) or r["suspends"]]
     live = [r for r in rows if r not in suspended]
     play = [r for r in live if r["state"].startswith("in game")]
     last = rows[-1]
-    print(f"session: {last['t']} s, {len(rows)} windows ({len(suspended)} suspended), "
+    trips = sum(r["suspends"] for r in rows)
+    print(f"session: {last['t']} s, {len(rows)} windows ({len(suspended)} suspended"
+          + (f"; {trips} HOME/lid suspends, {sum(r['suspend_ms'] for r in rows) / 1000:.0f} s" if trips else "")
+          + "), "
           f"{sum(r['frames'] for r in rows)} frames, {sum(r['cells'] for r in rows)} DCC cells decoded")
 
     print("\nby game state (suspends left out):")

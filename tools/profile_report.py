@@ -246,8 +246,12 @@ class Binary:
 
 def parse(path):
     windows, cur, state, on, opened = [], None, "start", False, None
+    suspends = 0   # the home: lines since the last prof: line (profile_windows.HOME)
     parse.clock_ns = None
     for line in open(path, encoding="utf-8", errors="replace"):
+        if profile_windows.HOME.search(line):
+            suspends += 1
+            continue
         m = CLOCK_COST.search(line)
         if m:   # the startup log's measure (issue #39)
             parse.clock_ns = int(m.group(1))
@@ -264,10 +268,11 @@ def parse(path):
         if m:
             cur = dict(ms=int(m.group(1)), frames=int(m.group(2)), idle=int(m.group(3)), state=state, on=on,
                        switches=int(m.group(4) or 0), syncs=int(m.group(5) or 0), decodes=0, timer_reads=None,
-                       reads=0, threads={},
+                       reads=0, threads={}, suspends=suspends,
                        eips=collections.defaultdict(collections.Counter), shims=collections.Counter(),
                        tail=collections.defaultdict(collections.Counter), tail_left=collections.Counter(),
                        clock=0, clock_at=collections.Counter(), locks=[0, 0, 0], locks_at=collections.Counter())
+            suspends = 0
             continue
         if cur is None:
             continue
