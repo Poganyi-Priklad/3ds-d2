@@ -41,13 +41,13 @@ typedef struct {
     uint8_t pops;         /* the bytes its ret pops after the return address */
     uint8_t head[16];     /* the game's first bytes there */
 } AotRoot;
-/* The check's table (issue #114, AOT_JOURNAL only): every compiled function,
- * entered with all eight registers as a root is. keep 0: its entry can't be
- * hooked (recompile.py's hookable(): a branch in its first bytes or into
- * them, or pops not known). */
+/* The functions' table (issues #114, #115; AOT_SYM(funcs) in each build):
+ * every compiled function, entered with all eight registers as a root is.
+ * keep 0: its entry can't be hooked (recompile.py's hookable(): a branch in
+ * its first bytes or into them, or pops not known). */
 typedef struct {
     uint32_t va;
-    AotRootFn sig;        /* its register-signature code, journaled */
+    AotRootFn sig;        /* its register-signature code (journaled in aotj_funcs) */
     const char *name;
     uint8_t keep, pops;
     uint8_t out;          /* bit k: r[k] is an output its compiled callers read */

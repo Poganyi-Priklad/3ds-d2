@@ -555,26 +555,67 @@ class Program:
             self.cfg_pops[va] = pops.pop() if len(pops) == 1 else None
             self.summ[va] = Summary(reads=(), preserved=ALL, pops=self.cfg_pops[va],
                                     known=not f.refused and len(pops) <= 1)
-        for _ in range(rounds):
-            changed = False
-            for va in vas:
-                f = self.func(va)
-                if f.refused or not self.summ[va].known:
-                    s = UNKNOWN
-                else:
-                    try:
-                        a = Analysis(self, f, save_rule=True)
-                        s = Summary(a.live_in, a.preserved, self.cfg_pops[va], True)
-                        self.why.pop(va, None)
-                    except Refused as e:
-                        self.why[va] = str(e)
-                        s = Summary(ALL, (), self.cfg_pops[va], True) if va in self.noreturn_funcs else UNKNOWN
-                if s != self.summ[va]:
-                    self.summ[va] = s
-                    changed = True
-            if not changed:
-                return
-        raise RuntimeError("summaries didn't settle")
+        # A worklist, callees first (issue #115): a function is analysed again
+        # only when the summary of one it calls changed.
+        vas = list(vas)
+        inset = set(vas)
+        callers = collections.defaultdict(set)
+        for va in vas:
+            f = self.func(va)
+            if not f.refused:
+                for t in list(f.calls.values()) + list(f.tails.values()):
+                    if isinstance(t, int) and t in inset:
+                        callers[t].add(va)
+        order = self.callees_first(vas)
+        work = collections.deque(order)
+        queued = set(order)
+        budget = rounds * max(1, len(vas))
+        while work:
+            budget -= 1
+            if budget < 0:
+                raise RuntimeError("summaries didn't settle")
+            va = work.popleft()
+            queued.discard(va)
+            f = self.func(va)
+            if f.refused or not self.summ[va].known:
+                s = UNKNOWN
+            else:
+                try:
+                    a = Analysis(self, f, save_rule=True)
+                    s = Summary(a.live_in, a.preserved, self.cfg_pops[va], True)
+                    self.why.pop(va, None)
+                except Refused as e:
+                    self.why[va] = str(e)
+                    s = Summary(ALL, (), self.cfg_pops[va], True) if va in self.noreturn_funcs else UNKNOWN
+            if s != self.summ[va]:
+                self.summ[va] = s
+                for c in callers[va]:
+                    if c not in queued:
+                        queued.add(c)
+                        work.append(c)
+
+    def callees_first(self, vas):
+        """The functions in post-order of their direct calls: a callee before
+        its callers, where there's no cycle."""
+        inset, seen, out = set(vas), set(), []
+        for root in sorted(vas):
+            if root in seen:
+                continue
+            stack = [(root, iter(()))]
+            seen.add(root)
+            f = self.func(root)
+            stack[-1] = (root, iter([] if f.refused else list(f.calls.values()) + list(f.tails.values())))
+            while stack:
+                va, it = stack[-1]
+                nxt = next((t for t in it if isinstance(t, int) and t in inset and t not in seen), None)
+                if nxt is None:
+                    out.append(va)
+                    stack.pop()
+                    continue
+                seen.add(nxt)
+                g = self.func(nxt)
+                stack.append((nxt, iter([] if g.refused else list(g.calls.values()) + list(g.tails.values()))))
+        return out
 
 
 class Analysis:
@@ -1667,28 +1708,44 @@ def compile_set(img, starts, roots, extra, mode_list, outdir, names=None):
                 for va in roots:
                     if va in compiled:
                         outs[va] = {EAX} | ({EBX, EBP, ESI, EDI} - prog.summ[va].preserved)
-                for _ in range(100):
-                    anas = {}
-                    for va in sorted(compiled):
-                        f = prog.func(va)
-                        cur = va
-                        a = Analysis(prog, f, outs=outs[va], save_rule=True)
-                        if not a.esp_ok:
-                            raise Refused("esp at a ret isn't known to be the entry's")
-                        Flags(f)
-                        anas[va] = a
-                        s = prog.summ[va]
+                # A worklist (issue #115): ins and outs only grow from nothing,
+                # so a function goes back on it when a compiled callee's ins
+                # grew (its callers) or its outs did (itself).
+                callers = collections.defaultdict(set)
+                for va in compiled:
+                    for t in prog.func(va).calls.values():
+                        if isinstance(t, int) and t in compiled:
+                            callers[t].add(va)
+                order = prog.callees_first(sorted(compiled))
+                work, queued = collections.deque(order), set(order)
+                budget = 100 * max(1, len(compiled))
+                while work:
+                    budget -= 1
+                    if budget < 0:
+                        raise RuntimeError("signatures didn't settle")
+                    va = work.popleft()
+                    queued.discard(va)
+                    f = prog.func(va)
+                    cur = va
+                    a = Analysis(prog, f, outs=outs[va], save_rule=True)
+                    if not a.esp_ok:
+                        raise Refused("esp at a ret isn't known to be the entry's")
+                    Flags(f)
+                    s = prog.summ[va]
+                    if frozenset(a.live_in) != s.reads:
                         prog.summ[va] = Summary(a.live_in, s.preserved, s.pops, True)
-                    new = {va: set(o) for va, o in outs.items()}
-                    for va, a in anas.items():
-                        for site, t in prog.func(va).calls.items():
-                            if t in compiled:
-                                new[t] |= a.live_out[site] - prog.summ[t].preserved - {ESP}
-                    ins = {va: prog.summ[va].reads for va in compiled}
-                    if new == outs and ins == getattr(compile_set, "_ins", None):
-                        break
-                    compile_set._ins = ins
-                    outs = new
+                        for c in callers[va]:
+                            if c not in queued:
+                                queued.add(c)
+                                work.append(c)
+                    for site, t in f.calls.items():
+                        if t in compiled:
+                            add = set(a.live_out[site]) - prog.summ[t].preserved - {ESP}
+                            if not add <= outs[t]:
+                                outs[t] |= add
+                                if t not in queued:
+                                    queued.add(t)
+                                    work.append(t)
                 break
             except Refused as e:
                 refused[cur] = str(e)
@@ -1750,14 +1807,14 @@ def compile_set(img, starts, roots, extra, mode_list, outdir, names=None):
                     body.append(" ".join("r[%d] = o[%d];" % (x, k) for k, x in enumerate(outs_)))
             chunks.append("static uint32_t AOT_SYM(%s_root_%08x)(uint32_t *r)\n{\n    %s\n    return r[0];\n}\n" % (
                 mode, va, "\n    ".join(body)))
-    # The check's table (issue #114), in the journaled build only: every
+    # The functions' table (issues #114, #115), in every build: every
     # compiled function with a register entry of its own, the registers its
     # compiled callers read after it (out) and those it keeps (preserved),
-    # and where it can be hooked.
+    # and where it can be hooked. The app hooks each from it (aot_funcs);
+    # the check uses the journaled build's (aotj_funcs).
     heads, why = hookable(img, prog, compiled, lambda w: rel32_targets(img, w))
     if "sig" in mode_list:
         em = Emitter(prog, compiled, "sig", sigs)
-        chunks.append("#ifdef AOT_JOURNAL")
         for va in sorted(compiled):
             sig = sigs[va]
             args = ", ".join(["r[4]"] + ["r[%d]" % x for x in sig["in"]])
@@ -1770,17 +1827,16 @@ def compile_set(img, starts, roots, extra, mode_list, outdir, names=None):
             else:
                 body = "uint32_t o[8]; %s(%s%s); %s" % (em.name(va), args, ", o" if outs_ else "",
                                                         " ".join("r[%d] = o[%d];" % (x, k) for k, x in enumerate(outs_)))
-            chunks.append("static uint32_t aotj_fn_%08x(uint32_t *r) { %s return r[0]; }" % (va, body))
-        chunks.append("const AotFunc aotj_funcs[] = {")
+            chunks.append("static uint32_t AOT_SYM(fn_%08x)(uint32_t *r) { %s return r[0]; }" % (va, body))
+        chunks.append("const AotFunc AOT_SYM(funcs)[] = {")
         for va in sorted(compiled):
             keep, head = heads.get(va, (0, [0] * 16))
             mask = lambda regs: sum(1 << x for x in regs if x != ESP)
-            chunks.append("    {0x%08xu, aotj_fn_%08x, \"%s\", %d, %d, 0x%02x, 0x%02x, %d, {%s}}," % (
+            chunks.append("    {0x%08xu, AOT_SYM(fn_%08x), \"%s\", %d, %d, 0x%02x, 0x%02x, %d, {%s}}," % (
                 va, va, names.get(va, "%08x" % va), keep, prog.summ[va].pops or 0, mask(sigs[va]["out"]),
                 mask(sigs[va]["preserved"]), 1 if va in roots else 0, ", ".join("0x%02x" % b for b in head)))
         chunks.append("    {0, 0, 0, 0, 0, 0, 0, 0, {0}}")
         chunks.append("};")
-        chunks.append("#endif")
     report["hooks"] = {"hookable": len(heads), "not": {"%08x" % k: v for k, v in sorted(why.items())}}
     chunks.append("const AotRoot AOT_SYM(roots)[] = {")
     for va in roots:

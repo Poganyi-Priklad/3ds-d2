@@ -81,6 +81,13 @@ build_id() { run_in "$TOOLCHAIN_IMAGE" sh scripts/build-id.sh; }
 # The output is the user's Game.exe in another form: it stays under build/
 # and in their own build. aot_prepare <game-dir> sets AOT_MAKE.
 AOT_MAKE=()
+# The set compiled: tools/aot/<D2_AOT_SET>.args (spike, the default, or
+# coverage: tools/aot/coverage.py's list, issue #115), comment lines left out.
+aot_args_file() { echo "$ROOT/tools/aot/${D2_AOT_SET:-spike}.args"; }
+aot_args() {
+    [ -f "$(aot_args_file)" ] || die "no $(aot_args_file) (D2_AOT_SET)"
+    grep -v '^[[:space:]]*#' "$(aot_args_file)"
+}
 aot_prepare() {
     case "${D2_AOT_BUILD:-}" in
     keep) AOT_MAKE=(AOT=/work/build/aot/spike); return 0 ;;   # what the last D2_AOT_BUILD=1 wrote (lanes side by side)
@@ -92,7 +99,7 @@ aot_prepare() {
     RUN_EXTRA=(-v "$(host_path "$game/Game.exe"):/aot/Game.exe:ro")
     # shellcheck disable=SC2046
     run_in "$HOSTTEST_IMAGE" python3 -I tools/aot/recompile.py /aot/Game.exe --out build/aot/spike \
-        $(cat "$ROOT/tools/aot/spike.args")
+        $(aot_args)
     RUN_EXTRA=(${saved[@]+"${saved[@]}"})
     AOT_MAKE=(AOT=/work/build/aot/spike)
 }
@@ -165,7 +172,7 @@ test)
         [ -n "${M4_OUT:-}" ] && make_args+=(OUT="/work/$M4_OUT")   # e.g. build/m4-b: a lane of its own
         [ -n "${4:-}" ] && make_args+=(CMD="$4")
         RUN_EXTRA=(-v "$(host_path "$(cd "$2" && pwd)"):/game:ro")
-        for v in M4_LAYOUT M4_VIRTUAL_CLOCK M4_SCRIPT M4_BOTTOM RT_MSGLOG M4_PHYS_MB M4_FAST M4_QEMU_FLAGS WX86_SON WX86_SONDUMP WX86_SONMAXS WX86_HOTPROF D2_NOLINK M4_FRAMEHASH M4_NATIVE D2_NATIVE_MASK M4_DUMPFRAME M4_VIDEO M4_VIDEO_WAV M4_PROF RT_FILETRACE M4_HASHMEM WX86_FAKETSC M4_ASYNCIO M4_SPRITE_MB M4_POOL_RESERVE_MB M4_POOL_SPARE_KB M4_SPRITE_TRACE M4_STORM_PRIO M4_STORM_DIRECT D2_NATIVE_CHECK M4_SPRITE_FRAMES M4_META_CAP_KB D2_JITEVICT D2_JITFAILAFTER D2_JITCHUNK_KB M4_POOL_PIECES M4_POOL_BALLAST_MB M4_POOL_LARGE_KB M4_POOL_LARGE_MIN_KB M4_BG_QUANTUM M4_CALLRET M4_NOPEND M4_BUDGETTAIL M4_FORWARD M4_HOTPROF_LEVEL D2_DRAW_CENSUS D2_FLOOR_QUEUE D2_DCC D2_AOT D2_AOT_ONLY WX86_BLOCKLOG; do [ -n "${!v:-}" ] && RUN_EXTRA+=(-e "$v=${!v}"); done
+        for v in M4_LAYOUT M4_VIRTUAL_CLOCK M4_SCRIPT M4_BOTTOM RT_MSGLOG M4_PHYS_MB M4_FAST M4_QEMU_FLAGS WX86_SON WX86_SONDUMP WX86_SONMAXS WX86_HOTPROF D2_NOLINK M4_FRAMEHASH M4_NATIVE D2_NATIVE_MASK M4_DUMPFRAME M4_VIDEO M4_VIDEO_WAV M4_PROF RT_FILETRACE M4_HASHMEM WX86_FAKETSC M4_ASYNCIO M4_SPRITE_MB M4_POOL_RESERVE_MB M4_POOL_SPARE_KB M4_SPRITE_TRACE M4_STORM_PRIO M4_STORM_DIRECT D2_NATIVE_CHECK M4_SPRITE_FRAMES M4_META_CAP_KB D2_JITEVICT D2_JITFAILAFTER D2_JITCHUNK_KB M4_POOL_PIECES M4_POOL_BALLAST_MB M4_POOL_LARGE_KB M4_POOL_LARGE_MIN_KB M4_BG_QUANTUM M4_CALLRET M4_NOPEND M4_BUDGETTAIL M4_FORWARD M4_HOTPROF_LEVEL M4_HOTPROF_TOP D2_DRAW_CENSUS D2_FLOOR_QUEUE D2_DCC D2_AOT D2_AOT_ONLY WX86_BLOCKLOG; do [ -n "${!v:-}" ] && RUN_EXTRA+=(-e "$v=${!v}"); done
         run_in "$HOSTTEST_IMAGE" make "${make_args[@]}" ;;
     aot)  # <game-dir> [<save-dir>] (issue #114): the recompiler on its Game.exe, then the lane's scripts with
           # D2_AOT=5 in one lane of their own (build/m4-aot), each from a fresh write folder (Act II's a copy
@@ -264,7 +271,7 @@ package-cia)   # [<game-dir> | --slim|--full <game-dir>]: the game app (+ the us
     bid="$(build_id)"
     # The build ID covers the AOT step: the recompiler's and its arguments'
     # hash, never Game.exe's.
-    [ ${#AOT_MAKE[@]} -gt 0 ] && bid="$bid-aot$(cat "$ROOT/tools/aot/recompile.py" "$ROOT/tools/aot/spike.args" | sha256sum | cut -c1-6)"
+    [ ${#AOT_MAKE[@]} -gt 0 ] && bid="$bid-aot$(cat "$ROOT/tools/aot/recompile.py" "$(aot_args_file)" | sha256sum | cut -c1-6)"
     report_vars=(BUILD_ID="$bid" D2_VERSION="$version" ${AOT_MAKE[@]+"${AOT_MAKE[@]}"})
     [ -n "${D2_REPORT_DSN+x}" ] && report_vars+=(D2_REPORT_DSN="$D2_REPORT_DSN")
     run_in "$TOOLCHAIN_IMAGE" make -s -j8 -C tests/cpu/ctr "${report_vars[@]}" ../../../build/cpu/ctr/3ds-d2-game-cia.elf ../../../build/cpu/ctr/tls.bin

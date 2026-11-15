@@ -29,6 +29,7 @@ uint8_t *aot_mem = nullptr;
 // without it.
 extern const AotRoot aot_roots[] __attribute__((weak));
 extern const AotRoot aotn_roots[] __attribute__((weak));
+extern const AotFunc aot_funcs[] __attribute__((weak));
 extern const AotFunc aotj_funcs[] __attribute__((weak));
 }
 
@@ -174,7 +175,8 @@ std::vector<uint8_t> g_old;
 // memory the journal doesn't see: that call keeps the compiled result,
 // nothing is put back or run twice, and it counts as unchecked.
 struct Fn {
-    const AotFunc *f = nullptr;
+    const AotFunc *f = nullptr;    // aot_funcs': what Sig runs
+    const AotFunc *fj = nullptr;   // aotj_funcs' (journaled): what Check runs
     uint32_t tramp = 0, trap = 0;
     uint8_t before[5] = {};
     bool hooked = false;
@@ -206,7 +208,7 @@ void check_fn(Fn &F, Cpu &c, uint32_t *regs)
     g_old.clear();
     g_impure = false;
     g_journaling++;
-    F.f->sig(a);
+    F.fj->sig(a);
     g_journaling--;
     if (g_impure) {
         F.unchecked++;
@@ -277,10 +279,12 @@ uint32_t enter_fn(Fn &F, Cpu &c)
     uint32_t regs[8];
     c.regs_gp(regs);
     g_cpu = &c;
-    if (g_mode == AotMode::Check)
+    if (g_mode == AotMode::Check && F.fj)
         check_fn(F, c, regs);
+    else if (g_mode == AotMode::Sig)
+        F.f->sig(regs);
     else
-        nested_run(c, F.tramp, regs);   // hooked only in Check; between modes, the original
+        nested_run(c, F.tramp, regs);   // hooked only in Sig and Check; between modes, the original
     for (int k = 0; k < 8; k++)
         if (k != 4)
             c.set_reg(k, regs[k]);
@@ -393,15 +397,17 @@ void aot_set_native(uint32_t va, AotNativeFn fn)
 void set_aot_wanted(AotMode mode) { g_wanted = mode; }
 
 namespace {
-// The check's entries (issue #114): one per compiled function whose entry
-// can be hooked, each with a trampoline and a trap of its own. Hooked only
-// in Check (set_aot_mode).
+// The functions' entries (issues #114, #115): one per compiled function
+// whose entry can be hooked, each with a trampoline and a trap of its own.
+// Hooked in Sig (the compiled code from Box86's calls) and Check
+// (set_aot_mode).
 void install_fns(Cpu &c)
 {
-    if (!aotj_funcs)
+    const AotFunc *funcs = aot_funcs ? aot_funcs : nullptr;
+    if (!funcs)
         return;
     size_t n = 0, all = 0;
-    for (const AotFunc *f = aotj_funcs; f->va; f++, all++)
+    for (const AotFunc *f = funcs; f->va; f++, all++)
         n += f->keep ? 1 : 0;
     if (!n)
         return;
@@ -414,7 +420,8 @@ void install_fns(Cpu &c)
     g_fns.reserve(n);
     std::string skipped;
     uint32_t moved = 0;
-    for (const AotFunc *f = aotj_funcs; f->va; f++) {
+    for (const AotFunc *f = funcs; f->va; f++) {
+        const AotFunc *fj = aotj_funcs && aotj_funcs[f - funcs].va == f->va ? &aotj_funcs[f - funcs] : nullptr;
         if (!f->keep) {
             if (skipped.size() < 160)
                 skipped += (skipped.empty() ? "" : ", ") + std::string(f->name);
@@ -429,6 +436,7 @@ void install_fns(Cpu &c)
         g_fns.emplace_back();
         Fn &F = g_fns.back();
         F.f = f;
+        F.fj = fj;
         F.tramp = at + 32 * (uint32_t)(g_fns.size() - 1);
         uint8_t t[32];
         std::memcpy(t, f->head, f->keep);
@@ -437,11 +445,11 @@ void install_fns(Cpu &c)
         std::memcpy(t + f->keep + 1, &rel, 4);
         c.write(F.tramp, t, f->keep + 5u);
         Fn *Fp = &F;
-        const std::string trap_name = std::string("aotcheck:") + f->name;
+        const std::string trap_name = std::string("aotfn:") + f->name;
         F.trap = rt::native_entry(trap_name.c_str(), f->pops / 4, [Fp](Cpu &cc) { return enter_fn(*Fp, cc); });
     }
     c.invalidate_code(at, bytes);
-    rt::logf("aot check: %u of %u compiled functions can be hooked%s%s%s", (unsigned)g_fns.size(), (unsigned)all,
+    rt::logf("aot: %u of %u compiled functions can be hooked%s%s%s", (unsigned)g_fns.size(), (unsigned)all,
              moved ? " (some had other bytes at their entry)" : "", skipped.empty() ? "" : "; not: ",
              skipped.c_str());
 }
@@ -517,22 +525,23 @@ int install_aot(Cpu &c)
 
 void set_aot_mode(Cpu &c, AotMode mode)
 {
-    if (mode == AotMode::Check && g_fns.empty())
+    if (mode == AotMode::Check && (g_fns.empty() || !g_fns[0].fj))
         mode = AotMode::Sig;
     g_mode = mode;
-    // Check hooks every function it can (the roots among them); the other
-    // modes the roots alone.
+    // Sig and Check hook every function they can (the roots among them); the
+    // spike's other modes the roots alone.
+    const bool fns = (mode == AotMode::Sig || mode == AotMode::Check) && !g_fns.empty();
     for (Fn &F : g_fns)
-        if (mode != AotMode::Check)
+        if (!fns)
             unhook_at(c, F.f->va, F.before, F.hooked);
     for (int k = 0; k < g_root_count; k++) {
-        if (mode == AotMode::Off || mode == AotMode::Check)
+        if (mode == AotMode::Off || fns)
             unhook(g_roots[k], c);
         else
             hook(g_roots[k], c);
     }
     for (Fn &F : g_fns)
-        if (mode == AotMode::Check)
+        if (fns)
             hook_at(c, F.f->va, F.trap, F.before, F.hooked);
 }
 
