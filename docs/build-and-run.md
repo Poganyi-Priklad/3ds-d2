@@ -68,6 +68,14 @@ d2decomped (`third_party/d2d`, GPL-3.0-or-later, #105) is used the same way, for
 - `CASES=<n>` sets the cases per native (default 400), `ONLY=<Name,...>` picks natives: `CASES=50 ONLY=StatGet scripts/docker.sh test d2d dist/game`.
 - **Adding a native:** a generator function in `gen_cases.py` (its inputs, in the form of the others) and its entry in `NATIVES`, then the native's function in `native_cases.cpp`'s `kNatives`. An in-line native uses `Gen.run_inline` with its resume addresses and work points. Check that the cases can fail: break the native on purpose and see them differ.
 
+### The AOT spike's compiled code (issue #113)
+
+`D2_AOT_BUILD=1` in front of `test m4`, `test d2d` or `package-cia` runs the recompiler (`tools/aot/recompile.py`, [aot.md](aot.md)) on the user's Game.exe first. It writes C into `build/aot/spike/`, which those builds compile in. What it compiles is in `tools/aot/spike.args`. Its output is the user's Game.exe in another form: it stays under `build/` and in their own CIA, which `package-cia` names with an `-aot…` build ID and says is theirs alone.
+- **The lane:** `D2_AOT=<mode>` with `D2_AOT_BUILD=1`: 1 the register signatures, 2 every register through a context, 3 and 4 the same without inlining between compiled functions, 5 the check (each call compiled with its stores journaled, memory put back, Box86 running the original, compared), 6 the bench (each call one way in turn, timed). `D2_AOT_ONLY=PathSearch` (or `CofParams`) hooks one root alone. The heartbeat's `aot:` lines give each window's calls and times.
+- **The host:** `D2_AOT_BUILD=1 ONLY=PathSearch scripts/docker.sh test d2d dist/game` runs the compiled A* on PathSearch's cases in all four builds; a nested Box86 run counts as left to the game.
+- **The console:** INFO → OPTIONS → **AOT spike: time each way** in a CIA built with `D2_AOT_BUILD=1`; game.log's `aot:` lines.
+- **The rest:** `tools/aot/recompile.py dist/game/Game.exe --survey` answers the note's whole-binary questions; `tools/aot/code_size.py` sets the compiled code's size against Box86's (`WX86_BLOCKLOG=1` on the lane, backend patch 0061).
+
 ## Run in Azahar
 
 ```sh

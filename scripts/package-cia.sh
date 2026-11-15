@@ -56,7 +56,7 @@ cp "$tls" "$romfs/tls.bin"
 
 work=build/cia
 out=dist/cia
-version=0.4.0   # the title version FBI and the HOME menu show (major.minor.micro)
+version=0.5.0   # the title version FBI and the HOME menu show (major.minor.micro)
 mkdir -p "$out"
 python3 -I packaging/cia/make_art.py "$work"   # the drawn art, and a silent banner.wav
 smdh_flags=visible,allow3d,recordusage   # bannertool's default
@@ -79,7 +79,9 @@ fi
 bannertool makesmdh -s "3ds-d2" -l "Diablo II LoD 1.14d on the n3DS" -p "https://github.com/exsilium/3ds-d2" -f "$smdh_flags" \
     -i "$work/icon.png" -o "$work/icon.icn" >/dev/null
 
-id="$(sh scripts/build-id.sh 2>/dev/null || echo unversioned)"
+# D2_BUILD_ID: docker.sh's, when it isn't build-id.sh's alone (an AOT build's
+# "-aot..." suffix, issue #113).
+id="${D2_BUILD_ID:-$(sh scripts/build-id.sh 2>/dev/null || echo unversioned)}"
 # The name says the version reports carry: "0.4.0-dev" unless built from the
 # release tag (docker.sh passes scripts/version.sh's; issue #61).
 name="3ds-d2-${D2_VERSION:-$version-dev}-$id"

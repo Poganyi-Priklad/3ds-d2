@@ -624,7 +624,7 @@ This is the split of the New 3DS's 124 MiB application region in play. The figur
 
 | Symbol | Size | What it is |
 | --- | --- | --- |
-| `dyn86_ctr_jitpool` | 16 MiB | The translated code's pool (`src/app/ctr_game.cpp`) |
+| `dyn86_ctr_jitpool` | 16 MiB in that build; 14 MiB since issue #89 (below) | The translated code's pool (`src/app/ctr_game.cpp`) |
 | `static_insts` | 896 KiB | Box86's scratch while translating a block |
 | `weight.5` | 512 KiB | A function-static table in the backend; not identified yet |
 | `g_hp_addr`, `g_hp_count` | 256 KiB each | Probably the profiler's hot-path tables; not checked |

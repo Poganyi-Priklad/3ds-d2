@@ -183,7 +183,7 @@ Everything builds inside Docker containers with a pinned toolchain (devkitARM, l
 
    ```
    cia: 3ds-d2-<version>-<build-id>.cia
-   version: 0.4.0
+   version: 0.5.0
    sha256: ...
    ```
 
