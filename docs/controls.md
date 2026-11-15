@@ -138,6 +138,7 @@ Each poll (every ≥ 16 ms, from the game's own message pump) becomes the window
 Two timing rules the game needs:
 - **Taps:** a tap holds the button for 120 ms. Down and up inside one 40 ms game frame do not count as a click.
 - **Walking:** the cursor moves first and the button goes down on the next poll. The game resolves a click against what the cursor hovered in the previous frame.
+- **Presses shorter than a frame** (issue #118): the game pumps messages about once a frame (40–80 ms in play, 200 ms at 5 fps), so a press and release between two pumps used to be lost. On a console with a second core, a thread reads the pad every 4 ms (`src/game/pad_history.h`). When a button or the touch screen changed twice between two pumps, the pump replays each change in order, each at its own time. Otherwise it applies the latest reading alone, as before. A mouse button that goes down and up within one pump's replay is released at the next pump, so the game sees a click. Without a second core, the pump reads the pad itself, as before. `scripts/docker.sh test pad` runs D2Vita's bench (`bc968fb`): presses of 80 and 150 ms at 25, 10 and 5 fps. 80 ms presses at 5 fps went from 4 of 12 kept to 12 of 12.
 
 On the Linux lane, `M4_SCRIPT` drives the same `game::Controls` with scripted pad events (`tests/m4/game_main.cpp`). The scripted run below goes from the main menu, through a new Barbarian, into the Rogue Encampment:
 

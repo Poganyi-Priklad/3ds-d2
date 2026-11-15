@@ -10,6 +10,7 @@
 #   scripts/docker.sh test cpu [armv7|armv6]  the same fixtures through the Box86 backend
 #   scripts/docker.sh test m3            a PE32 through the Win32 runtime on the ARMv6 backend
 #   scripts/docker.sh test tls           the reports' TLS module under qemu-arm: a test event to Sentry (network)
+#   scripts/docker.sh test pad           the pad's readings between two message pumps (issue #118)
 #   scripts/docker.sh test d2d [<game-dir>]   d2d's work tree and its harness's modules; with Game.exe, its cases vs our natives
 #   scripts/docker.sh test aot <game-dir> [<save-dir>]   every AOT-compiled function checked against Box86 on the lane's
 #                                        town walk and fight, and with an Act I save (dist/save/BeforeCh1End/save) Act II
@@ -140,6 +141,7 @@ test)
     governor) run_in "$HOSTTEST_IMAGE" make -C tests/governor run ;;   # the sprite cache governor's policy
     gameexe) run_in "$HOSTTEST_IMAGE" make -C tests/gameexe run ;;   # 1.14d's Game.exe told from the others
     frames) run_in "$HOSTTEST_IMAGE" make -C tests/frames run ;;   # the allocator of the sprite cache's frames
+    pad)  run_in "$HOSTTEST_IMAGE" make -C tests/pad run ;;   # presses shorter than a frame kept (issue #118)
     pool) run_in "$HOSTTEST_IMAGE" make -C tests/pool run ;;   # where the pool's VirtualAlloc face fits a block without the spare
     d2d)  # [<game-dir>]: d2d's work tree, prepared and patched (issue #106); with the game directory
           # (mounted read-only), d2d's emulator-made cases against our natives (issue #108)
@@ -198,7 +200,7 @@ test)
             fi
         done
         exit "$fail" ;;
-    *)    die "test host | test x86 [golden] | test cpu [armv7|armv6] | test m3 | test report | test governor | test gameexe | test frames | test pool | test d2d [<game-dir>] | test tls | test m4 <game-dir> | test aot <game-dir> [<save-dir>]" ;;
+    *)    die "test host | test x86 [golden] | test cpu [armv7|armv6] | test m3 | test report | test governor | test gameexe | test frames | test pad | test pool | test d2d [<game-dir>] | test tls | test m4 <game-dir> | test aot <game-dir> [<save-dir>]" ;;
     esac
     ;;
 package)
