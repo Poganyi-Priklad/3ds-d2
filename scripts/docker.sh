@@ -180,34 +180,57 @@ test)
           # PASS with calls checked and none differing.
         [ -n "${2:-}" ] && [ -f "$2/Game.exe" ] || die "test aot <game-dir with Game.exe> [<save-dir>]"
         [ -z "${3:-}" ] || [ -f "$3/registry.txt" ] || die "test aot: $3 is not a save folder (no registry.txt)"
-        D2_AOT_BUILD=1 aot_prepare "$2"
+        # D2_AOT_BUILD=keep: the C the last run wrote; AOT_RUNS=<script ...>: those scripts alone;
+        # D2_AOT_FNS=<first>-<last>: only those hookable functions (src/game/aot_spike.cpp); AOT_MODE=1:
+        # the production mode instead of the check (the lane's end alone is judged then); AOT_SPLIT=1:
+        # compiled functions calling each other through Box86 (tests/m4/Makefile).
+        D2_AOT_BUILD="${D2_AOT_BUILD:-1}" aot_prepare "$2"
         runs=("town-walk 70000" "fight 120000")
         [ -n "${3:-}" ] && runs+=("act2-east 150000")
+        if [ -n "${AOT_RUNS:-}" ]; then
+            all=("${runs[@]}"); runs=()
+            for r in "${all[@]}"; do [[ " $AOT_RUNS " == *" ${r% *} "* ]] && runs+=("$r"); done
+        fi
         out=build/m4-aot
         fail=0
         for r in "${runs[@]}"; do
             name="${r% *}"; ms="${r#* }"
             rm -rf "${ROOT:?}/$out/write" && mkdir -p "$ROOT/$out/write"
             [ "$name" = act2-east ] && cp -R "$3/." "$ROOT/$out/write/"
-            RUN_EXTRA=(-v "$(host_path "$(cd "$2" && pwd)"):/game:ro" -e D2_AOT=5 -e M4_VIRTUAL_CLOCK=1 -e WX86_FAKETSC=1
+            RUN_EXTRA=(-v "$(host_path "$(cd "$2" && pwd)"):/game:ro" -e "D2_AOT=${AOT_MODE:-5}" -e "D2_AOT_FNS=${D2_AOT_FNS:-}" -e M4_VIRTUAL_CLOCK=1 -e WX86_FAKETSC=1
                        -e "M4_SCRIPT=$(cat "$ROOT/tests/m4/scripts/$name.txt")")
-            run_in "$HOSTTEST_IMAGE" make -C tests/m4 run MS="$ms" OUT="/work/$out" "${AOT_MAKE[@]}" > "$ROOT/$out/$name-make.txt" 2>&1 || true
+            run_in "$HOSTTEST_IMAGE" make -C tests/m4 run MS="$ms" OUT="/work/$out" "${AOT_MAKE[@]}" \
+                ${AOT_SPLIT:+AOT_SPLIT=1} > "$ROOT/$out/$name-make.txt" 2>&1 || true
             cp "$ROOT/$out/err.txt" "$ROOT/$out/$name.txt" 2>/dev/null || : > "$ROOT/$out/$name.txt"
-            last="$(grep -h "aot check: .* since the start" "$ROOT/$out/$name.txt" | tail -1 || true)"
-            differs="$(grep -c "aot check: .* differs on its call" "$ROOT/$out/$name.txt" || true)"
+            last="$(grep -ah "aot check: .* since the start" "$ROOT/$out/$name.txt" | tail -1 || true)"
+            differs="$(grep -ac "aot check: .* differs on its call" "$ROOT/$out/$name.txt" || true)"
             calls="$(sed -n 's/.*since the start \([0-9]*\) calls.*/\1/p' <<<"$last")"
             ndiff="$(sed -n 's/.*functions, \([0-9]*\) differ.*/\1/p' <<<"$last")"
             status="$(sed -n 's/^exit status //p' "$ROOT/$out/$name-make.txt" | tail -1)"
-            if [ -n "$calls" ] && [ "$calls" -gt 0 ] && [ "${ndiff:-1}" = 0 ] && [ "${differs:-0}" = 0 ]; then
+            # The game's own end: a script's run ends at its time (code 0); an exit of the game's
+            # (an exception it raised, say) is a failure whatever was checked before it.
+            code="$(sed -n 's/^\[rt\] RESULT .*code=\([0-9]*\).*/\1/p' "$ROOT/$out/$name.txt" | tail -1)"
+            if [ "${code:-x}" != 0 ]; then
+                echo "RESULT aot.check.$name FAIL (the game ended with code ${code:-none}; ${last:-no aot check line}; see $out/$name.txt)"
+                grep -ah "RaiseException\|exception" "$ROOT/$out/$name.txt" | head -3 || true
+                fail=1
+            elif [ "${AOT_MODE:-5}" != 5 ]; then
+                echo "RESULT aot.run.$name PASS (mode ${AOT_MODE}, the game ran to its time)"
+            elif [ -n "$calls" ] && [ "$calls" -gt 0 ] && [ "${ndiff:-1}" = 0 ] && [ "${differs:-0}" = 0 ]; then
                 echo "RESULT aot.check.$name PASS (lane exit ${status:-?}; since the start ${last#*since the start })"
             else
                 echo "RESULT aot.check.$name FAIL (lane exit ${status:-?}; ${last:-no aot check line: see $out/$name.txt})"
-                grep -h "aot check: .* differs" "$ROOT/$out/$name.txt" | head -5 || true
+                grep -ah "aot check: .* differs" "$ROOT/$out/$name.txt" | head -5 || true
                 fail=1
             fi
         done
         exit "$fail" ;;
-    *)    die "test host | test x86 [golden] | test cpu [armv7|armv6] | test m3 | test report | test governor | test gameexe | test frames | test pad | test pool | test d2d [<game-dir>] | test tls | test m4 <game-dir> | test aot <game-dir> [<save-dir>]" ;;
+    aot-explain)  # <game-dir> <va,va,...> (issue #115): why each is left to Box86, with D2_AOT_SET's summaries
+        [ -n "${2:-}" ] && [ -f "$2/Game.exe" ] && [ -n "${3:-}" ] || die "test aot-explain <game-dir> <va,...>"
+        RUN_EXTRA=(-v "$(host_path "$(cd "$2" && pwd)/Game.exe"):/aot/Game.exe:ro")
+        # shellcheck disable=SC2046
+        run_in "$HOSTTEST_IMAGE" python3 -I tools/aot/recompile.py /aot/Game.exe --explain "$3" $(aot_args) ;;
+    *)    die "test host | test x86 [golden] | test cpu [armv7|armv6] | test m3 | test report | test governor | test gameexe | test frames | test pad | test pool | test d2d [<game-dir>] | test tls | test m4 <game-dir> | test aot <game-dir> [<save-dir>] | test aot-explain <game-dir> <va,...>" ;;
     esac
     ;;
 package)

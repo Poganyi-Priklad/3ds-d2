@@ -382,7 +382,7 @@ void unhook(Root &R, Cpu &c) { unhook_at(c, R.r->va, R.before, R.hooked); }
 
 }  // namespace
 
-bool aot_linked() { return aot_roots != nullptr && aot_roots[0].va != 0; }
+bool aot_linked() { return (aot_roots && aot_roots[0].va) || (aot_funcs && aot_funcs[0].va); }
 AotMode aot_mode() { return g_mode; }
 
 void aot_set_native(uint32_t va, AotNativeFn fn)
@@ -419,7 +419,13 @@ void install_fns(Cpu &c)
     }
     g_fns.reserve(n);
     std::string skipped;
-    uint32_t moved = 0;
+    uint32_t moved = 0, index = 0, left_out = 0;
+    // D2_AOT_FNS=<first>-<last> (the lane, issue #115): only the hookable
+    // functions with those indexes (from 0, in the table's order), to find
+    // by halves one that goes wrong where the check doesn't see it.
+    uint32_t first = 0, last = UINT32_MAX;
+    if (const char *r = std::getenv("D2_AOT_FNS"))
+        std::sscanf(r, "%u-%u", &first, &last);
     for (const AotFunc *f = funcs; f->va; f++) {
         const AotFunc *fj = aotj_funcs && aotj_funcs[f - funcs].va == f->va ? &aotj_funcs[f - funcs] : nullptr;
         if (!f->keep) {
@@ -427,6 +433,12 @@ void install_fns(Cpu &c)
                 skipped += (skipped.empty() ? "" : ", ") + std::string(f->name);
             continue;
         }
+        if (index < first || index > last) {
+            index++;
+            left_out++;
+            continue;
+        }
+        index++;
         uint8_t have[16];
         c.read(f->va, have, 16);
         if (std::memcmp(have, f->head, f->keep) != 0) {   // a native's hook there already, or another Game.exe
@@ -452,6 +464,8 @@ void install_fns(Cpu &c)
     rt::logf("aot: %u of %u compiled functions can be hooked%s%s%s", (unsigned)g_fns.size(), (unsigned)all,
              moved ? " (some had other bytes at their entry)" : "", skipped.empty() ? "" : "; not: ",
              skipped.c_str());
+    if (left_out)
+        rt::logf("aot: %u left out (D2_AOT_FNS %u-%u)", (unsigned)left_out, (unsigned)first, (unsigned)last);
 }
 }  // namespace
 
