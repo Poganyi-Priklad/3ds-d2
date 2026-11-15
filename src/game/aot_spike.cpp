@@ -104,10 +104,12 @@ uint32_t g_nested_yields = 0;   // shims inside a nested run that asked to yield
 // threads (rt_host.cpp's nudge_thread_budget), and a shim may ask to yield.
 // Each comes back with EIP at the resume point, so this runs on until EIP
 // is the sentinel, as the backend's own nested calls do (cpu_box86.cpp, the
-// SEH dispatch). Taking the first stop for the end left the game's thread
-// with registers from the middle of the callee (issue #113: the console's
-// first bench froze in Lut Gholein after one nested A*). A nudge taken here
-// is sent again after, so the outer slice still stops for it. A yield can't
+// SEH dispatch). Taking the first stop for the end would leave the game's
+// thread with registers from the middle of the callee. A nudge taken here
+// is sent again after, so the outer slice still stops for it. (A nested
+// run must never come from a trap served in line, inside the dynarec's own
+// run: its stop at the sentinel would end that run too. install_aot names
+// the roots' traps apart for this.) A yield can't
 // be honoured inside a nested run (the scheduler can't switch away from
 // it): resumed, and logged, since a wait that really had to block would get
 // a wrong result.
@@ -132,10 +134,14 @@ void nested_run(Cpu &c, uint32_t va, uint32_t *r)
         if (eip == sentinel)
             break;
         stopped = true;
-        (void)c.take_limit_hit();
-        if (rt::bridge().take_yield() && ++g_nested_yields <= 10)
-            rt::logf("aot: a shim yielded inside a nested run of %08x (at %08x), resumed (%u so far)", va, eip,
-                     g_nested_yields);
+        const bool lim = c.take_limit_hit();
+        const bool yielded = rt::bridge().take_yield();
+        if (yielded)
+            g_nested_yields++;
+        static uint32_t logged = 0;
+        if (++logged <= 10)
+            rt::logf("aot: a nested run of %08x stopped at %08x (%s), resumed", va, eip,
+                     lim ? "slice" : yielded ? "a shim's yield" : "no reason given");
     }
     if (stopped)
         c.nudge_thread_budget(nullptr);
@@ -358,7 +364,12 @@ int install_aot(Cpu &c)
         std::memcpy(t + r->keep + 1, &rel, 4);
         c.write(R.tramp, t, r->keep + 5u);
         Root *Rp = &R;
-        R.trap = rt::native_entry(r->name, r->pops / 4, [Rp](Cpu &cc) { return enter(*Rp, cc); });
+        // A name of its own: the bridge keeps one trap per name, and a native
+        // on the same entry (PathSearch) would otherwise get this one back and
+        // mark it in line (hook_function), with the nested runs then inside
+        // the dynarec's own run (issue #113: the console's bench froze).
+        const std::string trap_name = std::string("aot:") + r->name;
+        R.trap = rt::native_entry(trap_name.c_str(), r->pops / 4, [Rp](Cpu &cc) { return enter(*Rp, cc); });
         for (int j = 0; j < g_native_count; j++)
             if (g_natives[j].va == r->va)
                 R.native = g_natives[j].fn;
