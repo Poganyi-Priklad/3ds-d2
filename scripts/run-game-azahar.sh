@@ -167,7 +167,11 @@ fi
 
 # The CIA: built with the game's art (its icon, banner and tune) from the
 # game folder, installed (azahar -i, which stays open after: stopped once the
-# title's content is in place), then its content started.
+# title's content is in place), then its content started. The install is
+# told by Azahar's own line, or by the title's content folder changing (each
+# install writes a TMD under the next number; the .app keeps its name when
+# the CIA is the same). Without either, it stops: the .app left there is the
+# earlier install's, and starting it would run the old build.
 if [ "$build" = 1 ]; then
     art="${install:-$ROOT/dist/game}"
     [ -f "$art/Game.exe" ] || die "no game folder for the CIA's art: --install <dir>, or dist/game"
@@ -175,30 +179,46 @@ if [ "$build" = 1 ]; then
 fi
 [ -n "$cia" ] || cia="$(ls -t "$ROOT"/dist/cia/*.cia 2>/dev/null | head -1)"
 [ -f "$cia" ] || die "no CIA (scripts/docker.sh package-cia dist/game)"
+case "$cia" in /*) ;; *) cia="$PWD/$cia" ;; esac   # Azahar takes a relative path from its own folder ("File not found")
 content="$SDMC/Nintendo 3DS/00000000000000000000000000000000/00000000000000000000000000000000/title/00040000/0d2d3d00/content"
-before="$(ls "$content"/*.app 2>/dev/null || true)"
-stamp="$(mktemp)"
+before="$(ls "$content" 2>/dev/null || true)"
+ilog="$(mktemp)"
 echo "installing $(basename "$cia")"
 c="$cia"; [ "$windows" = 1 ] && c="$(cygpath -w "$cia")"
-"$AZ" -i "$c" >/dev/null 2>&1 &
+"$AZ" -i "$c" >"$ilog" 2>&1 &
 pid=$!
-app=""
+result=""
 for _ in $(seq 1 240); do   # up to 2 minutes
-    for a in "$content"/*.app; do
-        [ -f "$a" ] || continue
-        if ! printf '%s
-' "$before" | grep -qxF "$a" || [ "$a" -nt "$stamp" ]; then app="$a"; fi
-    done
-    [ -n "$app" ] && break
-    kill -0 "$pid" 2>/dev/null || break
+    if grep -q "Installed CIA successfully" "$ilog"; then result=ok; break; fi
+    if grep -qE "Failed to install|Could not install CIA|installation aborted|aborting install|Blocked unauthorized" "$ilog"; then
+        result=failed; break
+    fi
+    [ "$(ls "$content" 2>/dev/null || true)" != "$before" ] && { result=changed; break; }
+    kill -0 "$pid" 2>/dev/null || { result=exited; break; }
     sleep 0.5
 done
 sleep 1   # the content written out
 kill "$pid" 2>/dev/null || true
 [ "$windows" = 1 ] && taskkill //F //PID "$(cat /proc/$pid/winpid 2>/dev/null || echo 0)" >/dev/null 2>&1 || true
 wait "$pid" 2>/dev/null || true
-rm -f "$stamp"
-[ -n "$app" ] || app="$(ls -t "$content"/*.app 2>/dev/null | head -1)"
+# Azahar's line can come before the folder shows the new files, and a
+# changed folder before the line: either way the folder must have changed.
+[ "$result" = ok ] || [ "$result" = changed ] && [ "$(ls "$content" 2>/dev/null || true)" = "$before" ] && result=unchanged
+if [ "$result" != ok ] && [ "$result" != changed ]; then
+    case "$result" in
+    failed)    why="Azahar said the install failed" ;;
+    exited)    why="azahar -i exited without installing it" ;;
+    unchanged) why="Azahar said it installed, but the title's content folder did not change" ;;
+    *)         why="nothing installed in 2 minutes" ;;
+    esac
+    echo "--- azahar -i:" >&2; tail -20 "$ilog" >&2
+    others="$(pgrep -lx 'azahar|azahar-qt|azahar.exe' 2>/dev/null || true)"
+    [ -n "$others" ] && printf '%s\n%s\n' "--- Azahar already running (close it and try again):" "$others" >&2
+    rm -f "$ilog"
+    die "$(basename "$cia") was not installed ($why)"
+fi
+rm -f "$ilog"
+app="$(ls -t "$content"/*.app 2>/dev/null | head -1)"
 [ -n "$app" ] || die "the CIA did not install (no $content/*.app)"
 echo "installed: $app"
 [ "$windows" = 1 ] && app="$(cygpath -w "$app")"
