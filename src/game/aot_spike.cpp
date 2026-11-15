@@ -95,19 +95,50 @@ struct NativeAt {
 NativeAt g_natives[8];
 int g_native_count = 0;
 
+uint32_t g_nested_yields = 0;   // shims inside a nested run that asked to yield (logged)
+
 // The registers of a nested run, and the guest call itself.
+//
+// run() returns at every stop, not only at the sentinel: on the console the
+// profile sampler and the stall probe zero the block budget from their own
+// threads (rt_host.cpp's nudge_thread_budget), and a shim may ask to yield.
+// Each comes back with EIP at the resume point, so this runs on until EIP
+// is the sentinel, as the backend's own nested calls do (cpu_box86.cpp, the
+// SEH dispatch). Taking the first stop for the end left the game's thread
+// with registers from the middle of the callee (issue #113: the console's
+// first bench froze in Lut Gholein after one nested A*). A nudge taken here
+// is sent again after, so the outer slice still stops for it. A yield can't
+// be honoured inside a nested run (the scheduler can't switch away from
+// it): resumed, and logged, since a wait that really had to block would get
+// a wrong result.
 void nested_run(Cpu &c, uint32_t va, uint32_t *r)
 {
     d2rt::X86Context saved;
     c.save_context(saved);
     const uint32_t esp = r[4];
     const uint32_t ra = c.read_u32(esp);   // the compiled caller's return address
-    c.write_u32(esp, rt::bridge().sentinel());
+    const uint32_t sentinel = rt::bridge().sentinel();
+    c.write_u32(esp, sentinel);
     for (int k = 0; k < 8; k++)
         c.set_reg(k, r[k]);
     const char *fault = nullptr;
-    if (!c.run(va, &fault))
-        rt::logf("aot: nested run of %08x faulted: %s at %08x", va, fault ? fault : "?", c.fault_addr());
+    bool stopped = false;
+    for (uint32_t eip = va;;) {
+        if (!c.run(eip, &fault)) {
+            rt::logf("aot: nested run of %08x faulted: %s at %08x", va, fault ? fault : "?", c.fault_addr());
+            break;
+        }
+        eip = c.reg(d2rt::R_EIP);
+        if (eip == sentinel)
+            break;
+        stopped = true;
+        (void)c.take_limit_hit();
+        if (rt::bridge().take_yield() && ++g_nested_yields <= 10)
+            rt::logf("aot: a shim yielded inside a nested run of %08x (at %08x), resumed (%u so far)", va, eip,
+                     g_nested_yields);
+    }
+    if (stopped)
+        c.nudge_thread_budget(nullptr);
     c.regs_gp(r);
     c.write_u32(esp, ra);   // as Box86 would have left it
     c.load_context(saved);
