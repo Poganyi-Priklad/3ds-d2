@@ -138,6 +138,15 @@ The app plays sound through WinVita's DirectSound emulation (ds_emul) and the 3D
 - **Sound effects:** `d2sfx.mpq` is real in every packaging mode, so they play.
 - **Music and speech:** the slim CIA and the SD card folder replace them with empty stubs, so there is none. For both, copy the real `d2music.mpq`, `d2xmusic.mpq`, `d2speech.mpq` and `d2xtalk.mpq` over the stubs in `3ds/3ds-d2/game/`, or build `package-cia --full`.
 
+**The output limiter** (issue #117, from WinVita `db71c76`): the game's voices are summed in 32 bits, and a sum past 16-bit full scale used to be clamped sample by sample, which is heard as crackle. The limiter turns that grain down instead (immediate attack, release over about 8 grains). A grain under full scale while the gain is at unity is sent unchanged.
+- **Switching it:** INFO → OPTIONS → **sound limiter** (`port=…,limiter`), on by default. Off, it clamps as before. On the lane, `D2_SONLIMIT=0` turns it off from the start.
+- **Measuring it:** the profiler checklist's **sound clipping** row switches ds_emul's counters on for the run. Every 10 s, game.log gets a `sondiag(10s)` line ending in `(limiter on)` or `(limiter off)`:
+  - `somme>pleine-echelle=<n>grains max=<peak>`: grains whose sum went past full scale, which would clip without the limiter.
+  - `limiteur=<n>grains gain-min=<%>`: grains the limiter turned down, and its lowest gain.
+  - `ecretes=<samples>/<grains>`: what was still clamped.
+  - `sortie-vite`, `trou>35ms` and `trou-max`: late writes to the DSP (underruns).
+- **What's still open on #117:** a heavy fight on the console (many voices, as in Baal's Throne, where WinVita measured 85% of grains clipped), with the limiter on and then off. In Azahar the counters work (a `sondiag` line every window), but no scripted run there has a fight that heavy.
+
 ## Frame-rate work (2026-10-17)
 
 | Change | Measure | Result |
