@@ -26,6 +26,7 @@
 #include "game/automap.h"
 #include "game/cinematics.h"
 #include "game/controls.h"
+#include "game/pad_history.h"
 #include "game/d2_memory.h"
 #include "game/aot_spike.h"
 #include "game/d2_native.h"
@@ -1799,6 +1800,8 @@ void open_storage()
 // the game's thread inside aptMainLoop, where no guest code runs (a sleep
 // may be announced on libctru's own APT thread while the game runs on).
 aptHookCookie g_apt_cookie;
+game::PadHistory g_pad_history;   // issue #118: the pad's readings between two pumps (poll)
+
 void apt_hook(APT_HookType type, void *)
 {
     u32 thread = 0;
@@ -1810,6 +1813,7 @@ void apt_hook(APT_HookType type, void *)
         screen_hz_set(false);  // the console's own rate for the HOME menu, sleep and the end
     if (type == APTHOOK_ONRESTORE || type == APTHOOK_ONWAKEUP) {
         g_ss.invalidate();   // the HOME menu or sleep drew over the bottom screen
+        g_pad_history.reset();   // presses made in the HOME menu aren't the game's
         g_timing.last_present_us = 0;   // the time away is not a frame (worst gap, hitches)
     }
     if (type == APTHOOK_ONRESTORE && game_thread) {
@@ -1835,10 +1839,10 @@ void apt_hook(APT_HookType type, void *)
     }
 }
 
-void poll()
+// The pad as HID has it now. Called by the input sampler alone while it
+// runs (hidScanInput isn't for two threads), else by poll().
+game::Pad read_pad()
 {
-    if (!apt_service())
-        return;
     hidScanInput();
     const u32 k = hidKeysHeld();
     game::Pad pad;
@@ -1865,6 +1869,51 @@ void poll()
         pad.touch_x = t.px;
         pad.touch_y = t.py;
     }
+    return pad;
+}
+
+// Issue #118: the pad read every 4 ms on the second core, each reading into
+// g_pad_history, so that a press shorter than a frame reaches the game (its
+// message pump reads input once a frame). Without a second core, poll()
+// reads the pad itself, as before; the history then never replays.
+Thread g_input_thread = nullptr;
+volatile bool g_input_stop = false;
+uint32_t g_input_replays = 0;
+
+void input_main(void *)
+{
+    while (!g_input_stop) {
+        g_pad_history.push(read_pad(), osGetTime());   // the host's clock: the game's is the game thread's
+        svcSleepThread(4000000);
+    }
+}
+
+void start_input_sampler()
+{
+    if (g_input_thread || g_render_core < 0)   // a core of its own only: PadHistory's lock spins
+        return;
+    s32 prio = 0x30;
+    svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
+    g_input_stop = false;
+    g_input_thread = threadCreate(input_main, nullptr, 4 * 1024, prio - 3, g_render_core, false);
+    status("input: %s", g_input_thread ? "the pad read every 4 ms on its own thread" : "read at the message pump");
+}
+
+void stop_input_sampler()
+{
+    if (!g_input_thread)
+        return;
+    g_input_stop = true;
+    threadJoin(g_input_thread, U64_MAX);
+    threadFree(g_input_thread);
+    g_input_thread = nullptr;
+}
+
+// One reading of the pad, applied as poll() applied its one reading before
+// issue #118; `now` is when it was read, `last` whether it is the pump's
+// latest.
+void apply_pad(game::Pad pad, uint64_t now, bool last)
+{
     const game::GameState gs = game::read_game_state();
     // Autoplay drives the pad until the player touches anything.
     if (g_autoplay_on) {
@@ -1872,9 +1921,9 @@ void poll()
             std::abs(pad.cstick_x) > 40 || std::abs(pad.cstick_y) > 40) {
             g_autoplay_on = false;
             rt::logf("autoplay stopped: physical input");
-        } else if (g_autoplay.active()) {
+        } else if (last && g_autoplay.active()) {   // the script steps once a pump
             bool shot = false;
-            pad = g_autoplay.step(rt::now_ms(), g_controls, shot, gs);
+            pad = g_autoplay.step(now, g_controls, shot, gs);
             g_shot_request |= shot;
             // A profiler run from the script: started or stopped at the next
             // heartbeat, as by its button.
@@ -1898,7 +1947,7 @@ void poll()
     prev_held = pad.held;
     const bool touch_down = pad.touching && !prev_touch;
     prev_touch = pad.touching;
-    g_osk.tick(rt::now_ms());
+    g_osk.tick(now);
     if (g_osk.is_open()) {
         // The keyboard has the touch screen and its buttons; the game gets
         // an idle pad, which also releases anything that was held.
@@ -1914,12 +1963,12 @@ void poll()
         else
             g_wait_release = false;
     }
-    g_ss.update(pad, gs, g_controls.cursor_x(), g_controls.cursor_y(), rt::now_ms());
+    g_ss.update(pad, gs, g_controls.cursor_x(), g_controls.cursor_y(), now);
     if (g_ss.take_settings_changed())
         save_settings();
     g_controls.set_context(gs.in_game, gs.panel_open, gs.ui, gs.in_game && game::holding_item());
     g_lock_in_game.store(gs.in_game, std::memory_order_relaxed);
-    g_controls.update(pad, rt::now_ms());
+    g_controls.update(pad, now);
     if (g_controls.take_zoom_toggle())
         g_zoom = !g_zoom;
     g_ss.request(g_controls.take_bottom_request());   // Select + D-pad
@@ -1927,6 +1976,27 @@ void poll()
         g_osk.open();
     if (g_controls.take_screenshot_request())   // L+R+Select
         g_shot_request = true;
+}
+
+void poll()
+{
+    if (!apt_service())
+        return;
+    if (!g_input_thread)
+        g_pad_history.push(read_pad(), osGetTime());
+    static std::vector<game::PadSample> samples;
+    const size_t replayed = g_pad_history.take(samples);
+    // The readings' times on the game's clock: the latest at now, as when
+    // the pump read the pad itself, the earlier ones as much before it.
+    const uint64_t now = rt::now_ms(), latest = samples.empty() ? 0 : samples.back().ms;
+    for (game::PadSample &s : samples)
+        s.ms = now - std::min<uint64_t>(now, latest - s.ms);
+    if (replayed && ++g_input_replays <= 10)
+        rt::logf("input: a press shorter than a pump replayed (%u changes since the last)%s", (unsigned)replayed,
+                 g_input_replays == 10 ? "; the next ones not logged" : "");
+    g_controls.begin_pump();
+    for (size_t i = 0; i < samples.size(); i++)
+        apply_pad(samples[i].pad, samples[i].ms, i + 1 == samples.size());
     if (__atomic_load_n(&g_shot_done, __ATOMIC_ACQUIRE)) {
         __atomic_store_n(&g_shot_done, false, __ATOMIC_RELAXED);
         status("%s", g_shot_msg.c_str());
@@ -2695,7 +2765,9 @@ int main()
     start_writer_thread();
     game::sprite_trace_set_wrap([](FILE *f, char *buf, size_t n) { return app::writer_wrap(f, buf, n, "sprites.trc"); });
     aptHook(&g_apt_cookie, apt_hook, nullptr);
+    start_input_sampler();
     rt::RunResult r = rt::run_exe(std::move(exe), opt);
+    stop_input_sampler();
     join_io_thread();
     join_floor_thread();
     if (g_prof_on)
