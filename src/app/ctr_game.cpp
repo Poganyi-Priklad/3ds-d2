@@ -1408,6 +1408,13 @@ void present(const rt::Frame &f)
             logline(want == game::AotMode::Bench ? "aot bench: on" : "aot bench: off");
         }
     }
+    {   // the OPTIONS page's sound limiter (issue #117)
+        const bool lim = (g_ss.port_options() & game::kPortSoundLimit) != 0;
+        if (lim != d2rt::dsound::limiter_on()) {
+            d2rt::dsound::set_limiter(lim);
+            logline(lim ? "sound limiter: on" : "sound limiter: off (hard clamp)");
+        }
+    }
     {   // the OPTIONS page's native sprite decoder (issue #83)
         const game::DccMode want = native_dcc() ? game::DccMode::Offload : game::DccMode::Off;
         if (game::dcc_mode() != want) {
@@ -2188,6 +2195,8 @@ void profiler_switch(uint32_t want)
         file_trace_stop();
     if (stop & game::kProfFrames)
         frame_trace_file_stop();
+    if (stop & game::kProfSound)
+        d2rt::dsound::set_diag(false);
     g_prof_on &= ~stop;
     uint32_t refused = 0;
     if ((start & game::kProfSprites) && !game::sprite_trace_start(kTracePath))
@@ -2204,6 +2213,8 @@ void profiler_switch(uint32_t want)
         refused |= game::kProfFrames;
     if (start & game::kProfSdBench)
         sd_benchmark(g_bench_path);   // once, as the run starts
+    if (start & game::kProfSound)   // issue #117: the "sondiag" line each 10 s window, from the next one
+        d2rt::dsound::set_diag(true);
     if (refused)
         status("profiler run: could not start %s", game::profile_names(refused).c_str());
     g_prof_refused |= refused;
@@ -2255,6 +2266,11 @@ void hitch_heartbeat(const game::SpriteCacheWindow &w)
                   (unsigned)hw.ready_ms, (unsigned)hw.host_ms, (unsigned)hw.heartbeat_ms, (unsigned)hw.skipped,
                   (unsigned)hw.famine);
     logline_held(line);
+    {   // the profiler run's sound clipping row (issue #117): ds_emul's mix and limiter counters for the window
+        char son[640];
+        if (d2rt::dsound::diag_line(son, sizeof son) > 0)
+            logline_held((std::string("[rt] ") + son + (d2rt::dsound::limiter_on() ? " (limiter on)" : " (limiter off)")).c_str());
+    }
     // The screen (swap_screens): how long the frames stayed on it.
     Glass g;
     LightLock_Lock(&g_glass_lock);

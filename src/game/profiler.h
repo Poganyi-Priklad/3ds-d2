@@ -28,6 +28,7 @@ enum ProfileOption : uint32_t {
     kProfFiles = 1u << 2,     // every read of a game file (rt::set_file_trace): logs/files.trc
     kProfSdBench = 1u << 3,   // the SD card's read costs, measured once as the run starts
     kProfFrames = 1u << 4,    // every frame's timing (frame_trace.h): logs/frames.trc
+    kProfSound = 1u << 5,     // ds_emul's mix counters (issue #117): game.log's "sondiag" line each 10 s
 };
 
 struct ProfileOptionInfo {
@@ -43,9 +44,10 @@ inline constexpr ProfileOptionInfo kProfileOptions[] = {
     {kProfFiles, "files", "file-read trace", "every game read to logs/files.trc"},
     {kProfSdBench, "sdbench", "SD card benchmark", "read costs; a 1 s pause at start"},
     {kProfFrames, "frames", "frame timing", "every frame to logs/frames.trc"},
+    {kProfSound, "sound", "sound clipping", "mix peaks, limiter, late writes"},
 };
 inline constexpr int kProfileOptionCount = sizeof kProfileOptions / sizeof kProfileOptions[0];
-inline constexpr uint32_t kProfileAll = kProfSprites | kProfGuest | kProfFiles | kProfSdBench | kProfFrames;
+inline constexpr uint32_t kProfileAll = kProfSprites | kProfGuest | kProfFiles | kProfSdBench | kProfFrames | kProfSound;
 
 // How game.log and the traces reach the SD card (issues #66, #71): the
 // checklist's last row, "log writes", which steps through these on a tap, a
