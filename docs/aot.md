@@ -227,13 +227,15 @@ The scope agreed on #112 (the review's proposal): A* with its real call tree, pl
 | --- | --- | --- |
 | Guest bytes on the lane (`fight.txt`, `WX86_HOTPROF`) | 44.15 G with Box86 (A*'s tree 75% of them), 9.57 G compiled: 78% of the run off Box86 | 12.45 G, 11.57 G compiled: 7% off (its callees are shared with code Box86 still runs) |
 | Time per call, qemu: Box86 / signatures / context / signatures without inlining / context without inlining | 2,470 / 600 / 720 / 665 / 815 µs | 37.5 / 12.9 / 15.3 / 14.7 / 18.5 µs |
-| Time per call on the console | pending (the bench) | pending (the bench) |
+| Time per call on the console (median; A*'s per call, CofParams' per window): Box86 / signatures / context / signatures without inlining / context without inlining / native | 339 / 61 / 79 / 71 / 82 / 27 µs (9 calls each, 5 native) | 48.5 / 10.3 / 14.5 / 11.1 / 16.2 µs (194,559 calls each) |
 | Code, ARM bytes per x86 byte: signatures / context / Box86 | 2.60 / 3.64 / 7.76 | 3.14 / 4.51 / 10.27 |
 | Compile time per 1,000 x86 instructions | see Build time | |
 
+- **The console's run** (build 3f6127ac0c48-aot81afeb, New 3DS XL, 6 minutes of fights in the Rocky Wastes, the bench switched on in game, Sentry 3DS-D2-1D, event 5d3d68c0): no faults or stops. Means for CofParams: Box86 49.8, signatures 10.7, context 15.1, signatures without inlining 11.6, context without inlining 17.0 µs. A*'s calls are few (PathSearch is called a few times in 10 seconds) and each finds a different path, so its medians are rough; Box86's first call (8.7 ms) translated the code.
+- **Against Box86 on the console:** CofParams 4.7× with the signatures and 3.3× with the context fallback; less the nested run in Box86's figure (17.6 µs on the console), 3.0× and 2.1×. A* about 5× with the signatures and 4× with the context fallback. The lane's qemu understated CofParams' gain (1.6×).
 - **Box86's time** in the bench includes one nested run, which costs 13–18 µs alone. For CofParams that is half of Box86's figure: without it, Box86 takes about 20 µs, the signatures 12.9.
-- **What the calls cost:** the context fallback is 20% slower than the signatures on A* and 19% on CofParams. Without inlining between compiled functions, the signatures lose 11% and 14%, and the context fallback 13% and 21% more. gcc inlines most of CofParams' small callees, which is where the signatures matter most when it can't.
-- **PathSearch on the console** times as `native` in the bench. In the lane's A*-heavy world it handed every call back (another size class, or a room's edge), and the bench counts those apart (`handed-back`).
+- **What the calls cost:** on the lane, the context fallback is 20% slower than the signatures on A* and 19% on CofParams; on the console 30% on A* (medians) and 41% on CofParams. Without inlining between compiled functions, the signatures lose 11% and 14%, and the context fallback 13% and 21% more. gcc inlines most of CofParams' small callees, which is where the signatures matter most when it can't.
+- **PathSearch on the console** times as `native` in the bench: 27 µs at the median, 2.3× the compiled A*. It handed 3 of its 8 turns back (435 µs each, run nested under Box86), cases the compiled A* runs itself. In the lane's A*-heavy world it handed every call back (another size class, or a room's edge), and the bench counts those apart (`handed-back`).
 - **A nested Box86 run per call** cost the compiled CofParams more than it saved (50 µs against Box86's 36 before its four callees were compiled). A full build must compile what its functions call, or reach it through the target table, not a nested run.
 
 **The whole binary** (`recompile.py --survey`, d2d's 13,048 functions; 12,864 decode with the spike's rules):
@@ -245,7 +247,7 @@ The scope agreed on #112 (the review's proposal): A* with its real call tree, pl
 
 ## Open questions
 
-- **Is the gain there?** Box86 with `callret` and its register cache is not naive. On the lane the compiled code is 4.1× Box86 on A* and about 1.6× on CofParams. The console's bench decides (#113).
+- **Is the gain there?** Yes, on the console: about 5× Box86 on A* and 3–4.7× on CofParams (#113). The lane's qemu showed 4.1× and 1.6×. What a full build gains depends on how much of a frame's code it covers (#115), and on its calls to code it doesn't compile going through the target table rather than a nested run.
 - **The site table:** the hooks and code patches move from `install_*` code into one table that both the app and the recompiler read. Is that change acceptable before the spike, or only after it?
 - **Does the game write its own code?** If anything other than our patches writes into `.text` at run time, the AOT code for it is stale. Box86's invalidations of `.text` on the lane answer this.
 - **Exceptions:** does any function rely on Windows exception handling for a fault (an access violation caught by `__try`)? If one does, it stays with Box86.
