@@ -69,7 +69,8 @@ CC_NUM = {c: k for k, c in enumerate(["o", "no", "b", "ae", "e", "ne", "be", "a"
                                        "l", "ge", "le", "g"])}
 # Flag kinds, as aot_rt.h numbers them. INC and DEC leave CF alone.
 KIND = {"add": 0, "sub": 1, "cmp": 1, "and": 2, "or": 2, "xor": 2, "test": 2, "inc": 3, "dec": 4,
-        "neg": 5, "shl": 6, "sal": 6, "shr": 7, "sar": 8, "imul": 9, "mul": 9, "adc": 10, "sbb": 11}
+        "neg": 5, "shl": 6, "sal": 6, "shr": 7, "sar": 8, "imul": 9, "mul": 9, "adc": 10, "sbb": 11,
+        "bsf": 2, "bsr": 2}   # bsf/bsr: ZF from the source, as a logic op's from its result (the rest undefined)
 KIND_DEFS = {3: FALL & ~FC, 4: FALL & ~FC}
 X87_PREFIX = "f"
 
@@ -481,6 +482,7 @@ class Program:
         self.starts = starts
         self.natives = natives          # va -> dict (name, args: [regs], stack, glue)
         self.intrinsics = intrinsics    # va -> name
+        self.garbage = {}               # va -> ecx/edx it leaves as a library call's garbage (Analysis.garbage)
         self.funcs = {}
         self.summ = {}
         self.compiled = set()   # what compile_set compiles: their summaries are proven, not assumed
@@ -712,7 +714,13 @@ class Analysis:
         # knows esp after the call without asking (what a compiled callee needs).
         self.esp_ok = all(regs[ESP] == ("sp", 0) for _, regs in ret_states)
         # Registers that at every ret hold only a library call's garbage.
-        self.garbage = {r for r in (ECX, EDX) if ret_states and all(regs[r] == ("clob",) for _, regs in ret_states)}
+        # Through a tail jump: the target's garbage, or ours where it keeps the register.
+        def junk(r, va, regs):
+            t = self.f.tails[va]
+            return r in p.garbage.get(t, ()) or (regs[r] == ("clob",) and r in p.callee_summary(t).preserved)
+        self.garbage = {r for r in (ECX, EDX) if (ret_states or tail_states) and
+                        all(regs[r] == ("clob",) for _, regs in ret_states) and
+                        all(junk(r, va, regs) for va, regs in tail_states)}
         # esp at a ret known to be something else than the entry's: a helper
         # that moves its caller's frame (MSVC's SEH and EH epilogues: mov esp,
         # ebp from the caller's ebp). Its ret's pops don't tell its caller esp.
@@ -839,6 +847,8 @@ class Analysis:
             nat = p.natives.get(t)
             if (t in p.intrinsics and p.intrinsics[t] in ("memset", "memcpy")) or (nat and not nat["handback"]):
                 regs[ECX] = regs[EDX] = ("clob",)
+            for r in p.garbage.get(t, ()):   # a function that returns them as such (issue #115)
+                regs[r] = ("clob",)
             if s.pops is None:      # esp comes back at run time: not known here
                 regs[ESP] = None
                 slots.clear()
@@ -966,8 +976,10 @@ class Analysis:
                 return P(set(p.natives[t]["reads"]) | set(s.reads) | {ESP}), P((ALL - s.preserved) | {EAX, ESP})
             return P(set(s.reads) | {ESP}), P((ALL - s.preserved) | {ESP})
         if va in f.tails:
+            # What the target reads, and what it hands back to our caller
+            # untouched: an output of ours it preserves.
             s = self._callee(f.tails[va])
-            return P(set(s.reads) | {ESP}), P(ALL)
+            return P(set(s.reads) | (set(outs) & set(s.preserved)) | {ESP}), P(ALL)
         if m == "ret":
             return P(set(outs) | {ESP}), P({ESP})
         r, w = parts_rw(i)
@@ -1177,7 +1189,10 @@ class Emitter:
 
     # Operands
     def reg_get(self, i, rid):
-        r, bits, sh = reg_full(i, rid)
+        full = reg_full(i, rid)
+        if full is None:   # a segment or system register
+            raise Refused("%s %s at %08x" % (i.mnemonic, i.op_str, i.address))
+        r, bits, sh = full
         n = REGS[r]
         if bits == 32:
             return n
@@ -1188,7 +1203,10 @@ class Emitter:
         return "((%s >> 8) & 0xffu)" % n
 
     def reg_set(self, i, rid, v):
-        r, bits, sh = reg_full(i, rid)
+        full = reg_full(i, rid)
+        if full is None:   # a segment or system register
+            raise Refused("%s %s at %08x" % (i.mnemonic, i.op_str, i.address))
+        r, bits, sh = full
         n = REGS[r]
         if bits == 32:
             return "%s = (uint32_t)(%s);" % (n, v)
@@ -1359,8 +1377,9 @@ class Emitter:
             return chk + "return (uint64_t)%s | (uint64_t)%s << 32;" % (REGS[outs[0]], REGS[outs[1]])
         return chk + " ".join("o[%d] = %s;" % (k, REGS[r]) for k, r in enumerate(outs)) + " return;"
 
-    def call_compiled(self, t, ra):
-        """A call to a compiled function; the return address is pushed."""
+    def call_compiled(self, t, ra, after=True):
+        """A call to a compiled function; the return address is pushed.
+        after=False (a tail call): esp isn't moved past the callee's ret."""
         if self.mode == "ctx":
             fill = ", ".join(REGS[r] for r in range(8))
             back = " ".join("%s = t.r[%d];" % (REGS[r], r) for r in range(8))
@@ -1369,7 +1388,7 @@ class Emitter:
         args = ", ".join(["esp"] + [REGS[r] for r in sig["in"]])
         outs = sig["out"]
         pops = self.p.summ[t].pops
-        tail = " esp += %du;" % (4 + pops) if pops is not None else ""
+        tail = " esp += %du;" % (4 + pops) if pops is not None and after else ""
         if not outs:
             return "%s(%s);%s" % (self.name(t), args, tail)
         if len(outs) == 1:
@@ -1478,6 +1497,12 @@ class Emitter:
             return "{ int64_t n = (int64_t)((uint64_t)edx << 32 | eax); int32_t d = (int32_t)(%s); " \
                    "if (!d) aot_fault(0x%08xu); eax = (uint32_t)(int32_t)(n / d); edx = (uint32_t)(int32_t)(n %% d); }" \
                 % (v, va)
+        if m in ("bsf", "bsr"):
+            # A zero source leaves the destination as it was (as Intel and AMD do).
+            a = self.get(i, ops[1])
+            r = "__builtin_ctz(a)" if m == "bsf" else "31 - __builtin_clz(a)"
+            return "{ uint32_t a = %s; %sif (a) { %s } }" % (a, self.flag_store(va, "a", "0u", "a"),
+                                                              self.put(i, ops[0], r))
         if m == "cdq":
             return "edx = (eax & 0x80000000u) ? 0xffffffffu : 0u;"
         if m == "cwde":
@@ -1598,6 +1623,42 @@ class Emitter:
             fast, step & 0xffffffff, ("esi += n * %du;" % (step & 0xffffffff)) if op.startswith("movs") else "")
         return adv
 
+    def tail_call(self, i, t):
+        """A jmp to another function's entry (issue #115): the target returns
+        to our caller for us. Called with esp as at our entry (checked), its
+        return address our caller's; what it pops is what we pop, so the
+        compiled caller's esp += 4 + pops stays right."""
+        va = i.address
+        f, p = self.f, self.p
+        if t in p.intrinsics or p.natives.get(t) or isinstance(t, tuple) or t is None:
+            raise Refused("tail call at %08x to an import, a native or an intrinsic" % va)
+        ours, theirs = p.summ[f.entry].pops, p.callee_summary(t).pops
+        if ours is None or theirs is None or ours != theirs:
+            raise Refused("tail call at %08x: pops %s, the target's %s" % (va, ours, theirs))
+        chk = "if (esp != esp0 || LD32(esp) != ra0) aot_bad_ret(0x%08xu, esp0, esp); " % f.entry
+        if t in self.compiled:
+            # call_compiled's esp += after the call is dropped: esp is ours to hand back.
+            inner = "\n#ifdef AOT_SPLIT\n    %s\n#else\n    %s\n#endif\n    " % (
+                self.call_guest(t, va), self.call_compiled(t, va, after=False))
+        else:
+            inner = self.call_guest(t, va)
+        if va in f.noreturn:
+            return chk + inner + " aot_unreachable(0x%08xu);" % va
+        if self.mode == "ctx":
+            # esp after the target's ret, from its context (call_compiled's and call_guest's).
+            sets = " ".join("R->r[%d] = %s;" % (r, REGS[r]) for r in range(8) if r != ESP)
+            return chk + inner + " %s R->r[4] = esp; return;" % sets
+        outs = self.sig["out"]
+        if not outs:
+            ret = "return;"
+        elif len(outs) == 1:
+            ret = "return %s;" % REGS[outs[0]]
+        elif len(outs) == 2:
+            ret = "return (uint64_t)%s | (uint64_t)%s << 32;" % (REGS[outs[0]], REGS[outs[1]])
+        else:
+            ret = " ".join("o[%d] = %s;" % (k, REGS[r]) for k, r in enumerate(outs)) + " return;"
+        return chk + inner + " " + ret
+
     def call(self, i):
         va = i.address
         f, p = self.f, self.p
@@ -1605,9 +1666,7 @@ class Emitter:
         t = f.tails[va] if tail else f.calls[va]
         ra = va + i.size
         if tail:
-            # A jmp to another function: a call from here that returns for us.
-            # The return address our caller pushed stays where it is.
-            raise Refused("tail call at %08x" % va)
+            return self.tail_call(i, t)
         push = "esp -= 4u; ST32(esp, 0x%08xu); " % ra
         if t in p.intrinsics:
             name = p.intrinsics[t]
@@ -1710,6 +1769,31 @@ def rel32_targets(img, want):
         if t in want:
             hit.add(t)
     return hit
+
+
+def leaves(prog, compiled):
+    """The compiled functions whose C, with every compiled callee's, never
+    calls Box86 (issue #115): no nested run, so Box86 can enter them in line
+    (the backend's in-line shim) without leaving its run. The game's
+    fatal-error and exit paths count as calls to Box86."""
+    def direct(va):
+        f = prog.func(va)
+        for site, t in list(f.calls.items()) + list(f.tails.items()):
+            if t in compiled or t in prog.intrinsics or (t in prog.natives and not prog.natives[t]["handback"]):
+                continue
+            return True
+        return False
+    out = {va for va in compiled if not direct(va)}
+    changed = True
+    while changed:
+        changed = False
+        for va in sorted(out):
+            f = prog.func(va)
+            if any(isinstance(t, int) and t in compiled and t not in out
+                   for t in list(f.calls.values()) + list(f.tails.values())):
+                out.discard(va)
+                changed = True
+    return out
 
 
 def may_block(img, prog, vas):
@@ -1865,8 +1949,9 @@ def compile_set(img, starts, roots, extra, mode_list, outdir, names=None):
     # What the analysis refuses whatever the signatures, screened once (issue
     # #115: a refusal inside the loops below starts them again, which over
     # hundreds of functions was most of the run).
-    garbage = {}
-    for va in sorted(compiled):
+    # Callees first: a caller returning a callee's garbage as it is leaves it out too.
+    garbage = prog.garbage
+    for va in prog.callees_first(sorted(compiled)):
         try:
             a = Analysis(prog, prog.func(va), outs={EAX, ECX, EDX, EBX, EBP, ESI, EDI}, save_rule=True)
             if not a.esp_ok:
@@ -1881,24 +1966,32 @@ def compile_set(img, starts, roots, extra, mode_list, outdir, names=None):
     # Nothing compiled calls, under Box86, code that may block (issue #115):
     # the scheduler can't switch away from a nested run. A function refused
     # here becomes a Box86 callee of its compiled callers in turn.
+    # Again each round: a function the signatures or the emitter refuse later
+    # becomes a Box86 callee of its compiled callers then (6bead0, a lock).
     blocks = may_block(img, prog, reach)
-    while True:
-        more = {}
-        for va in compiled:
-            for site, t in prog.func(va).calls.items():
-                if not isinstance(t, int) or t in compiled or t in prog.intrinsics or site in prog.func(va).noreturn:
-                    continue
-                if t in ERROR_PATH_FUNCS or t in NORETURN_FUNCS:
-                    continue
-                if t in prog.natives and not prog.natives[t]["handback"]:
-                    continue
-                if blocks.get(t, True):
-                    more[va] = "calls %08x under Box86 at %08x, which may block (a wait, a read, a lock)" % (t, site)
-                    break
-        if not more:
-            break
-        refused.update(more)
-        compiled -= set(more)   # their own code decides whether they block (may_block), as before
+    def refuse_blocking():
+        n = 0
+        while True:
+            more = {}
+            for va in compiled:
+                g = prog.func(va)
+                for site, t in list(g.calls.items()) + list(g.tails.items()):
+                    if not isinstance(t, int) or t in compiled or t in prog.intrinsics or site in g.noreturn:
+                        continue
+                    if t in ERROR_PATH_FUNCS or t in NORETURN_FUNCS:
+                        continue
+                    if t in prog.natives and not prog.natives[t]["handback"]:
+                        continue
+                    if blocks.get(t, True):
+                        more[va] = "calls %08x under Box86 at %08x, which may block (a wait, a read, a lock)" % (
+                            t, site)
+                        break
+            if not more:
+                return n
+            refused.update(more)
+            compiled.difference_update(more)   # their own code decides whether they block (may_block), as before
+            n += len(more)
+    refuse_blocking()
     prog.summarize(sorted(reach))
     rounds = 0
     while True:
@@ -1927,7 +2020,8 @@ def compile_set(img, starts, roots, extra, mode_list, outdir, names=None):
                 # grew (its callers) or its outs did (itself).
                 callers = collections.defaultdict(set)
                 for va in compiled:
-                    for t in prog.func(va).calls.values():
+                    g = prog.func(va)
+                    for t in list(g.calls.values()) + list(g.tails.values()):
                         if isinstance(t, int) and t in compiled:
                             callers[t].add(va)
                 order = prog.callees_first(sorted(compiled))
@@ -1952,9 +2046,11 @@ def compile_set(img, starts, roots, extra, mode_list, outdir, names=None):
                             if c not in queued:
                                 queued.add(c)
                                 work.append(c)
-                    for site, t in f.calls.items():
+                    # A compiled tail target returns our outs for us: what it doesn't keep, it must hand back.
+                    for site, t in list(f.calls.items()) + list(f.tails.items()):
                         if t in compiled:
-                            add = set(a.live_out[site]) - prog.summ[t].preserved - {ESP}
+                            live = outs[va] if site in f.tails else a.live_out[site]
+                            add = set(live) - prog.summ[t].preserved - {ESP}
                             if not add <= outs[t]:
                                 outs[t] |= add
                                 if t not in queued:
@@ -1965,6 +2061,9 @@ def compile_set(img, starts, roots, extra, mode_list, outdir, names=None):
                 refused[cur] = str(e)
                 compiled.discard(cur)
                 prog.summarize(sorted(reach))   # the summaries as for a function left to Box86
+        if refuse_blocking():
+            prog.summarize(sorted(reach))
+            continue
         sigs = {va: {"in": sorted(prog.summ[va].reads - {ESP}), "out": sorted(outs[va]),
                      "preserved": sorted(prog.summ[va].preserved)} for va in compiled}
         # Every function emitted once, both ways, before writing anything: what
@@ -2050,25 +2149,29 @@ def compile_set(img, starts, roots, extra, mode_list, outdir, names=None):
         for va in sorted(compiled):
             f = prog.func(va)
             rg = code_ranges(f)
-            cl = sorted({index[t] for t in f.calls.values() if isinstance(t, int) and t in compiled})
+            cl = sorted({index[t] for t in list(f.calls.values()) + list(f.tails.values())
+                         if isinstance(t, int) and t in compiled})
             chunks.append("static const uint32_t AOT_SYM(rg_%08x)[] = {%s};" % (
                 va, ", ".join("0x%08xu, 0x%08xu" % (lo, hi) for lo, hi in rg)))
             if cl:
                 chunks.append("static const uint16_t AOT_SYM(cl_%08x)[] = {%s};" % (va, ", ".join(map(str, cl))))
+        leaf = leaves(prog, compiled)
+        report["leaves"] = len(leaf)
         chunks.append("const AotFunc AOT_SYM(funcs)[] = {")
         for va in sorted(compiled):
             keep, head = heads.get(va, (0, [0] * 16))
             mask = lambda regs: sum(1 << x for x in regs if x != ESP)
             f = prog.func(va)
             rg = code_ranges(f)
-            ncl = len({t for t in f.calls.values() if isinstance(t, int) and t in compiled})
+            ncl = len({t for t in list(f.calls.values()) + list(f.tails.values())
+                       if isinstance(t, int) and t in compiled})
             chunks.append("    {0x%08xu, AOT_SYM(fn_%08x), \"%s\", %d, %d, 0x%02x, 0x%02x, %d, {%s}, 0x%08xu, %d, %d, "
-                          "AOT_SYM(rg_%08x), %s}," % (
+                          "AOT_SYM(rg_%08x), %s, AOT_LEAF(%d)}," % (
                               va, va, names.get(va, "%08x" % va), keep, prog.summ[va].pops or 0,
                               mask(sigs[va]["out"]), mask(sigs[va]["preserved"]), 1 if va in roots else 0,
                               ", ".join("0x%02x" % b for b in head), code_hash(img, rg), len(rg), ncl, va,
-                              "AOT_SYM(cl_%08x)" % va if ncl else "0"))
-        chunks.append("    {0, 0, 0, 0, 0, 0, 0, 0, {0}, 0, 0, 0, 0, 0}")
+                              "AOT_SYM(cl_%08x)" % va if ncl else "0", 1 if va in leaf else 0))
+        chunks.append("    {0, 0, 0, 0, 0, 0, 0, 0, {0}, 0, 0, 0, 0, 0, 0}")
         chunks.append("};")
     report["hooks"] = {"hookable": len(heads), "not": {"%08x" % k: v for k, v in sorted(why.items())}}
     chunks.append("const AotRoot AOT_SYM(roots)[] = {")
@@ -2089,7 +2192,7 @@ def compile_set(img, starts, roots, extra, mode_list, outdir, names=None):
     for va in sorted(compiled):
         f = prog.func(va)
         insns += f.stats["insns"]
-        falls = sorted({t for t in f.calls.values() if isinstance(t, int) and t not in compiled
+        falls = sorted({t for t in list(f.calls.values()) + list(f.tails.values()) if isinstance(t, int) and t not in compiled
                         and t not in INTRINSICS})
         ranges = code_ranges(f)
         report["functions"]["%08x" % va] = {
@@ -2104,7 +2207,8 @@ def compile_set(img, starts, roots, extra, mode_list, outdir, names=None):
             if v in seen or v not in compiled:
                 continue
             seen.add(v)
-            work += [t for t in prog.func(v).calls.values() if isinstance(t, int)]
+            work += [t for t in list(prog.func(v).calls.values()) + list(prog.func(v).tails.values())
+                     if isinstance(t, int)]
         trees["%08x" % r] = sorted("%08x" % v for v in seen)
     report["trees"] = trees
     report["x86_insns"] = insns
@@ -2326,6 +2430,9 @@ def main():
                     help="va:depth: also compile what va calls, directly, to that depth")
     ap.add_argument("--functions", default="third_party/d2d/docs/research/re/game-functions.tsv")
     ap.add_argument("--modes", default="sig,ctx")
+    ap.add_argument("--callees", type=int, default=0,
+                    help="N: also the functions the set calls, to depth N (issue #115: a callee left to Box86 "
+                         "costs a nested run per call); those that don't compile stay with Box86")
     ap.add_argument("--survey", action="store_true")
     ap.add_argument("--explain", help="va,va,...: why each is left to Box86 (the calls whose pops aren't "
                                       "known), with the set's summaries; nothing written")
@@ -2364,13 +2471,30 @@ def main():
             seen |= nxt
             lvl = nxt
         extra += sorted(seen - set(extra))
+    if a.callees:
+        prog = Program(img, starts, NATIVES, INTRINSICS)
+        seen = set(extra) | set(roots)
+        lvl = set(seen)
+        for _ in range(a.callees):
+            nxt = set()
+            for g in sorted(lvl):
+                f = prog.func(g)
+                if f.refused:
+                    continue
+                for c in list(f.calls.values()) + list(f.tails.values()):
+                    if isinstance(c, int) and c not in seen and c not in INTRINSICS and c not in NATIVES:
+                        nxt.add(c)
+            seen |= nxt
+            lvl = nxt
+        print("aot: %d callees added (--callees %d)" % (len(seen - set(extra) - set(roots)), a.callees))
+        extra += sorted(seen - set(extra) - set(roots))
     if a.explain:
         explain(img, starts, roots + [v for v in extra if v not in roots], parse_vas(a.explain)[0])
         return
     rep = compile_set(img, starts, roots, extra, a.modes.split(","), a.out, names)
     n = len(rep["functions"])
-    print("aot: %d functions compiled (%d x86 instructions, %d bytes), %d left to Box86, in %s" % (
-        n, rep["x86_insns"], rep["x86_bytes"], len(rep["refused"]), a.out))
+    print("aot: %d functions compiled (%d x86 instructions, %d bytes; %d never call Box86), %d left to Box86, in %s"
+          % (n, rep["x86_insns"], rep["x86_bytes"], rep.get("leaves", 0), len(rep["refused"]), a.out))
     for k, v in sorted(rep["refused"].items()):
         print("  left to Box86: %s: %s" % (k, v))
 

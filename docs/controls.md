@@ -161,7 +161,7 @@ When the game focuses a text field, such as the hero name box, a keyboard takes 
 - **In game:** the player unit pointer at `0x7A6A70` is non-null.
 - **Panel open:** one of the panel entries in the UI table at `0x7A27C0` is non-zero (inventory, character sheet, skill tree, NPC dialogue, game menu, shop, quest log, waypoint, party, stash, and others). Every non-zero entry below `0x28` is logged with each change, for example `game state: in game, panel open (ui 800208003)`.
 
-Before trusting either, it checks that a known function entry at `0x45B440` starts with `push ebp`. On any other executable the state stays "menus", so the circle pad only moves the cursor. Transitions are logged, for example `game state: in game, panel open`.
+Before trusting either, it checks that the dword at `0x45B450` is `0x7A5204` (an instruction's operand inside a function, not its first bytes, which a native or the compiled code's hook overwrites with a jump). On any other executable the state stays "menus", so the circle pad only moves the cursor. Transitions are logged, for example `game state: in game, panel open`.
 
 ## Azahar's default keyboard mapping
 

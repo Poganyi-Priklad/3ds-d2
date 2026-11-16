@@ -63,7 +63,17 @@ typedef struct {
     uint16_t nranges, ncallees;
     const uint32_t *ranges;
     const uint16_t *callees;
+    /* 1: its C never calls Box86, nor does any compiled callee's (no nested
+     * run), so Box86 may enter it in line (the backend's in-line shim). 0
+     * under AOT_SPLIT, where every call between compiled functions is
+     * Box86's. */
+    uint8_t leaf;
 } AotFunc;
+#ifdef AOT_SPLIT
+#define AOT_LEAF(x) 0
+#else
+#define AOT_LEAF(x) (x)
+#endif
 
 extern uint8_t *aot_mem;   /* host address of guest 0 */
 

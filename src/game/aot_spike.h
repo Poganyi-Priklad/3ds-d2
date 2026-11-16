@@ -31,6 +31,11 @@ void set_aot_wanted(AotMode mode);
 // Only the hookable functions with these indexes (settings.txt's aotfns=, as
 // the lane's D2_AOT_FNS; issue #115): before install_aot.
 void set_aot_fns(uint32_t first, uint32_t last);
+// The probe (issue #115): a compiled function whose calls from Box86 take
+// less than this each (its first few hundred, timed) is left to Box86, its
+// trap costing more than it saves. Settings.txt's aotmin=, the lane's
+// D2_AOT_MIN_US; 0 keeps every one hooked.
+void set_aot_min_us(double us);
 // From install_d2_native, before its hooks: with a mode other than Off the
 // roots are hooked, and a native on the same entry (PathSearch) then isn't.
 // Returns how many roots there are.

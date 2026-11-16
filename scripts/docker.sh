@@ -196,6 +196,7 @@ test)
         for r in "${runs[@]}"; do
             name="${r% *}"; ms="${r#* }"
             rm -rf "${ROOT:?}/$out/write" && mkdir -p "$ROOT/$out/write"
+            rm -f "$ROOT/$out/err.txt"   # a lane that didn't build or start leaves none: not the last run's
             [ "$name" = act2-east ] && cp -R "$3/." "$ROOT/$out/write/"
             RUN_EXTRA=(-v "$(host_path "$(cd "$2" && pwd)"):/game:ro" -e "D2_AOT=${AOT_MODE:-5}" -e "D2_AOT_FNS=${D2_AOT_FNS:-}" -e M4_VIRTUAL_CLOCK=1 -e WX86_FAKETSC=1
                        -e "M4_SCRIPT=$(cat "$ROOT/tests/m4/scripts/$name.txt")")
@@ -211,7 +212,13 @@ test)
             # The game's own end: a script's run ends at its time (code 0); an exit of the game's
             # (an exception it raised, say) is a failure whatever was checked before it.
             code="$(sed -n 's/^\[rt\] RESULT .*code=\([0-9]*\).*/\1/p' "$ROOT/$out/$name.txt" | tail -1)"
-            if [ "${code:-x}" != 0 ]; then
+            # The script's own end (issue #115): its last wait reached, else the game played something
+            # else (a run that never got in game measures the menus).
+            goal="$(sed -En 's/^[0-9]+ (wait|tapuntil) ([a-z0-9]+).*/\2/p' "$ROOT/tests/m4/scripts/$name.txt" | tail -1)"
+            if [ -n "$goal" ] && ! grep -aq "autoplay: $goal reached" "$ROOT/$out/$name.txt"; then
+                echo "RESULT aot.check.$name FAIL (the script never reached its last wait, $goal; see $out/$name.txt)"
+                fail=1
+            elif [ "${code:-x}" != 0 ]; then
                 echo "RESULT aot.check.$name FAIL (the game ended with code ${code:-none}; ${last:-no aot check line}; see $out/$name.txt)"
                 grep -ah "RaiseException\|exception" "$ROOT/$out/$name.txt" | head -3 || true
                 fail=1

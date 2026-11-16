@@ -189,12 +189,22 @@ struct Fn {
     const AotFunc *f = nullptr;    // aot_funcs': what Sig runs
     const AotFunc *fj = nullptr;   // aotj_funcs' (journaled): what Check runs
     uint32_t tramp = 0, trap = 0;
+    uint32_t trap_in_line = 0;     // a leaf's (AotFunc::leaf), served in line: what Sig hooks
     uint8_t before[5] = {};
     bool hooked = false;
     uint32_t checked = 0, differ = 0, unchecked = 0;           // this window
+    uint32_t entered = 0;                                      // traps from Box86, this window
+    uint64_t ticks_in = 0;                                     // D2_AOT_PROF: time inside, this window
+    uint32_t probe = 0;                                        // entries seen since turned on (Sig)
+    uint64_t probe_ticks = 0;                                  // ... the timed ones' time inside
+    uint64_t probe_nested_ticks = 0;                           // ... of it, in nested runs (Box86's)
+    uint32_t probe_nested = 0;                                 // ... and their number
+    bool dropped = false;                                      // left to Box86 after its probe
+    uint32_t direct = 0;                                       // natives' guest_calls run in C, this window
     uint32_t checked_all = 0, differ_all = 0, unchecked_all = 0;
 };
 std::vector<Fn> g_fns;           // sized once at install: entries keep their address
+std::unordered_map<uint32_t, uint32_t> g_fn_at;   // va -> index in g_fns
 __thread int g_journaling = 0;      // inside a journaled compiled run (this thread's)
 __thread bool g_impure = false;     // ... which called Box86
 uint32_t g_differ_logged = 0;
@@ -285,14 +295,78 @@ void check_fn(Fn &F, Cpu &c, uint32_t *regs)
     std::memcpy(regs, b, sizeof b);   // the game's result is kept
 }
 
+void unhook_at(Cpu &c, uint32_t va, const uint8_t *before, bool &hooked);
+
+// D2_AOT_PROF=1 (the lane, issue #115): each entry from Box86 timed, for
+// which functions are worth a trap; the outermost ones' total against the
+// window's own time.
+const bool g_prof = std::getenv("D2_AOT_PROF") != nullptr;
+// The probe (issue #115): a function whose compiled code takes less than
+// this per call from Box86 costs more in the trap than it saves, and is left
+// to Box86 (unhooked; compiled callers still call it in C). Its entries
+// kProbeSkip on are timed, kProbeN of them. 0: every function stays hooked.
+// (Box86's own time for it, run nested, can't be the measure: a nested run
+// costs 8-10 us on the lane, and more than an empty one's for the function's
+// own: 11-29 us against compiled code's 0.6-2.7 for the fight's hottest.)
+constexpr uint32_t kProbeSkip = 32, kProbeN = 256;
+double g_min_us = 2.0;
+uint32_t g_dropped = 0, g_dropped_window = 0;
+// The nested runs compiled code starts (aot_guest_call): their time and
+// number, this thread's, for the probe.
+__thread uint64_t g_nested_ticks = 0;
+__thread uint32_t g_nested_n = 0;
+__thread int g_prof_depth = 0;
+uint64_t g_prof_outer = 0, g_prof_window_t0 = 0;
+// ... and where Box86 called from (the return address), this window: the
+// callers that would save the most crossings compiled.
+std::map<uint64_t, uint32_t> g_prof_sites;
+
 uint32_t enter_fn(Fn &F, Cpu &c)
 {
     uint32_t regs[8];
     c.regs_gp(regs);
     g_cpu = &c;
+    F.entered++;
     if (g_mode == AotMode::Check && F.fj)
         check_fn(F, c, regs);
-    else if (g_mode == AotMode::Sig)
+    else if (g_mode == AotMode::Sig && F.probe < kProbeSkip + kProbeN && g_min_us > 0) {
+        if (F.probe++ < kProbeSkip) {
+            F.f->sig(regs);
+        } else {
+            const uint64_t t0 = ticks(), n0 = g_nested_ticks;
+            const uint32_t c0 = g_nested_n;
+            F.f->sig(regs);
+            F.probe_ticks += ticks() - t0;
+            F.probe_nested_ticks += g_nested_ticks - n0;
+            F.probe_nested += g_nested_n - c0;
+            // What it saves is its compiled code's time, less a crossing's
+            // worth for each nested run it starts (issue #115: 4f8850, two
+            // crossings a call, looked worth its trap with the run counted in).
+            const double own_us = (double)(F.probe_ticks - F.probe_nested_ticks) / kProbeN / kTicksPerUs -
+                                  (double)F.probe_nested / kProbeN * g_min_us;
+            if (F.probe == kProbeSkip + kProbeN && g_prof)
+                rt::logf("aot probe: %08x %.2f us in compiled code, %.2f nested runs a call: %s", F.f->va, own_us,
+                         (double)F.probe_nested / kProbeN, own_us < g_min_us ? "left to Box86" : "kept");
+            if (F.probe == kProbeSkip + kProbeN && own_us < g_min_us) {
+                // Box86 runs it from its next call (the page's code marked
+                // changed, as the game's own writes are).
+                unhook_at(c, F.f->va, F.before, F.hooked);
+                F.dropped = true;
+                g_dropped++;
+                g_dropped_window++;
+            }
+        }
+    } else if (g_mode == AotMode::Sig && g_prof) {
+        g_prof_sites[(uint64_t)F.f->va << 32 | aot_ld32(aot_mem, regs[4])]++;
+        const uint64_t t0 = ticks();
+        g_prof_depth++;
+        F.f->sig(regs);
+        g_prof_depth--;
+        const uint64_t dt = ticks() - t0;
+        F.ticks_in += dt;
+        if (!g_prof_depth)
+            g_prof_outer += dt;
+    } else if (g_mode == AotMode::Sig)
         F.f->sig(regs);
     else
         nested_run(c, F.tramp, regs);   // hooked only in Sig and Check; between modes, the original
@@ -300,6 +374,28 @@ uint32_t enter_fn(Fn &F, Cpu &c)
         if (k != 4)
             c.set_reg(k, regs[k]);
     return regs[0];
+}
+
+// A native's guest_call (issue #115: the floor's interpolated light calls
+// 4f8850 about 100k times a fight window) into a compiled function: in C,
+// without the nested run. Sig only (Check's goes through the trap and is
+// checked); a function the natives changed since it was compiled isn't
+// hooked, and stays nested; one the probe left to Box86 still runs in C here
+// (the run costs more than any compiled function).
+bool direct_fn(Cpu &c, uint32_t va, uint32_t *regs)
+{
+    if (g_mode != AotMode::Sig)
+        return false;
+    const auto it = g_fn_at.find(va);
+    if (it == g_fn_at.end())
+        return false;
+    Fn &F = g_fns[it->second];
+    if (!F.hooked && !F.dropped)
+        return false;
+    g_cpu = &c;
+    F.direct++;
+    F.f->sig(regs);
+    return true;
 }
 
 uint32_t enter(Root &R, Cpu &c)
@@ -406,6 +502,7 @@ void aot_set_native(uint32_t va, AotNativeFn fn)
 }
 
 void set_aot_wanted(AotMode mode) { g_wanted = mode; }
+void set_aot_min_us(double us) { g_min_us = us; }
 void set_aot_fns(uint32_t first, uint32_t last)
 {
     g_fns_first = first;
@@ -435,11 +532,13 @@ void install_fns(Cpu &c)
     }
     g_fns.reserve(n);
     std::string skipped;
-    uint32_t moved = 0, index = 0, left_out = 0;
+    uint32_t moved = 0, index = 0, left_out = 0, in_line = 0;
     // D2_AOT_FNS=<first>-<last> (the lane, issue #115): only the hookable
     // functions with those indexes (from 0, in the table's order), to find
     // by halves one that goes wrong where the check doesn't see it.
     uint32_t first = g_fns_first, last = g_fns_last;
+    if (const char *m = std::getenv("D2_AOT_MIN_US"))   // the lane: the probe's threshold (set_aot_min_us)
+        g_min_us = std::atof(m);
     if (const char *r = std::getenv("D2_AOT_FNS"))
         std::sscanf(r, "%u-%u", &first, &last);
     for (const AotFunc *f = funcs; f->va; f++) {
@@ -475,10 +574,25 @@ void install_fns(Cpu &c)
         Fn *Fp = &F;
         const std::string trap_name = std::string("aotfn:") + f->name;
         F.trap = rt::native_entry(trap_name.c_str(), f->pops / 4, [Fp](Cpu &cc) { return enter_fn(*Fp, cc); });
+        // A leaf (issue #115) never runs Box86 nested, so Box86 can enter it
+        // in line, without leaving its run: a trap of its own, for Sig. The
+        // check runs the original nested, through the other.
+        if (f->leaf && !std::getenv("D2_AOT_NOINLINE")) {
+            F.trap_in_line = rt::native_entry((trap_name + "/in line").c_str(), f->pops / 4,
+                                              [Fp](Cpu &cc) { return enter_fn(*Fp, cc); });
+            if (F.trap_in_line)
+                c.set_inline_shim(F.trap_in_line);
+            in_line++;
+        }
     }
     c.invalidate_code(at, bytes);
-    rt::logf("aot: %u of %u compiled functions can be hooked%s%s%s", (unsigned)g_fns.size(), (unsigned)all,
-             moved ? " (some had other bytes at their entry)" : "", skipped.empty() ? "" : "; not: ",
+    for (uint32_t k = 0; k < g_fns.size(); k++)
+        g_fn_at[g_fns[k].f->va] = k;
+    // D2_AOT_NODIRECT (the lane): the natives' guest_calls nested, as before.
+    if (!std::getenv("D2_AOT_NODIRECT"))
+        rt::set_guest_direct(direct_fn);
+    rt::logf("aot: %u of %u compiled functions can be hooked (%u entered in line)%s%s%s", (unsigned)g_fns.size(),
+             (unsigned)all, (unsigned)in_line, moved ? " (some had other bytes at their entry)" : "", skipped.empty() ? "" : "; not: ",
              skipped.c_str());
     if (left_out)
         rt::logf("aot: %u left out (D2_AOT_FNS %u-%u)", (unsigned)left_out, (unsigned)first, (unsigned)last);
@@ -649,12 +763,17 @@ void set_aot_mode(Cpu &c, AotMode mode)
     std::string names;
     const std::vector<uint8_t> bad = stale_funcs(c, changed, names);
     uint32_t hooked = 0, left = 0;
+    g_dropped = 0;
     for (Fn &F : g_fns) {
+        F.probe = 0;
+        F.probe_ticks = F.probe_nested_ticks = 0;
+        F.probe_nested = 0;
+        F.dropped = false;
         if (bad[F.f - aot_funcs]) {
             left++;
             continue;
         }
-        hook_at(c, F.f->va, F.trap, F.before, F.hooked);
+        hook_at(c, F.f->va, mode == AotMode::Sig && F.trap_in_line ? F.trap_in_line : F.trap, F.before, F.hooked);
         hooked++;
     }
     rt::logf("aot: %u functions hooked; %u changed since compiled (natives%s%s), %u hookable left to Box86 with them",
@@ -709,6 +828,79 @@ std::vector<std::string> aot_lines()
                       unchecked_all);
         out.push_back(line);
     }
+    {
+        uint32_t traps = 0;
+        std::vector<std::pair<uint32_t, const Fn *>> by;
+        for (Fn &F : g_fns) {
+            if (F.entered)
+                by.push_back({F.entered, &F});
+            traps += F.entered;
+        }
+        if (traps) {
+            char line[512];
+            int p = std::snprintf(line, sizeof line, "aot: %u calls from Box86 into compiled code:", traps);
+            std::sort(by.begin(), by.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
+            for (size_t k = 0; k < by.size() && k < (g_prof ? 12 : 6) && p < (int)sizeof line; k++) {
+                p += std::snprintf(line + p, sizeof line - p, " %08x %u", by[k].second->f->va, by[k].first);
+                if (g_prof && p < (int)sizeof line)
+                    p += std::snprintf(line + p, sizeof line - p, " (%.2f us)",
+                                       (double)by[k].second->ticks_in / by[k].first / kTicksPerUs);
+            }
+            out.push_back(line);
+        }
+        if (!g_prof_sites.empty()) {
+            std::vector<std::pair<uint32_t, uint64_t>> sites;
+            for (const auto &kv : g_prof_sites)
+                sites.push_back({kv.second, kv.first});
+            std::sort(sites.begin(), sites.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
+            char line[512];
+            int p = std::snprintf(line, sizeof line, "aot: calls from Box86 by return address:");
+            for (size_t k = 0; k < sites.size() && k < 10 && p < (int)sizeof line; k++)
+                p += std::snprintf(line + p, sizeof line - p, " %08x<-%08x %u", (uint32_t)(sites[k].second >> 32),
+                                   (uint32_t)sites[k].second, sites[k].first);
+            out.push_back(line);
+            g_prof_sites.clear();
+        }
+        // The window's own time, in every mode (the lane's virtual clock
+        // keeps the game's work per window the same: its host time compares
+        // the modes); with D2_AOT_PROF, the time inside compiled code.
+        const uint64_t now = ticks();
+        if (g_prof_window_t0 && !g_fns.empty()) {
+            char line[160];
+            if (g_prof)
+                std::snprintf(line, sizeof line, "aot time: %.0f ms this window, %.0f inside compiled code",
+                              (double)(now - g_prof_window_t0) / kTicksPerUs / 1000,
+                              (double)g_prof_outer / kTicksPerUs / 1000);
+            else
+                std::snprintf(line, sizeof line, "aot time: %.0f ms this window",
+                              (double)(now - g_prof_window_t0) / kTicksPerUs / 1000);
+            out.push_back(line);
+        }
+        g_prof_window_t0 = now;
+        g_prof_outer = 0;
+        std::vector<std::pair<uint32_t, const Fn *>> direct;
+        uint32_t directs = 0;
+        for (Fn &F : g_fns) {
+            if (F.direct)
+                direct.push_back({F.direct, &F}), directs += F.direct;
+            F.entered = 0, F.ticks_in = 0, F.direct = 0;
+        }
+        if (directs) {
+            std::sort(direct.begin(), direct.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
+            char line[320];
+            int p = std::snprintf(line, sizeof line, "aot: %u calls from natives run in C, not nested:", directs);
+            for (size_t k = 0; k < direct.size() && k < 6 && p < (int)sizeof line; k++)
+                p += std::snprintf(line + p, sizeof line - p, " %08x %u", direct[k].second->f->va, direct[k].first);
+            out.push_back(line);
+        }
+    }
+    if (g_dropped_window) {
+        char line[160];
+        std::snprintf(line, sizeof line, "aot: %u functions left to Box86 after their first calls (under %.2f us each), "
+                      "%u since turned on", g_dropped_window, g_min_us, g_dropped);
+        out.push_back(line);
+        g_dropped_window = 0;
+    }
     if (g_nested) {
         char line[256];
         int p = std::snprintf(line, sizeof line, "aot: %u nested runs of callees not compiled:", g_nested);
@@ -749,7 +941,10 @@ void aot_guest_call(uint32_t va, AotRegs *r)
         aot_guest_hook(va, r);
         return;
     }
+    const uint64_t t0 = game::ticks();
     game::nested_run(*game::g_cpu, va, r->r);
+    game::g_nested_ticks += game::ticks() - t0;
+    game::g_nested_n++;
 }
 
 void aot_bad_ret(uint32_t fn, uint32_t esp0, uint32_t esp)

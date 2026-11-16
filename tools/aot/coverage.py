@@ -70,7 +70,8 @@ def main():
     for f, executed in funcs.most_common(15):
         print(f"  {names.label(f):40s} {100 * executed / listed:6.2f}%")
     args = "# The AOT coverage list (tools/aot/coverage.py, issue #115): %d functions, %.2f%% of the lane's\n" \
-           "# executed bytes over %s.\n--compile %s\n" % (
+           "# executed bytes over %s; with their callees two calls deep where they compile (a callee left to\n" \
+           "# Box86 costs a nested run per call).\n--callees 2\n--compile %s\n" % (
                len(chosen), 100 * acc / listed, ", ".join(os.path.basename(x) for x in a.logs),
                ",".join("%x" % f for f in sorted(chosen)))
     if a.out:

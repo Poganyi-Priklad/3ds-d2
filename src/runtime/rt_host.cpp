@@ -673,6 +673,12 @@ uint32_t current_teb()
 
 void set_last_error(Cpu &c, uint32_t err) { c.write_u32(current_teb() + kTebLastError, err); }
 
+namespace {
+GuestDirectFn g_guest_direct = nullptr;
+}
+
+void set_guest_direct(GuestDirectFn fn) { g_guest_direct = fn; }
+
 uint32_t guest_call(Cpu &c, uint32_t va, std::initializer_list<uint32_t> args)
 {
     X86Context saved;
@@ -686,6 +692,14 @@ uint32_t guest_call(Cpu &c, uint32_t va, std::initializer_list<uint32_t> args)
     esp -= 4;
     c.write_u32(esp, g_br->sentinel());
     c.set_reg(R_ESP, esp);
+    if (g_guest_direct) {
+        uint32_t r[8];
+        c.regs_gp(r);
+        if (g_guest_direct(c, va, r)) {
+            c.load_context(saved);
+            return r[0];
+        }
+    }
     const char *fault = nullptr;
     const bool ok = c.run(va, &fault);
     const uint32_t ret = c.reg(R_EAX);

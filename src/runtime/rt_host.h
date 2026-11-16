@@ -378,6 +378,11 @@ void set_last_error(d2rt::Cpu &c, uint32_t err);
 // Calls guest code from inside a shim (window procedures, callbacks): builds the
 // frame below the caller's ESP, runs to the bridge sentinel, restores registers.
 uint32_t guest_call(d2rt::Cpu &c, uint32_t va, std::initializer_list<uint32_t> args);
+// AOT (issue #115): guest_call's callee as compiled code, in C, instead of a
+// nested run (8-10 us each on the lane): true when it ran, regs (eax..edi,
+// esp at the return address) in and out. Off: nullptr.
+using GuestDirectFn = bool (*)(d2rt::Cpu &c, uint32_t va, uint32_t *regs);
+void set_guest_direct(GuestDirectFn fn);
 // Ends the current stdcall shim (registered with `shim_argc` arguments) by
 // jumping to guest function `va` with `args`, as if the guest had called it
 // in the shim's place: its return value and stack cleanup become the shim's.

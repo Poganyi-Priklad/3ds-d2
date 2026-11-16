@@ -1598,7 +1598,9 @@ void load_settings()
             unsigned first = 0, last = 0;
             if (std::sscanf(line + 7, "%u-%u", &first, &last) == 2)
                 game::set_aot_fns(first, last);
-        } else if (std::strncmp(line, "stallms=", 8) == 0)
+        } else if (std::strncmp(line, "aotmin=", 7) == 0)   // issue #115: the probe's threshold, in us
+            game::set_aot_min_us(std::atof(line + 7));
+        else if (std::strncmp(line, "stallms=", 8) == 0)
             g_stall_ms = (uint32_t)std::strtoul(line + 8, nullptr, 10);
         else if (std::strncmp(line, "stormrate=", 10) == 0)
             g_storm_rate_kib = (uint32_t)std::strtoul(line + 10, nullptr, 10);
