@@ -54,6 +54,15 @@ typedef struct {
     uint8_t preserved;    /* bit k: r[k] comes back as it went in */
     uint8_t root;         /* also in aot_roots */
     uint8_t head[16];
+    /* Its code as compiled (issue #115): FNV-1a of the bytes of its ranges
+     * (lo, hi pairs), and the indexes in this table of the compiled
+     * functions it calls in C. A function whose bytes changed since (a
+     * native's patch) runs under Box86, with every compiled caller that
+     * reaches it in C. */
+    uint32_t hash;
+    uint16_t nranges, ncallees;
+    const uint32_t *ranges;
+    const uint16_t *callees;
 } AotFunc;
 
 extern uint8_t *aot_mem;   /* host address of guest 0 */

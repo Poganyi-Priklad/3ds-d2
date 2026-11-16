@@ -1401,12 +1401,18 @@ void present(const rt::Frame &f)
                 game::frame_trace_note(lock ? "frame lock: on" : "frame lock: off");
         }
     }
-    {   // the OPTIONS page's AOT bench (issue #113): only a build with the compiled code has it
-        const game::AotMode want =
-            (g_ss.port_options() & game::kPortAotBench) && game::aot_linked() ? game::AotMode::Bench : game::AotMode::Off;
+    {   // the OPTIONS page's AOT row: compiled code (issue #115) or its bench (issue #113); only a build
+        // with the compiled code has either
+        const uint32_t port = g_ss.port_options();
+        const game::AotMode want = !game::aot_linked()          ? game::AotMode::Off
+                                   : (port & game::kPortAot)      ? game::AotMode::Sig
+                                   : (port & game::kPortAotBench) ? game::AotMode::Bench
+                                                                  : game::AotMode::Off;
         if (game::aot_mode() != want && g_guest_cpu) {
             game::set_aot_mode(*g_guest_cpu, want);
-            logline(want == game::AotMode::Bench ? "aot bench: on" : "aot bench: off");
+            logline(want == game::AotMode::Sig     ? "aot: compiled code on"
+                    : want == game::AotMode::Bench ? "aot bench: on"
+                                                   : "aot: off");
         }
     }
     {   // the OPTIONS page's sound limiter (issue #117)
@@ -1588,7 +1594,11 @@ void load_settings()
             g_dyn_budgettail = std::atoi(line + 11);
         else if (std::strncmp(line, "forward=", 8) == 0)
             g_dyn_forward = std::atoi(line + 8);
-        else if (std::strncmp(line, "stallms=", 8) == 0)
+        else if (std::strncmp(line, "aotfns=", 7) == 0) {   // a measurement's (Azahar), issue #115: D2_AOT_FNS
+            unsigned first = 0, last = 0;
+            if (std::sscanf(line + 7, "%u-%u", &first, &last) == 2)
+                game::set_aot_fns(first, last);
+        } else if (std::strncmp(line, "stallms=", 8) == 0)
             g_stall_ms = (uint32_t)std::strtoul(line + 8, nullptr, 10);
         else if (std::strncmp(line, "stormrate=", 10) == 0)
             g_storm_rate_kib = (uint32_t)std::strtoul(line + 10, nullptr, 10);

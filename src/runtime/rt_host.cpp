@@ -1413,6 +1413,47 @@ uint64_t now_us()
     return last;
 }
 
+// See rt_host.h.
+uint32_t finish_nested_block(Cpu &c)
+{
+    GuestThread *t = g_sched ? g_sched->current() : nullptr;
+    if (!t || t->state != GuestThread::State::Blocked || !t->wait_obj)
+        return 0;
+    Waitable *w = static_cast<Waitable *>(t->wait_obj);
+    const uint64_t start = wx86_now_us();
+    // A timed wait: on the real clock, its time left by the scheduler's clock;
+    // on the virtual clock at once, since that clock can't run while this
+    // thread holds the core.
+    uint64_t until = start;
+    if (t->wake_deadline && g_opt.real_clock && t->wake_deadline > g_sched->virt_ms())
+        until = start + (t->wake_deadline - g_sched->virt_ms()) * 1000;
+    bool got = false, warned = false;
+    for (;;) {
+        if (w->try_acquire(t)) {
+            got = true;
+            break;
+        }
+        const uint64_t now = wx86_now_us();
+        if (t->wake_deadline && now >= until)
+            break;
+        if (!warned && now - start > 10000000) {   // only another guest thread could end it: it never will
+            logf("aot: a nested run has waited 10 s on a %s no host thread will signal", w->kind());
+            warned = true;
+        }
+        if (g_opt.sleep_ms)
+            g_opt.sleep_ms(1);
+    }
+    if (t->wake_writes_eax)
+        c.set_reg(R_EAX, got ? w->result() : t->wake_timeout_eax);
+    t->wait_obj = nullptr;
+    t->wake_writes_eax = true;
+    t->wake_timeout_eax = 0x102;
+    t->wake_deadline = 0;
+    t->state = GuestThread::State::Running;
+    const uint32_t us = (uint32_t)std::min<uint64_t>(wx86_now_us() - start, 0xffffffffu);
+    return us ? us : 1;
+}
+
 void request_exit(uint32_t code)
 {
     g_exited = true;

@@ -267,6 +267,7 @@ int main(int argc, char **argv)
         if (video)
             game::install_cinematics(c);
         game::install_automap_capture(c);
+        game::aot_after_natives(c);   // D2_AOT's Sig or Check, once the natives are in (issue #115)
     };
     static LaneVideoAudio video_audio;
     opt.video_audio = &video_audio;

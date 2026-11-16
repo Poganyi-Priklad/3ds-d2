@@ -59,7 +59,7 @@ run: $(HOST)
 
 # Always delegated: the library build is incremental and knows its own inputs.
 $(W)/build-arm/libwinx86.a: FORCE
-	$(MAKE) -C $(ROOT)/tests/cpu VARIANT=armv6 lib
+	$(MAKE) -C $(ROOT)/tests/cpu VARIANT=armv6 OUT=$(ROOT)/build/cpu/armv6 lib   # W's, not $(OUT)'s (a lane's OUT=)
 $(W)/build-arm/libwinx86_prof.a: $(W)/build-arm/libwinx86.a FORCE
 	@mkdir -p $(OUT)
 	cd $(W) && TARGET=armv6 LIBTAG=_prof EXTRA=-DPROF_COUNTERS bash build.sh > $(abspath $(OUT))/lib-prof-build.log 2>&1 \

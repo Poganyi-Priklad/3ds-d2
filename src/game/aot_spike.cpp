@@ -39,7 +39,12 @@ namespace game {
 uint8_t *aot_guest_base();   // d2_native.cpp: its g_base
 namespace {
 
-Cpu *g_cpu = nullptr;
+// Per host thread (issue #115): on the console each guest thread runs on a
+// host thread of its own, and one blocked in a shim lets another run, which
+// may enter compiled code too; the first's calls to Box86 must still go
+// through its own Cpu.
+__thread Cpu *g_cpu = nullptr;
+uint32_t g_fns_first = 0, g_fns_last = UINT32_MAX;   // set_aot_fns
 AotMode g_mode = AotMode::Off, g_wanted = AotMode::Off;
 
 uint64_t ticks()
@@ -110,10 +115,12 @@ uint32_t g_nested_yields = 0;   // shims inside a nested run that asked to yield
 // is sent again after, so the outer slice still stops for it. (A nested
 // run must never come from a trap served in line, inside the dynarec's own
 // run: its stop at the sentinel would end that run too. install_aot names
-// the roots' traps apart for this.) A yield can't
-// be honoured inside a nested run (the scheduler can't switch away from
-// it): resumed, and logged, since a wait that really had to block would get
-// a wrong result.
+// the roots' traps apart for this.) A yield can't be honoured inside a
+// nested run (the scheduler can't switch away from it): an advisory one is
+// resumed; a wait that blocked the thread is done in place (rt::
+// finish_nested_block), else it would go on with the wait's placeholder for a
+// result. A wait on another guest thread can't end there: the recompiler
+// leaves to Box86 what could reach one (recompile.py's may_block).
 void nested_run(Cpu &c, uint32_t va, uint32_t *r)
 {
     d2rt::X86Context saved;
@@ -137,12 +144,16 @@ void nested_run(Cpu &c, uint32_t va, uint32_t *r)
         stopped = true;
         const bool lim = c.take_limit_hit();
         const bool yielded = rt::bridge().take_yield();
+        // A shim that blocked the thread (the I/O worker's read on the
+        // console) left a placeholder in EAX for the scheduler's wake: the
+        // wait is done here, in place (issue #115: Storm's reads got 0).
+        const uint32_t waited_us = yielded ? rt::finish_nested_block(c) : 0;
         if (yielded)
             g_nested_yields++;
         static uint32_t logged = 0;
         if (++logged <= 10)
             rt::logf("aot: a nested run of %08x stopped at %08x (%s), resumed", va, eip,
-                     lim ? "slice" : yielded ? "a shim's yield" : "no reason given");
+                     lim ? "slice" : waited_us ? "a wait, done in place" : yielded ? "a shim's yield" : "no reason given");
     }
     if (stopped)
         c.nudge_thread_budget(nullptr);
@@ -184,8 +195,8 @@ struct Fn {
     uint32_t checked_all = 0, differ_all = 0, unchecked_all = 0;
 };
 std::vector<Fn> g_fns;           // sized once at install: entries keep their address
-int g_journaling = 0;            // inside a journaled compiled run
-bool g_impure = false;           // ... which called Box86
+__thread int g_journaling = 0;      // inside a journaled compiled run (this thread's)
+__thread bool g_impure = false;     // ... which called Box86
 uint32_t g_differ_logged = 0;
 
 const char *reg_name(int k)
@@ -395,6 +406,11 @@ void aot_set_native(uint32_t va, AotNativeFn fn)
 }
 
 void set_aot_wanted(AotMode mode) { g_wanted = mode; }
+void set_aot_fns(uint32_t first, uint32_t last)
+{
+    g_fns_first = first;
+    g_fns_last = last;
+}
 
 namespace {
 // The functions' entries (issues #114, #115): one per compiled function
@@ -423,7 +439,7 @@ void install_fns(Cpu &c)
     // D2_AOT_FNS=<first>-<last> (the lane, issue #115): only the hookable
     // functions with those indexes (from 0, in the table's order), to find
     // by halves one that goes wrong where the check doesn't see it.
-    uint32_t first = 0, last = UINT32_MAX;
+    uint32_t first = g_fns_first, last = g_fns_last;
     if (const char *r = std::getenv("D2_AOT_FNS"))
         std::sscanf(r, "%u-%u", &first, &last);
     for (const AotFunc *f = funcs; f->va; f++) {
@@ -467,6 +483,10 @@ void install_fns(Cpu &c)
     if (left_out)
         rt::logf("aot: %u left out (D2_AOT_FNS %u-%u)", (unsigned)left_out, (unsigned)first, (unsigned)last);
 }
+}  // namespace
+
+namespace {
+AotMode g_pending = AotMode::Off;   // the lane's D2_AOT, until the natives are in
 }  // namespace
 
 int install_aot(Cpu &c)
@@ -532,10 +552,75 @@ int install_aot(Cpu &c)
     }
     c.invalidate_code(at, 0x1000);
     install_fns(c);
-    set_aot_mode(c, mode);
+    // Sig and Check hook every compiled function, which the natives' hooks
+    // must go in before (issue #115: on the console they're in before the
+    // OPTIONS row turns it on); aot_after_natives() turns them on.
+    if (mode == AotMode::Sig || mode == AotMode::Check) {
+        g_pending = mode;
+        set_aot_mode(c, AotMode::Off);
+    } else {
+        set_aot_mode(c, mode);
+    }
     rt::logf("aot: %d compiled roots%s, mode %d", n, aotj_funcs ? " (with the check build)" : "", (int)mode);
     return n;
 }
+
+void aot_after_natives(Cpu &c)
+{
+    if (g_pending == AotMode::Off)
+        return;
+    set_aot_mode(c, g_pending);
+    g_pending = AotMode::Off;
+}
+
+namespace {
+// FNV-1a over a compiled function's code as it is now, as recompile.py's
+// code_hash() took it from the Game.exe it compiled.
+uint32_t code_hash(Cpu &c, const AotFunc *f)
+{
+    uint32_t h = 0x811c9dc5u;
+    uint8_t buf[256];
+    for (uint32_t k = 0; k < f->nranges; k++)
+        for (uint32_t va = f->ranges[2 * k], hi = f->ranges[2 * k + 1]; va < hi;) {
+            const uint32_t n = std::min<uint32_t>(hi - va, sizeof buf);
+            c.read(va, buf, n);
+            for (uint32_t j = 0; j < n; j++)
+                h = (h ^ buf[j]) * 0x01000193u;
+            va += n;
+        }
+    return h;
+}
+
+// The compiled functions to leave to Box86 (issue #115): those whose code
+// changed since it was compiled (a native's patch: its hook or code it
+// replaced in line, which the compiled code would skip), and every compiled
+// function that reaches one in C. With every function unhooked.
+std::vector<uint8_t> stale_funcs(Cpu &c, uint32_t &changed, std::string &names)
+{
+    size_t n = 0;
+    while (aot_funcs[n].va)
+        n++;
+    std::vector<uint8_t> bad(n);
+    changed = 0;
+    for (size_t k = 0; k < n; k++)
+        if (aot_funcs[k].nranges && code_hash(c, &aot_funcs[k]) != aot_funcs[k].hash) {
+            bad[k] = 1;
+            changed++;
+            if (names.size() < 240)
+                names += std::string(names.empty() ? "" : " ") + aot_funcs[k].name;
+        }
+    for (bool more = changed != 0; more;) {
+        more = false;
+        for (size_t k = 0; k < n; k++)
+            for (uint32_t j = 0; j < aot_funcs[k].ncallees && !bad[k]; j++)
+                if (bad[aot_funcs[k].callees[j]]) {
+                    bad[k] = 1;
+                    more = true;
+                }
+    }
+    return bad;
+}
+}  // namespace
 
 void set_aot_mode(Cpu &c, AotMode mode)
 {
@@ -554,9 +639,26 @@ void set_aot_mode(Cpu &c, AotMode mode)
         else
             hook(g_roots[k], c);
     }
+    if (!fns)
+        return;
+    // Each time it's turned on: the natives may have hooked since, and what
+    // they changed (and whatever reaches it) stays with Box86.
     for (Fn &F : g_fns)
-        if (fns)
-            hook_at(c, F.f->va, F.trap, F.before, F.hooked);
+        unhook_at(c, F.f->va, F.before, F.hooked);
+    uint32_t changed = 0;
+    std::string names;
+    const std::vector<uint8_t> bad = stale_funcs(c, changed, names);
+    uint32_t hooked = 0, left = 0;
+    for (Fn &F : g_fns) {
+        if (bad[F.f - aot_funcs]) {
+            left++;
+            continue;
+        }
+        hook_at(c, F.f->va, F.trap, F.before, F.hooked);
+        hooked++;
+    }
+    rt::logf("aot: %u functions hooked; %u changed since compiled (natives%s%s), %u hookable left to Box86 with them",
+             (unsigned)hooked, (unsigned)changed, names.empty() ? "" : ": ", names.c_str(), (unsigned)left);
 }
 
 std::vector<std::string> aot_lines()

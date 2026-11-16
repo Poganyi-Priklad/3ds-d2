@@ -78,6 +78,16 @@ X87_PREFIX = "f"
 # retcaller = 0 ends in ExitProcess. Its ret only serves other arguments.
 NORETURN_FUNCS = {0x00681e09}
 NORETURN_IMPORTS = {"ExitProcess", "ExitThread", "FatalAppExitA", "FatalExit", "TerminateThread"}
+# Imports whose shim may block the calling thread until another one runs: a
+# wait, a sleep, a lock, a read (the I/O worker on the console), the message
+# queue, the network (issue #115: compiled code calls Box86 nested, and there
+# the scheduler can't switch away).
+BLOCKING_IMPORTS = ("Wait", "Sleep", "EnterCriticalSection", "ReadFile", "GetOverlappedResult", "GetMessage",
+                    "MsgWait", "SignalObjectAndWait", "DeviceIoControl", "recv", "send", "select", "connect",
+                    "accept", "gethostbyname", "DirectSound", "DirectDraw", "SwitchToThread")
+# The game's fatal-error report (Fog's assert message, its string lookup):
+# calls to them are on paths that end the game.
+ERROR_PATH_FUNCS = {0x00408090, 0x00408a60}
 
 
 class Refused(Exception):
@@ -1702,6 +1712,47 @@ def rel32_targets(img, want):
     return hit
 
 
+def may_block(img, prog, vas):
+    """Of the functions in vas, those that may block their thread when Box86
+    runs them nested for compiled code (issue #115): a call to a blocking
+    import, an indirect call (whatever it reaches), a function not decoded,
+    or a call to one that may block. Calls to the fatal-error report and the
+    game's exit don't count: those paths end the game."""
+    out = {}
+    def direct(va):
+        f = prog.func(va)
+        if f.refused:
+            return True
+        for site, t in list(f.calls.items()) + list(f.tails.items()):
+            if site in f.noreturn or t in ERROR_PATH_FUNCS or t in NORETURN_FUNCS:
+                continue
+            if t is None:
+                return True
+            if isinstance(t, tuple):
+                if img.imports.get(t[1], ("", ""))[1].startswith(BLOCKING_IMPORTS):
+                    return True
+        return False
+    work = sorted(vas)
+    for va in work:
+        out[va] = direct(va)
+    changed = True
+    while changed:
+        changed = False
+        for va in work:
+            if out[va]:
+                continue
+            f = prog.func(va)
+            for site, t in list(f.calls.items()) + list(f.tails.items()):
+                if site in f.noreturn or not isinstance(t, int) or t in ERROR_PATH_FUNCS or t in NORETURN_FUNCS:
+                    continue
+                if t in prog.intrinsics or (t in prog.natives and not prog.natives[t]["handback"]):
+                    continue
+                if out.get(t, True):
+                    out[va] = changed = True
+                    break
+    return out
+
+
 def flags_read_after(img, vas, steps=12):
     """Of vas, the functions whose flags a caller may read after they return
     (issue #115): compiled code hands Box86 its registers, not its flags.
@@ -1740,6 +1791,27 @@ def flags_read_after(img, vas, steps=12):
         except Refused:
             pass    # not code after all (the sweep over-approximates)
     return hit
+
+
+def code_ranges(f):
+    """A function's instructions as [lo, hi) runs of bytes, in order."""
+    ranges = []
+    for a in f.order:
+        e = a + f.insns[a].size
+        if ranges and ranges[-1][1] == a:
+            ranges[-1][1] = e
+        else:
+            ranges.append([a, e])
+    return ranges
+
+
+def code_hash(img, ranges):
+    """FNV-1a over those bytes, as aot_spike.cpp's code_hash() takes it."""
+    h = 0x811c9dc5
+    for lo, hi in ranges:
+        for b in img.mem[lo - img.base:hi - img.base]:
+            h = ((h ^ b) * 0x01000193) & 0xffffffff
+    return h
 
 
 def hookable(img, prog, compiled, sweep):
@@ -1806,6 +1878,27 @@ def compile_set(img, starts, roots, extra, mode_list, outdir, names=None):
     for va, site in flags_read_after(img, compiled).items():
         refused[va] = "its flags are read after the call at %08x" % site
     compiled -= set(refused)
+    # Nothing compiled calls, under Box86, code that may block (issue #115):
+    # the scheduler can't switch away from a nested run. A function refused
+    # here becomes a Box86 callee of its compiled callers in turn.
+    blocks = may_block(img, prog, reach)
+    while True:
+        more = {}
+        for va in compiled:
+            for site, t in prog.func(va).calls.items():
+                if not isinstance(t, int) or t in compiled or t in prog.intrinsics or site in prog.func(va).noreturn:
+                    continue
+                if t in ERROR_PATH_FUNCS or t in NORETURN_FUNCS:
+                    continue
+                if t in prog.natives and not prog.natives[t]["handback"]:
+                    continue
+                if blocks.get(t, True):
+                    more[va] = "calls %08x under Box86 at %08x, which may block (a wait, a read, a lock)" % (t, site)
+                    break
+        if not more:
+            break
+        refused.update(more)
+        compiled -= set(more)   # their own code decides whether they block (may_block), as before
     prog.summarize(sorted(reach))
     rounds = 0
     while True:
@@ -1951,14 +2044,31 @@ def compile_set(img, starts, roots, extra, mode_list, outdir, names=None):
                 body = "uint32_t o[8]; %s(%s%s); %s" % (em.name(va), args, ", o" if outs_ else "",
                                                         " ".join("r[%d] = o[%d];" % (x, k) for k, x in enumerate(outs_)))
             chunks.append("static uint32_t AOT_SYM(fn_%08x)(uint32_t *r) { %s return r[0]; }" % (va, body))
+        # Each function's code as compiled and its compiled callees (issue
+        # #115): the app leaves to Box86 what a native's patch changed since.
+        index = {va: k for k, va in enumerate(sorted(compiled))}
+        for va in sorted(compiled):
+            f = prog.func(va)
+            rg = code_ranges(f)
+            cl = sorted({index[t] for t in f.calls.values() if isinstance(t, int) and t in compiled})
+            chunks.append("static const uint32_t AOT_SYM(rg_%08x)[] = {%s};" % (
+                va, ", ".join("0x%08xu, 0x%08xu" % (lo, hi) for lo, hi in rg)))
+            if cl:
+                chunks.append("static const uint16_t AOT_SYM(cl_%08x)[] = {%s};" % (va, ", ".join(map(str, cl))))
         chunks.append("const AotFunc AOT_SYM(funcs)[] = {")
         for va in sorted(compiled):
             keep, head = heads.get(va, (0, [0] * 16))
             mask = lambda regs: sum(1 << x for x in regs if x != ESP)
-            chunks.append("    {0x%08xu, AOT_SYM(fn_%08x), \"%s\", %d, %d, 0x%02x, 0x%02x, %d, {%s}}," % (
-                va, va, names.get(va, "%08x" % va), keep, prog.summ[va].pops or 0, mask(sigs[va]["out"]),
-                mask(sigs[va]["preserved"]), 1 if va in roots else 0, ", ".join("0x%02x" % b for b in head)))
-        chunks.append("    {0, 0, 0, 0, 0, 0, 0, 0, {0}}")
+            f = prog.func(va)
+            rg = code_ranges(f)
+            ncl = len({t for t in f.calls.values() if isinstance(t, int) and t in compiled})
+            chunks.append("    {0x%08xu, AOT_SYM(fn_%08x), \"%s\", %d, %d, 0x%02x, 0x%02x, %d, {%s}, 0x%08xu, %d, %d, "
+                          "AOT_SYM(rg_%08x), %s}," % (
+                              va, va, names.get(va, "%08x" % va), keep, prog.summ[va].pops or 0,
+                              mask(sigs[va]["out"]), mask(sigs[va]["preserved"]), 1 if va in roots else 0,
+                              ", ".join("0x%02x" % b for b in head), code_hash(img, rg), len(rg), ncl, va,
+                              "AOT_SYM(cl_%08x)" % va if ncl else "0"))
+        chunks.append("    {0, 0, 0, 0, 0, 0, 0, 0, {0}, 0, 0, 0, 0, 0}")
         chunks.append("};")
     report["hooks"] = {"hookable": len(heads), "not": {"%08x" % k: v for k, v in sorted(why.items())}}
     chunks.append("const AotRoot AOT_SYM(roots)[] = {")
@@ -1981,13 +2091,7 @@ def compile_set(img, starts, roots, extra, mode_list, outdir, names=None):
         insns += f.stats["insns"]
         falls = sorted({t for t in f.calls.values() if isinstance(t, int) and t not in compiled
                         and t not in INTRINSICS})
-        ranges = []
-        for a in f.order:
-            e = a + f.insns[a].size
-            if ranges and ranges[-1][1] == a:
-                ranges[-1][1] = e
-            else:
-                ranges.append([a, e])
+        ranges = code_ranges(f)
         report["functions"]["%08x" % va] = {
             "insns": f.stats["insns"], "bytes": f.stats["bytes"], "sig": sigs[va], "ranges": ranges,
             "switches": len(f.switches), "natives": sorted("%08x" % t for t in falls if t in NATIVES),

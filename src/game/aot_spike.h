@@ -28,10 +28,17 @@ bool aot_linked();
 // The mode to start in (the app, before install_d2_native); D2_AOT on the
 // lane overrides it.
 void set_aot_wanted(AotMode mode);
+// Only the hookable functions with these indexes (settings.txt's aotfns=, as
+// the lane's D2_AOT_FNS; issue #115): before install_aot.
+void set_aot_fns(uint32_t first, uint32_t last);
 // From install_d2_native, before its hooks: with a mode other than Off the
 // roots are hooked, and a native on the same entry (PathSearch) then isn't.
 // Returns how many roots there are.
 int install_aot(d2rt::Cpu &c);
+// After every native's hook (the lane, issue #115): D2_AOT's Sig or Check
+// turned on, as the console's OPTIONS row turns it on once they're in; what
+// they changed stays with Box86 (set_aot_mode).
+void aot_after_natives(d2rt::Cpu &c);
 // The console's switch (the OPTIONS page): Bench or Off, at once, from
 // the game's thread between frames. Off puts back what was at each entry
 // (the game's bytes or a native's jump).

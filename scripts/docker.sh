@@ -199,6 +199,7 @@ test)
             [ "$name" = act2-east ] && cp -R "$3/." "$ROOT/$out/write/"
             RUN_EXTRA=(-v "$(host_path "$(cd "$2" && pwd)"):/game:ro" -e "D2_AOT=${AOT_MODE:-5}" -e "D2_AOT_FNS=${D2_AOT_FNS:-}" -e M4_VIRTUAL_CLOCK=1 -e WX86_FAKETSC=1
                        -e "M4_SCRIPT=$(cat "$ROOT/tests/m4/scripts/$name.txt")")
+            for v in ${AOT_ENV:-}; do RUN_EXTRA+=(-e "$v"); done   # AOT_ENV="M4_ASYNCIO=1 D2_DCC=2": the console's ways
             run_in "$HOSTTEST_IMAGE" make -C tests/m4 run MS="$ms" OUT="/work/$out" "${AOT_MAKE[@]}" \
                 ${AOT_SPLIT:+AOT_SPLIT=1} > "$ROOT/$out/$name-make.txt" 2>&1 || true
             cp "$ROOT/$out/err.txt" "$ROOT/$out/$name.txt" 2>/dev/null || : > "$ROOT/$out/$name.txt"
