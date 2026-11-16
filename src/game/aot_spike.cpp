@@ -11,6 +11,7 @@
 #include "runtime/rt_host.h"
 
 #include <algorithm>
+#include <csetjmp>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -215,12 +216,60 @@ const char *reg_name(int k)
     return n[k & 7];
 }
 
-void check_fn(Fn &F, Cpu &c, uint32_t *regs)
+__thread int g_prof_depth = 0;   // D2_AOT_PROF: compiled code entered from Box86, inside one another
+
+// An exit (issue #115, aot_exit): compiled code hands the rest of its call
+// to Box86 at a call that may block, an import or an indirect call. It
+// comes back here, to the trap that entered it, with Box86's target and the
+// registers there; the C frames between are compiled code's, dropped.
+struct ExitJump {   // on the stack at each trap: left uninitialised
+    std::jmp_buf jb;
+    uint32_t target;
+    uint32_t r[8];
+};
+__thread ExitJump *g_exit_jump = nullptr;
+uint32_t g_exits = 0;                       // this window
+std::map<uint32_t, uint32_t> g_exits_to;    // ... by Box86's target
+
+// fn(regs), an exit caught: false when the code exited (into x).
+bool run_catching(AotRootFn fn, uint32_t *regs, ExitJump &x)
+{
+    ExitJump *volatile prev = g_exit_jump;
+    const volatile int depth = g_prof_depth, journaling = g_journaling;
+    g_exit_jump = &x;
+    if (setjmp(x.jb)) {
+        g_exit_jump = prev;
+        g_prof_depth = depth;
+        g_journaling = journaling;
+        g_exits++;
+        g_exits_to[x.target]++;
+        return false;
+    }
+    fn(regs);
+    g_exit_jump = prev;
+    return true;
+}
+
+// F's compiled code on regs: true when it returned, false when it exited.
+// Only a function that may exit pays for the catch.
+inline bool run_fn(const AotFunc *f, uint32_t *regs, ExitJump &x)
+{
+    if (!f->may_exit) {
+        f->sig(regs);
+        return true;
+    }
+    return run_catching(f->sig, regs, x);
+}
+
+// Check: false when the compiled code exited; Box86 goes on at x.target with
+// x.r (from the function's entry, x.target its trampoline, when the
+// journal put back all it wrote).
+bool check_fn(Fn &F, Cpu &c, uint32_t *regs, ExitJump &x)
 {
     if (g_journaling) {   // from Box86 inside a journaled run: the original, unchecked
         g_impure = true;
         nested_run(c, F.tramp, regs);
-        return;
+        return true;
     }
     uint32_t a[8], b[8];
     std::memcpy(a, regs, sizeof a);
@@ -229,13 +278,26 @@ void check_fn(Fn &F, Cpu &c, uint32_t *regs)
     g_old.clear();
     g_impure = false;
     g_journaling++;
-    F.fj->sig(a);
-    g_journaling--;
+    const bool done = F.fj->may_exit ? run_catching(F.fj->sig, a, x) : (F.fj->sig(a), true);
+    g_journaling = 0;
+    if (!done) {
+        // Exited: unchecked. With nothing but its own stores to put back,
+        // Box86 runs the whole call from the entry; else on from the exit.
+        F.unchecked++;
+        F.unchecked_all++;
+        if (!g_impure) {
+            for (size_t k = g_journal.size(); k-- > 0;)
+                std::memcpy(aot_mem + g_journal[k].va, &g_old[g_journal[k].at], g_journal[k].n);
+            x.target = F.tramp;
+            std::memcpy(x.r, b, sizeof b);
+        }
+        return false;
+    }
     if (g_impure) {
         F.unchecked++;
         F.unchecked_all++;
         std::memcpy(regs, a, sizeof a);
-        return;
+        return true;
     }
     // This check's journal, apart: a check inside the original's run below
     // starts one of its own.
@@ -293,6 +355,7 @@ void check_fn(Fn &F, Cpu &c, uint32_t *regs)
         }
     }
     std::memcpy(regs, b, sizeof b);   // the game's result is kept
+    return true;
 }
 
 void unhook_at(Cpu &c, uint32_t va, const uint8_t *before, bool &hooked);
@@ -315,7 +378,6 @@ uint32_t g_dropped = 0, g_dropped_window = 0;
 // number, this thread's, for the probe.
 __thread uint64_t g_nested_ticks = 0;
 __thread uint32_t g_nested_n = 0;
-__thread int g_prof_depth = 0;
 uint64_t g_prof_outer = 0, g_prof_window_t0 = 0;
 // ... and where Box86 called from (the return address), this window: the
 // callers that would save the most crossings compiled.
@@ -327,15 +389,17 @@ uint32_t enter_fn(Fn &F, Cpu &c)
     c.regs_gp(regs);
     g_cpu = &c;
     F.entered++;
+    ExitJump x;
+    bool done = true;
     if (g_mode == AotMode::Check && F.fj)
-        check_fn(F, c, regs);
+        done = check_fn(F, c, regs, x);
     else if (g_mode == AotMode::Sig && F.probe < kProbeSkip + kProbeN && g_min_us > 0) {
         if (F.probe++ < kProbeSkip) {
-            F.f->sig(regs);
+            done = run_fn(F.f, regs, x);
         } else {
             const uint64_t t0 = ticks(), n0 = g_nested_ticks;
             const uint32_t c0 = g_nested_n;
-            F.f->sig(regs);
+            done = run_fn(F.f, regs, x);
             F.probe_ticks += ticks() - t0;
             F.probe_nested_ticks += g_nested_ticks - n0;
             F.probe_nested += g_nested_n - c0;
@@ -360,16 +424,26 @@ uint32_t enter_fn(Fn &F, Cpu &c)
         g_prof_sites[(uint64_t)F.f->va << 32 | aot_ld32(aot_mem, regs[4])]++;
         const uint64_t t0 = ticks();
         g_prof_depth++;
-        F.f->sig(regs);
+        done = run_fn(F.f, regs, x);
         g_prof_depth--;
         const uint64_t dt = ticks() - t0;
         F.ticks_in += dt;
         if (!g_prof_depth)
             g_prof_outer += dt;
     } else if (g_mode == AotMode::Sig)
-        F.f->sig(regs);
+        done = run_fn(F.f, regs, x);
     else
         nested_run(c, F.tramp, regs);   // hooked only in Sig and Check; between modes, the original
+    if (!done) {
+        // Box86 goes on at the exit's target with its registers: esp as the
+        // trap's tail leaves it once it has taken off what its ret pops.
+        for (int k = 0; k < 8; k++)
+            if (k != 4)
+                c.set_reg(k, x.r[k]);
+        c.set_reg(4, x.r[4] - (4u + F.f->pops));
+        rt::bridge().redirect_next(x.target);
+        return x.r[0];
+    }
     for (int k = 0; k < 8; k++)
         if (k != 4)
             c.set_reg(k, regs[k]);
@@ -390,7 +464,7 @@ bool direct_fn(Cpu &c, uint32_t va, uint32_t *regs)
     if (it == g_fn_at.end())
         return false;
     Fn &F = g_fns[it->second];
-    if (!F.hooked && !F.dropped)
+    if ((!F.hooked && !F.dropped) || F.f->may_exit)   // an exit needs a trap to go back to
         return false;
     g_cpu = &c;
     F.direct++;
@@ -418,18 +492,20 @@ uint32_t enter(Root &R, Cpu &c)
         }
     }
     const uint64_t t0 = ticks();
+    ExitJump x;
+    bool done = true;
     switch (m) {
-    case AotMode::Sig: R.r->sig(regs); break;
-    case AotMode::Ctx: R.r->ctx(regs); break;
-    case AotMode::SigCalls: R.calls->sig(regs); break;
-    case AotMode::CtxCalls: R.calls->ctx(regs); break;
+    case AotMode::Sig: done = run_catching(R.r->sig, regs, x); break;
+    case AotMode::Ctx: done = run_catching(R.r->ctx, regs, x); break;
+    case AotMode::SigCalls: done = run_catching(R.calls->sig, regs, x); break;
+    case AotMode::CtxCalls: done = run_catching(R.calls->ctx, regs, x); break;
     case AotMode::Bench:
         switch (v) {
         case kBox86: nested_run(c, R.tramp, regs); break;
-        case kSig: R.r->sig(regs); break;
-        case kCtx: R.r->ctx(regs); break;
-        case kSigCalls: R.calls->sig(regs); break;
-        case kCtxCalls: R.calls->ctx(regs); break;
+        case kSig: done = run_catching(R.r->sig, regs, x); break;
+        case kCtx: done = run_catching(R.r->ctx, regs, x); break;
+        case kSigCalls: done = run_catching(R.calls->sig, regs, x); break;
+        case kCtxCalls: done = run_catching(R.calls->ctx, regs, x); break;
         default: {
             // The native reads the Cpu; its result is eax, and it may write
             // others (a hand-back runs the game's code on from the entry:
@@ -455,6 +531,14 @@ uint32_t enter(Root &R, Cpu &c)
     const uint64_t t1 = ticks();
     R.calls_n[m == AotMode::Bench ? v : kSig]++;
     R.ticks_n[m == AotMode::Bench ? v : kSig] += t1 - t0;
+    if (!done) {   // an exit (issue #115): Box86 goes on there, as enter_fn's
+        for (int k = 0; k < 8; k++)
+            if (k != 4)
+                c.set_reg(k, x.r[k]);
+        c.set_reg(4, x.r[4] - (4u + R.r->pops));
+        rt::bridge().redirect_next(x.target);
+        return x.r[0];
+    }
     for (int k = 0; k < 8; k++)
         if (k != 4)
             c.set_reg(k, regs[k]);
@@ -901,6 +985,17 @@ std::vector<std::string> aot_lines()
         out.push_back(line);
         g_dropped_window = 0;
     }
+    if (g_exits) {
+        char line[256];
+        int p = std::snprintf(line, sizeof line, "aot: %u exits to Box86 (the rest of a call):", g_exits);
+        std::vector<std::pair<uint32_t, uint32_t>> to(g_exits_to.begin(), g_exits_to.end());
+        std::sort(to.begin(), to.end(), [](const auto &a, const auto &b) { return a.second > b.second; });
+        for (size_t k = 0; k < to.size() && k < 6 && p < (int)sizeof line; k++)
+            p += std::snprintf(line + p, sizeof line - p, " %08x %u", to[k].first, to[k].second);
+        out.push_back(line);
+        g_exits = 0;
+        g_exits_to.clear();
+    }
     if (g_nested) {
         char line[256];
         int p = std::snprintf(line, sizeof line, "aot: %u nested runs of callees not compiled:", g_nested);
@@ -945,6 +1040,20 @@ void aot_guest_call(uint32_t va, AotRegs *r)
     game::nested_run(*game::g_cpu, va, r->r);
     game::g_nested_ticks += game::ticks() - t0;
     game::g_nested_n++;
+}
+
+void aot_exit(uint32_t target, uint32_t eax, uint32_t ecx, uint32_t edx, uint32_t ebx, uint32_t esp, uint32_t ebp,
+              uint32_t esi, uint32_t edi)
+{
+    game::ExitJump *x = game::g_exit_jump;
+    if (!x) {   // compiled code entered other than by a trap (AotFunc::may_exit not honoured): a bug of ours
+        rt::logf("aot: an exit to %08x with no trap to go back to", target);
+        aot_unreachable(target);
+    }
+    x->target = target;
+    const uint32_t r[8] = {eax, ecx, edx, ebx, esp, ebp, esi, edi};
+    std::memcpy(x->r, r, sizeof r);
+    std::longjmp(x->jb, 1);
 }
 
 void aot_bad_ret(uint32_t fn, uint32_t esp0, uint32_t esp)

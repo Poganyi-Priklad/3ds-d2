@@ -284,6 +284,7 @@ class Func:
         self.switches = {}       # va -> (index reg, [targets], (byte table va or None))
         self.rets = {}           # va -> bytes popped
         self.noreturn = set()    # call sites not coming back
+        self.exits = frozenset() # compiled (issue #115): call sites that hand the rest of the call to Box86
         self.data = set()        # table bytes
         self.refused = None
         self.stats = collections.Counter()
@@ -376,6 +377,16 @@ class Func:
         hit = [va for va, t in self.calls.items() if t in noreturn_funcs and va not in self.noreturn]
         if not hit:
             return False
+        return self.cut(hit)
+
+    def set_exits(self, sites):
+        """Compiled, the call sites (and tail jumps) whose callee Box86 runs
+        from the site on (issue #115): its compiled code ends there, so their
+        paths end too, as at a call that never returns."""
+        self.exits = frozenset(sites)
+        self.cut([va for va in sites if va in self.calls and va not in self.noreturn])
+
+    def cut(self, hit):
         for va in hit:
             self.noreturn.add(va)
             self.succ[va] = []
@@ -486,6 +497,7 @@ class Program:
         self.funcs = {}
         self.summ = {}
         self.compiled = set()   # what compile_set compiles: their summaries are proven, not assumed
+        self.may_exit = set()   # compiled functions that may hand a call to Box86 midway (theirs or a callee's exit)
 
     def func(self, va):
         f = self.funcs.get(va)
@@ -537,6 +549,60 @@ class Program:
             s = Summary(s.reads, set(s.preserved) | {EBX, EBP, ESI, EDI}, s.pops, s.known)
         return s
 
+    def exit_sites(self, f, blocks):
+        """A compiled function's exits (issue #115): its indirect calls, its
+        imports, its calls and tail jumps to a function left to Box86 that
+        may block. Box86 runs those from the call on (aot_exit): a nested run
+        can't block, the scheduler can't switch away from it."""
+        out = set()
+        for site, t in list(f.calls.items()) + list(f.tails.items()):
+            if site in f.noreturn and site not in f.exits:
+                continue
+            if t is None or isinstance(t, tuple):
+                out.add(site)
+                continue
+            if t in self.compiled or t in self.intrinsics or t in ERROR_PATH_FUNCS or t in NORETURN_FUNCS:
+                continue
+            if t in self.natives and not self.natives[t]["handback"]:
+                continue
+            if blocks.get(t, True):
+                out.add(site)
+        return out
+
+    def apply_exits(self, blocks):
+        """Each compiled function's exits for the compiled set as it is now;
+        a function left to Box86 decoded again without them. The number whose
+        exits changed (their summaries are then to do again)."""
+        n = 0
+        for va in list(self.funcs):
+            f = self.funcs[va]
+            if f.refused:
+                continue
+            want = self.exit_sites(Func(self.img, va, self.starts) if f.exits else f, blocks) \
+                if va in self.compiled else set()
+            if frozenset(want) == f.exits:
+                continue
+            g = self.funcs[va] = Func(self.img, va, self.starts)
+            if want:
+                g.set_exits(want)
+            n += 1
+        # Who may exit: an exit of its own, or a compiled callee (in C) that may.
+        me = {va for va in self.compiled if self.func(va).exits}
+        changed = True
+        while changed:
+            changed = False
+            for va in self.compiled:
+                if va in me:
+                    continue
+                f = self.func(va)
+                if any(isinstance(t, int) and t in me for t in list(f.calls.values()) + list(f.tails.values())):
+                    me.add(va)
+                    changed = True
+        if me != self.may_exit:
+            n += 1
+        self.may_exit = me
+        return n
+
     def mark_noreturn(self, vas):
         """Functions with no ret left once their calls to such functions end
         their paths (the game's fatal-error and exit paths)."""
@@ -550,7 +616,7 @@ class Program:
                     continue
                 if f.prune(nr):
                     changed = True
-                if not f.rets and all(t in nr for t in f.tails.values()):
+                if not f.rets and not f.exits and all(t in nr for t in f.tails.values()):
                     nr.add(va)
                     changed = True
         self.noreturn_funcs = nr
@@ -638,6 +704,10 @@ class Analysis:
     def __init__(self, prog, f, outs=None, save_rule=False):
         self.p, self.f = prog, f
         self.img = prog.img
+        # Where a call may exit (issue #115), Box86 runs the rest of this
+        # function from its own code: every save is stored, as the original's.
+        if f.entry in prog.may_exit:
+            save_rule = False
         self._stack()
         self._liveness(outs, save_rule)
 
@@ -674,7 +744,7 @@ class Analysis:
                 self._step(i, regs, slots)
                 if va in f.rets:
                     ret_states.append((va, dict(regs)))
-                if va in f.tails:
+                if va in f.tails and va not in f.exits:
                     tail_states.append((va, dict(regs)))
                 succ = f.succ[va]
                 nxt = va + i.size
@@ -688,6 +758,12 @@ class Analysis:
                     else:
                         r0, s0 = states[t]
                         r1 = {k: (v if r0[k] == v else None) for k, v in regs.items()}
+                        # A library call's garbage on one path is garbage after the
+                        # merge (issue #115: else a function returning it on one path
+                        # and a value on another returns it, and the check compares it).
+                        for k in (ECX, EDX):
+                            if ("clob",) in (r0[k], regs[k]):
+                                r1[k] = ("clob",)
                         # esp: where one path knows it and another doesn't (a call
                         # whose ret isn't known statically), trust the known one, as
                         # MSVC's balanced stack allows; compiled code checks esp at
@@ -713,14 +789,16 @@ class Analysis:
         # esp_ok: every ret pops what it says from the entry's esp, so a caller
         # knows esp after the call without asking (what a compiled callee needs).
         self.esp_ok = all(regs[ESP] == ("sp", 0) for _, regs in ret_states)
-        # Registers that at every ret hold only a library call's garbage.
+        # Registers that at some ret may hold a library call's garbage: no
+        # value of the function's then, by MSVC's ABI (issue #115: one path's
+        # memset leftovers made ecx an out, and the check compared them).
         # Through a tail jump: the target's garbage, or ours where it keeps the register.
         def junk(r, va, regs):
             t = self.f.tails[va]
             return r in p.garbage.get(t, ()) or (regs[r] == ("clob",) and r in p.callee_summary(t).preserved)
         self.garbage = {r for r in (ECX, EDX) if (ret_states or tail_states) and
-                        all(regs[r] == ("clob",) for _, regs in ret_states) and
-                        all(junk(r, va, regs) for va, regs in tail_states)}
+                        (any(regs[r] == ("clob",) for _, regs in ret_states) or
+                         any(junk(r, va, regs) for va, regs in tail_states))}
         # esp at a ret known to be something else than the entry's: a helper
         # that moves its caller's frame (MSVC's SEH and EH epilogues: mov esp,
         # ebp from the caller's ebp). Its ret's pops don't tell its caller esp.
@@ -965,6 +1043,8 @@ class Analysis:
         f, p = self.f, self.p
         i = f.insns[va]
         m = i.mnemonic
+        if va in f.exits:        # Box86 goes on from here (issue #115): every register as the original has it
+            return P(ALL), P(ALL)
         if va in f.noreturn:     # the game's fatal-error and exit paths: read nothing we must pass
             return P({ESP}), P(ALL)
         if va in f.calls:
@@ -1623,6 +1703,13 @@ class Emitter:
             fast, step & 0xffffffff, ("esi += n * %du;" % (step & 0xffffffff)) if op.startswith("movs") else "")
         return adv
 
+    def exit(self, target):
+        """Box86 runs on from here (issue #115): every register to the trap
+        that entered compiled code, which resumes Box86 at the target; the
+        rest of this function, and of each compiled caller above it in C,
+        runs in Box86 from the return addresses on the guest stack."""
+        return "aot_exit(%s, eax, ecx, edx, ebx, esp, ebp, esi, edi);" % target
+
     def tail_call(self, i, t):
         """A jmp to another function's entry (issue #115): the target returns
         to our caller for us. Called with esp as at our entry (checked), its
@@ -1630,6 +1717,8 @@ class Emitter:
         compiled caller's esp += 4 + pops stays right."""
         va = i.address
         f, p = self.f, self.p
+        if va in f.exits:
+            return self.exit("0x%08xu" % t)
         if t in p.intrinsics or p.natives.get(t) or isinstance(t, tuple) or t is None:
             raise Refused("tail call at %08x to an import, a native or an intrinsic" % va)
         ours, theirs = p.summ[f.entry].pops, p.callee_summary(t).pops
@@ -1668,6 +1757,10 @@ class Emitter:
         if tail:
             return self.tail_call(i, t)
         push = "esp -= 4u; ST32(esp, 0x%08xu); " % ra
+        if va in f.exits:
+            # The target first: an operand may read esp.
+            x = self.get(i, i.operands[0]) if t is None or isinstance(t, tuple) else "0x%08xu" % t
+            return "{ uint32_t x = %s; %s%s }" % (x, push, self.exit("x"))
         if t in p.intrinsics:
             name = p.intrinsics[t]
             if name == "memset":
@@ -1808,7 +1901,7 @@ def may_block(img, prog, vas):
         if f.refused:
             return True
         for site, t in list(f.calls.items()) + list(f.tails.items()):
-            if site in f.noreturn or t in ERROR_PATH_FUNCS or t in NORETURN_FUNCS:
+            if (site in f.noreturn and site not in f.exits) or t in ERROR_PATH_FUNCS or t in NORETURN_FUNCS:
                 continue
             if t is None:
                 return True
@@ -1827,7 +1920,8 @@ def may_block(img, prog, vas):
                 continue
             f = prog.func(va)
             for site, t in list(f.calls.items()) + list(f.tails.items()):
-                if site in f.noreturn or not isinstance(t, int) or t in ERROR_PATH_FUNCS or t in NORETURN_FUNCS:
+                if (site in f.noreturn and site not in f.exits) or not isinstance(t, int) or t in ERROR_PATH_FUNCS \
+                        or t in NORETURN_FUNCS:
                     continue
                 if t in prog.intrinsics or (t in prog.natives and not prog.natives[t]["handback"]):
                     continue
@@ -1945,6 +2039,13 @@ def compile_set(img, starts, roots, extra, mode_list, outdir, names=None):
             refused[va] = f.refused
             continue
         compiled.add(va)
+    # A call that may block, an import or an indirect call: Box86 runs on from
+    # it (issue #115: an exit, Program.exit_sites), as code left to Box86 can
+    # block where a nested run can't. Again each time the compiled set shrinks:
+    # a function the analysis, the signatures or the emitter refuse later
+    # becomes a Box86 callee of its compiled callers then (6bead0, a lock).
+    blocks = may_block(img, prog, reach)
+    prog.apply_exits(blocks)
     prog.summarize(sorted(reach))
     # What the analysis refuses whatever the signatures, screened once (issue
     # #115: a refusal inside the loops below starts them again, which over
@@ -1963,35 +2064,7 @@ def compile_set(img, starts, roots, extra, mode_list, outdir, names=None):
     for va, site in flags_read_after(img, compiled).items():
         refused[va] = "its flags are read after the call at %08x" % site
     compiled -= set(refused)
-    # Nothing compiled calls, under Box86, code that may block (issue #115):
-    # the scheduler can't switch away from a nested run. A function refused
-    # here becomes a Box86 callee of its compiled callers in turn.
-    # Again each round: a function the signatures or the emitter refuse later
-    # becomes a Box86 callee of its compiled callers then (6bead0, a lock).
-    blocks = may_block(img, prog, reach)
-    def refuse_blocking():
-        n = 0
-        while True:
-            more = {}
-            for va in compiled:
-                g = prog.func(va)
-                for site, t in list(g.calls.items()) + list(g.tails.items()):
-                    if not isinstance(t, int) or t in compiled or t in prog.intrinsics or site in g.noreturn:
-                        continue
-                    if t in ERROR_PATH_FUNCS or t in NORETURN_FUNCS:
-                        continue
-                    if t in prog.natives and not prog.natives[t]["handback"]:
-                        continue
-                    if blocks.get(t, True):
-                        more[va] = "calls %08x under Box86 at %08x, which may block (a wait, a read, a lock)" % (
-                            t, site)
-                        break
-            if not more:
-                return n
-            refused.update(more)
-            compiled.difference_update(more)   # their own code decides whether they block (may_block), as before
-            n += len(more)
-    refuse_blocking()
+    prog.apply_exits(blocks)
     prog.summarize(sorted(reach))
     rounds = 0
     while True:
@@ -2050,7 +2123,9 @@ def compile_set(img, starts, roots, extra, mode_list, outdir, names=None):
                     for site, t in list(f.calls.items()) + list(f.tails.items()):
                         if t in compiled:
                             live = outs[va] if site in f.tails else a.live_out[site]
-                            add = set(live) - prog.summ[t].preserved - {ESP}
+                            # Not its garbage (issue #115: an exit site reads every
+                            # register, a library call's leftovers too; Box86's own are as good).
+                            add = set(live) - prog.summ[t].preserved - {ESP} - set(garbage.get(t, ()))
                             if not add <= outs[t]:
                                 outs[t] |= add
                                 if t not in queued:
@@ -2060,10 +2135,8 @@ def compile_set(img, starts, roots, extra, mode_list, outdir, names=None):
             except Refused as e:
                 refused[cur] = str(e)
                 compiled.discard(cur)
+                prog.apply_exits(blocks)
                 prog.summarize(sorted(reach))   # the summaries as for a function left to Box86
-        if refuse_blocking():
-            prog.summarize(sorted(reach))
-            continue
         sigs = {va: {"in": sorted(prog.summ[va].reads - {ESP}), "out": sorted(outs[va]),
                      "preserved": sorted(prog.summ[va].preserved)} for va in compiled}
         # Every function emitted once, both ways, before writing anything: what
@@ -2084,6 +2157,7 @@ def compile_set(img, starts, roots, extra, mode_list, outdir, names=None):
             break
         refused.update(bad)
         compiled -= set(bad)
+        prog.apply_exits(blocks)
         prog.summarize(sorted(reach))
         print("aot: round %d: %d refused by the emitter, %.0f s" % (rounds, len(bad), time.time() - t0),
               file=sys.stderr)
@@ -2157,6 +2231,9 @@ def compile_set(img, starts, roots, extra, mode_list, outdir, names=None):
                 chunks.append("static const uint16_t AOT_SYM(cl_%08x)[] = {%s};" % (va, ", ".join(map(str, cl))))
         leaf = leaves(prog, compiled)
         report["leaves"] = len(leaf)
+        report["exits"] = {"functions": sum(1 for va in compiled if prog.func(va).exits),
+                           "sites": sum(len(prog.func(va).exits) for va in compiled),
+                           "may_exit": len(prog.may_exit & compiled)}
         chunks.append("const AotFunc AOT_SYM(funcs)[] = {")
         for va in sorted(compiled):
             keep, head = heads.get(va, (0, [0] * 16))
@@ -2166,12 +2243,13 @@ def compile_set(img, starts, roots, extra, mode_list, outdir, names=None):
             ncl = len({t for t in list(f.calls.values()) + list(f.tails.values())
                        if isinstance(t, int) and t in compiled})
             chunks.append("    {0x%08xu, AOT_SYM(fn_%08x), \"%s\", %d, %d, 0x%02x, 0x%02x, %d, {%s}, 0x%08xu, %d, %d, "
-                          "AOT_SYM(rg_%08x), %s, AOT_LEAF(%d)}," % (
+                          "AOT_SYM(rg_%08x), %s, AOT_LEAF(%d), AOT_EXIT(%d, %d)}," % (
                               va, va, names.get(va, "%08x" % va), keep, prog.summ[va].pops or 0,
                               mask(sigs[va]["out"]), mask(sigs[va]["preserved"]), 1 if va in roots else 0,
                               ", ".join("0x%02x" % b for b in head), code_hash(img, rg), len(rg), ncl, va,
-                              "AOT_SYM(cl_%08x)" % va if ncl else "0", 1 if va in leaf else 0))
-        chunks.append("    {0, 0, 0, 0, 0, 0, 0, 0, {0}, 0, 0, 0, 0, 0, 0}")
+                              "AOT_SYM(cl_%08x)" % va if ncl else "0", 1 if va in leaf else 0,
+                              1 if f.exits else 0, 1 if va in prog.may_exit else 0))
+        chunks.append("    {0, 0, 0, 0, 0, 0, 0, 0, {0}, 0, 0, 0, 0, 0, 0, 0}")
         chunks.append("};")
     report["hooks"] = {"hookable": len(heads), "not": {"%08x" % k: v for k, v in sorted(why.items())}}
     chunks.append("const AotRoot AOT_SYM(roots)[] = {")
@@ -2493,8 +2571,11 @@ def main():
         return
     rep = compile_set(img, starts, roots, extra, a.modes.split(","), a.out, names)
     n = len(rep["functions"])
-    print("aot: %d functions compiled (%d x86 instructions, %d bytes; %d never call Box86), %d left to Box86, in %s"
-          % (n, rep["x86_insns"], rep["x86_bytes"], rep.get("leaves", 0), len(rep["refused"]), a.out))
+    ex = rep.get("exits", {})
+    print("aot: %d functions compiled (%d x86 instructions, %d bytes; %d never call Box86; %d hand Box86 the rest "
+          "of a call at %d sites, %d with their callers), %d left to Box86, in %s"
+          % (n, rep["x86_insns"], rep["x86_bytes"], rep.get("leaves", 0), ex.get("functions", 0), ex.get("sites", 0),
+             ex.get("may_exit", 0), len(rep["refused"]), a.out))
     for k, v in sorted(rep["refused"].items()):
         print("  left to Box86: %s: %s" % (k, v))
 
