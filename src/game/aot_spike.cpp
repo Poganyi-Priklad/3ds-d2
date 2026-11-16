@@ -17,6 +17,7 @@
 #include <cstring>
 #include <ctime>
 #include <map>
+#include <set>
 
 #ifdef __3DS__
 extern "C" {
@@ -230,23 +231,37 @@ struct ExitJump {   // on the stack at each trap: left uninitialised
 __thread ExitJump *g_exit_jump = nullptr;
 uint32_t g_exits = 0;                       // this window
 std::map<uint32_t, uint32_t> g_exits_to;    // ... by Box86's target
+// Callouts (aot_call_out), this window: our shims and compiled functions
+// called in C; those that came back other than assumed (an exit at the
+// return), by callee.
+bool g_callouts = true;   // D2_AOT_NOCALLOUT (the lane): every callout an exit
+// Compiled code entered where there's no trap to exit to (a native's
+// guest_call, aot_run_compiled): only functions without hard exits, and a
+// callout's fallback a nested run, as Box86's own call would be.
+__thread int g_no_exit = 0;
+uint32_t g_handed = 0;   // natives' hand-backs to compiled code (aot_trap_for), this window
+uint32_t g_callout_shims = 0, g_callout_fns = 0, g_callout_back = 0;
+std::map<uint32_t, uint32_t> g_callout_back_by;
 
 // fn(regs), an exit caught: false when the code exited (into x).
 bool run_catching(AotRootFn fn, uint32_t *regs, ExitJump &x)
 {
     ExitJump *volatile prev = g_exit_jump;
-    const volatile int depth = g_prof_depth, journaling = g_journaling;
+    const volatile int depth = g_prof_depth, journaling = g_journaling, no_exit = g_no_exit;
     g_exit_jump = &x;
+    g_no_exit = 0;   // a trap of its own (in a nested run under one that can't exit)
     if (setjmp(x.jb)) {
         g_exit_jump = prev;
         g_prof_depth = depth;
         g_journaling = journaling;
+        g_no_exit = no_exit;
         g_exits++;
         g_exits_to[x.target]++;
         return false;
     }
     fn(regs);
     g_exit_jump = prev;
+    g_no_exit = no_exit;
     return true;
 }
 
@@ -464,13 +479,16 @@ bool direct_fn(Cpu &c, uint32_t va, uint32_t *regs)
     if (it == g_fn_at.end())
         return false;
     Fn &F = g_fns[it->second];
-    if ((!F.hooked && !F.dropped) || F.f->may_exit)   // an exit needs a trap to go back to
+    if ((!F.hooked && !F.dropped) || F.f->may_hard)   // a hard exit needs a trap to go back to
         return false;
     g_cpu = &c;
     F.direct++;
+    g_no_exit++;
     F.f->sig(regs);
+    g_no_exit--;
     return true;
 }
+
 
 uint32_t enter(Root &R, Cpu &c)
 {
@@ -587,6 +605,17 @@ void aot_set_native(uint32_t va, AotNativeFn fn)
 
 void set_aot_wanted(AotMode mode) { g_wanted = mode; }
 void set_aot_min_us(double us) { g_min_us = us; }
+
+uint32_t aot_trap_for(uint32_t va)
+{
+    if (g_mode != AotMode::Sig && g_mode != AotMode::Check)
+        return 0;
+    const auto it = g_fn_at.find(va);
+    if (it == g_fn_at.end())
+        return 0;
+    g_handed++;
+    return g_fns[it->second].trap;
+}
 void set_aot_fns(uint32_t first, uint32_t last)
 {
     g_fns_first = first;
@@ -675,6 +704,7 @@ void install_fns(Cpu &c)
     // D2_AOT_NODIRECT (the lane): the natives' guest_calls nested, as before.
     if (!std::getenv("D2_AOT_NODIRECT"))
         rt::set_guest_direct(direct_fn);
+    g_callouts = !std::getenv("D2_AOT_NOCALLOUT");
     rt::logf("aot: %u of %u compiled functions can be hooked (%u entered in line)%s%s%s", (unsigned)g_fns.size(),
              (unsigned)all, (unsigned)in_line, moved ? " (some had other bytes at their entry)" : "", skipped.empty() ? "" : "; not: ",
              skipped.c_str());
@@ -996,6 +1026,25 @@ std::vector<std::string> aot_lines()
         g_exits = 0;
         g_exits_to.clear();
     }
+    if (g_handed) {
+        char line[96];
+        std::snprintf(line, sizeof line, "aot: %u natives' hand-backs to compiled code", g_handed);
+        out.push_back(line);
+        g_handed = 0;
+    }
+    if (g_callout_shims || g_callout_fns || g_callout_back) {
+        char line[256];
+        int p = std::snprintf(line, sizeof line,
+                              "aot: callouts in C: %u to shims, %u to compiled functions; %u back to Box86 at the return:",
+                              g_callout_shims, g_callout_fns, g_callout_back);
+        std::vector<std::pair<uint32_t, uint32_t>> to(g_callout_back_by.begin(), g_callout_back_by.end());
+        std::sort(to.begin(), to.end(), [](const auto &a, const auto &b) { return a.second > b.second; });
+        for (size_t k = 0; k < to.size() && k < 6 && p < (int)sizeof line; k++)
+            p += std::snprintf(line + p, sizeof line - p, " %08x %u", to[k].first, to[k].second);
+        out.push_back(line);
+        g_callout_shims = g_callout_fns = g_callout_back = 0;
+        g_callout_back_by.clear();
+    }
     if (g_nested) {
         char line[256];
         int p = std::snprintf(line, sizeof line, "aot: %u nested runs of callees not compiled:", g_nested);
@@ -1046,7 +1095,7 @@ void aot_exit(uint32_t target, uint32_t eax, uint32_t ecx, uint32_t edx, uint32_
               uint32_t esi, uint32_t edi)
 {
     game::ExitJump *x = game::g_exit_jump;
-    if (!x) {   // compiled code entered other than by a trap (AotFunc::may_exit not honoured): a bug of ours
+    if (!x || game::g_no_exit) {   // compiled code entered other than by a trap (AotFunc::may_exit not honoured): a bug of ours
         rt::logf("aot: an exit to %08x with no trap to go back to", target);
         aot_unreachable(target);
     }
@@ -1054,6 +1103,92 @@ void aot_exit(uint32_t target, uint32_t eax, uint32_t ecx, uint32_t edx, uint32_
     const uint32_t r[8] = {eax, ecx, edx, ebx, esp, ebp, esi, edi};
     std::memcpy(x->r, r, sizeof r);
     std::longjmp(x->jb, 1);
+}
+
+// Box86 goes on at the call's return with what the callee left: esp, or a
+// callee-saved register, not what the compiled caller assumed; or a shim that
+// asked to yield (the trap's tail that entered compiled code does it) or to
+// run guest code first (rd).
+[[noreturn]] static void call_out_back(uint32_t x, uint32_t to, const uint32_t *r)
+{
+    game::g_callout_back++;
+    game::g_callout_back_by[x]++;
+    aot_exit(to, r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7]);
+}
+
+void aot_call_out(uint32_t x, AotRegs *t, uint32_t pops)
+{
+    using namespace game;
+    uint32_t *r = t->r;
+    const uint32_t esp0 = r[4], ra = aot_ld32(aot_mem, esp0), want = esp0 + 4u + pops;
+    const uint32_t keep[4] = {r[3], r[5], r[6], r[7]};
+    if (g_no_exit) {
+        // No trap to exit to: a compiled callee in C if it can't exit
+        // either, else Box86's call, nested (a shim's wait done in place).
+        const auto it = g_callouts ? g_fn_at.find(x) : g_fn_at.end();
+        const Fn *F = it == g_fn_at.end() ? nullptr : &g_fns[it->second];
+        if (F && (F->hooked || F->dropped) && !F->f->may_hard && g_mode == AotMode::Sig) {
+            F->f->sig(r);
+            r[4] = esp0 + 4u + F->f->pops;
+            g_callout_fns++;
+        } else
+            aot_guest_call(x, t);
+        if (r[4] != want || r[3] != keep[0] || r[5] != keep[1] || r[6] != keep[2] || r[7] != keep[3]) {
+            rt::logf("aot: a callout to %08x (return %08x) came back with esp %08x, not %08x, where nothing can "
+                     "exit: the compiled caller can't go on", x, ra, r[4], want);
+            std::abort();
+        }
+        return;
+    }
+    // The check's journaled run too: a compiled callee's journaled code, and
+    // a shim's call unchecked (its writes aren't in the journal).
+    if ((g_mode == AotMode::Sig || (g_mode == AotMode::Check && g_journaling)) && g_callouts) {
+        if (const d2rt::Shim *sh = rt::bridge().slot_shim(x)) {
+            if (g_journaling)
+                g_impure = true;
+            // As the trap would: the CPU's registers as at the call, the
+            // shim, then its ret's pops. (The trap's own context restored
+            // after: its tail goes on from it.)
+            const uint32_t popped = 4u + (sh->stdcall_cleanup ? 4u * sh->argc : 0u);
+            Cpu &c = *g_cpu;
+            d2rt::X86Context saved;
+            c.save_context(saved);
+            for (int k = 0; k < 8; k++)
+                c.set_reg(k, r[k]);
+            {   // each shim's first callout, named (the lane)
+                static std::set<const d2rt::Shim *> seen;
+                if (seen.insert(sh).second)
+                    rt::logf("aot: callout to %s from %08x", sh->tag.c_str(), ra);
+            }
+            const uint32_t eax = sh->fn(c);
+            c.regs_gp(r);
+            r[0] = eax;
+            r[4] += popped;   // the trap's tail: from esp as the shim left it
+            const uint32_t rd = rt::bridge().take_redirect();
+            const bool yield = rt::bridge().yield_requested();
+            c.load_context(saved);
+            g_callout_shims++;
+            if (rd || yield || r[4] != want)
+                call_out_back(x, rd ? rd : ra, r);
+        } else {
+            const auto it = g_fn_at.find(x);
+            if (it == g_fn_at.end())
+                aot_exit(x, r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7]);
+            Fn &F = g_fns[it->second];
+            const AotFunc *af = g_journaling ? F.fj : F.f;
+            if ((!F.hooked && !F.dropped) || !af)   // changed by a native since it was compiled
+                aot_exit(x, r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7]);
+            af->sig(r);   // an exit inside goes back to our own trap, as from a direct call
+            r[4] = esp0 + 4u + F.f->pops;
+            g_callout_fns++;
+            if (r[4] != want)
+                call_out_back(x, ra, r);
+        }
+        if (r[3] != keep[0] || r[5] != keep[1] || r[6] != keep[2] || r[7] != keep[3])
+            call_out_back(x, ra, r);
+        return;
+    }
+    aot_exit(x, r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7]);
 }
 
 void aot_bad_ret(uint32_t fn, uint32_t esp0, uint32_t esp)

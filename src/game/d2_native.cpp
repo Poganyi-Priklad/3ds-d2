@@ -2880,6 +2880,13 @@ uint32_t unit_pick_filter(Cpu &c)
     if (unit_pick_rejected(unit))
         return 0;
     const uint32_t esp = c.reg(R_ESP);
+    // The function's compiled code, when it's on (issue #115: else Box86 runs
+    // the rest, and enters compiled 470860 about 340k times a fight window):
+    // its trap, from the entry, with everything as at the hook.
+    if (const uint32_t trap = game::aot_trap_for(0x00466870)) {
+        resume_original(c, trap, esp, 2);
+        return c.reg(R_EAX);
+    }
     put32(esp - 4, c.reg(R_EBP));
     c.set_reg(R_EBP, esp - 4);
     resume_original(c, 0x00466876, esp - 4 - 0x34, 2);

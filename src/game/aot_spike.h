@@ -53,6 +53,12 @@ AotMode aot_mode();
 // when nothing ran.
 std::vector<std::string> aot_lines();
 
+// A native that hands back to the game's code (issue #115: UnitPickFilter's
+// units it doesn't answer): the trap that enters the function's compiled
+// code instead, for the native to go on at with the registers and stack as
+// at its hook (resume_original). 0 when there's none, or compiled code is off.
+uint32_t aot_trap_for(uint32_t va);
+
 // The natives' entry for Bench: called as the hook would call it.
 using AotNativeFn = uint32_t (*)(d2rt::Cpu &);
 void aot_set_native(uint32_t va, AotNativeFn fn);
