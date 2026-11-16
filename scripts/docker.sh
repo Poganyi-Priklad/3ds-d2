@@ -289,8 +289,8 @@ package-cia)   # [<game-dir> | --slim|--full <game-dir>]: the game app (+ the us
     ensure_image ctrtools "$CTRTOOLS_IMAGE"
     saved_extra=("${RUN_EXTRA[@]}"); RUN_EXTRA=()
     run_in "$HOSTTEST_IMAGE" make -C tests/cpu VARIANT=armv6 lib >/dev/null     # the patched backend tree
-    if [ "${D2_AOT_BUILD:-}" = 1 ]; then   # the AOT spike (issue #113): needs the user's Game.exe
-        [ -n "$art" ] || die "D2_AOT_BUILD=1 package-cia <game-dir>: the recompiler reads its Game.exe"
+    if [ "${D2_AOT_BUILD:-}" = 1 ] || [ "${D2_AOT_BUILD:-}" = keep ]; then   # the AOT spike (issue #113): needs the user's Game.exe (keep: the C the last run wrote)
+        [ -n "$art" ] || die "D2_AOT_BUILD=$D2_AOT_BUILD package-cia <game-dir>: the recompiler reads its Game.exe"
         aot_prepare "$art"
         echo "docker.sh: this CIA holds code made from your Game.exe: it is yours alone, never share it (docs/aot.md)"
     fi

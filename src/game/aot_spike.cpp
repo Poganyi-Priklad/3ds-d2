@@ -372,7 +372,7 @@ const bool g_prof = std::getenv("D2_AOT_PROF") != nullptr;
 // costs 8-10 us on the lane, and more than an empty one's for the function's
 // own: 11-29 us against compiled code's 0.6-2.7 for the fight's hottest.)
 constexpr uint32_t kProbeSkip = 32, kProbeN = 256;
-double g_min_us = 2.0;
+double g_min_us = 8.0;   // issue #115: with exits, 8 did better than 2 on both lane scenes
 uint32_t g_dropped = 0, g_dropped_window = 0;
 // The nested runs compiled code starts (aot_guest_call): their time and
 // number, this thread's, for the probe.
