@@ -81,6 +81,13 @@ build_id() { run_in "$TOOLCHAIN_IMAGE" sh scripts/build-id.sh; }
 # The output is the user's Game.exe in another form: it stays under build/
 # and in their own build. aot_prepare <game-dir> sets AOT_MAKE.
 AOT_MAKE=()
+# The set compiled: tools/aot/<D2_AOT_SET>.args (spike, the default, or
+# coverage: tools/aot/coverage.py's list, issue #115), comment lines left out.
+aot_args_file() { echo "$ROOT/tools/aot/${D2_AOT_SET:-spike}.args"; }
+aot_args() {
+    [ -f "$(aot_args_file)" ] || die "no $(aot_args_file) (D2_AOT_SET)"
+    grep -v '^[[:space:]]*#' "$(aot_args_file)"
+}
 aot_prepare() {
     case "${D2_AOT_BUILD:-}" in
     keep) AOT_MAKE=(AOT=/work/build/aot/spike); return 0 ;;   # what the last D2_AOT_BUILD=1 wrote (lanes side by side)
@@ -92,7 +99,7 @@ aot_prepare() {
     RUN_EXTRA=(-v "$(host_path "$game/Game.exe"):/aot/Game.exe:ro")
     # shellcheck disable=SC2046
     run_in "$HOSTTEST_IMAGE" python3 -I tools/aot/recompile.py /aot/Game.exe --out build/aot/spike \
-        $(cat "$ROOT/tools/aot/spike.args")
+        $(aot_args)
     RUN_EXTRA=(${saved[@]+"${saved[@]}"})
     AOT_MAKE=(AOT=/work/build/aot/spike)
 }
@@ -165,7 +172,7 @@ test)
         [ -n "${M4_OUT:-}" ] && make_args+=(OUT="/work/$M4_OUT")   # e.g. build/m4-b: a lane of its own
         [ -n "${4:-}" ] && make_args+=(CMD="$4")
         RUN_EXTRA=(-v "$(host_path "$(cd "$2" && pwd)"):/game:ro")
-        for v in M4_LAYOUT M4_VIRTUAL_CLOCK M4_SCRIPT M4_BOTTOM RT_MSGLOG M4_PHYS_MB M4_FAST M4_QEMU_FLAGS WX86_SON WX86_SONDUMP WX86_SONMAXS WX86_HOTPROF D2_NOLINK M4_FRAMEHASH M4_NATIVE D2_NATIVE_MASK M4_DUMPFRAME M4_VIDEO M4_VIDEO_WAV M4_PROF RT_FILETRACE M4_HASHMEM WX86_FAKETSC M4_ASYNCIO M4_SPRITE_MB M4_POOL_RESERVE_MB M4_POOL_SPARE_KB M4_SPRITE_TRACE M4_STORM_PRIO M4_STORM_DIRECT D2_NATIVE_CHECK M4_SPRITE_FRAMES M4_META_CAP_KB D2_JITEVICT D2_JITFAILAFTER D2_JITCHUNK_KB M4_POOL_PIECES M4_POOL_BALLAST_MB M4_POOL_LARGE_KB M4_POOL_LARGE_MIN_KB M4_BG_QUANTUM M4_CALLRET M4_NOPEND M4_BUDGETTAIL M4_FORWARD M4_HOTPROF_LEVEL D2_DRAW_CENSUS D2_FLOOR_QUEUE D2_DCC D2_AOT D2_AOT_ONLY WX86_BLOCKLOG; do [ -n "${!v:-}" ] && RUN_EXTRA+=(-e "$v=${!v}"); done
+        for v in M4_LAYOUT M4_VIRTUAL_CLOCK M4_SCRIPT M4_BOTTOM RT_MSGLOG M4_PHYS_MB M4_FAST M4_QEMU_FLAGS WX86_SON WX86_SONDUMP WX86_SONMAXS WX86_HOTPROF D2_NOLINK M4_FRAMEHASH M4_NATIVE D2_NATIVE_MASK M4_DUMPFRAME M4_VIDEO M4_VIDEO_WAV M4_PROF RT_FILETRACE M4_HASHMEM WX86_FAKETSC M4_ASYNCIO M4_SPRITE_MB M4_POOL_RESERVE_MB M4_POOL_SPARE_KB M4_SPRITE_TRACE M4_STORM_PRIO M4_STORM_DIRECT D2_NATIVE_CHECK M4_SPRITE_FRAMES M4_META_CAP_KB D2_JITEVICT D2_JITFAILAFTER D2_JITCHUNK_KB M4_POOL_PIECES M4_POOL_BALLAST_MB M4_POOL_LARGE_KB M4_POOL_LARGE_MIN_KB M4_BG_QUANTUM M4_CALLRET M4_NOPEND M4_BUDGETTAIL M4_FORWARD M4_HOTPROF_LEVEL M4_HOTPROF_TOP D2_DRAW_CENSUS D2_FLOOR_QUEUE D2_DCC D2_AOT D2_AOT_ONLY WX86_BLOCKLOG; do [ -n "${!v:-}" ] && RUN_EXTRA+=(-e "$v=${!v}"); done
         run_in "$HOSTTEST_IMAGE" make "${make_args[@]}" ;;
     aot)  # <game-dir> [<save-dir>] (issue #114): the recompiler on its Game.exe, then the lane's scripts with
           # D2_AOT=5 in one lane of their own (build/m4-aot), each from a fresh write folder (Act II's a copy
@@ -173,34 +180,65 @@ test)
           # PASS with calls checked and none differing.
         [ -n "${2:-}" ] && [ -f "$2/Game.exe" ] || die "test aot <game-dir with Game.exe> [<save-dir>]"
         [ -z "${3:-}" ] || [ -f "$3/registry.txt" ] || die "test aot: $3 is not a save folder (no registry.txt)"
-        D2_AOT_BUILD=1 aot_prepare "$2"
+        # D2_AOT_BUILD=keep: the C the last run wrote; AOT_RUNS=<script ...>: those scripts alone;
+        # D2_AOT_FNS=<first>-<last>: only those hookable functions (src/game/aot_spike.cpp); AOT_MODE=1:
+        # the production mode instead of the check (the lane's end alone is judged then); AOT_SPLIT=1:
+        # compiled functions calling each other through Box86 (tests/m4/Makefile).
+        D2_AOT_BUILD="${D2_AOT_BUILD:-1}" aot_prepare "$2"
         runs=("town-walk 70000" "fight 120000")
         [ -n "${3:-}" ] && runs+=("act2-east 150000")
+        if [ -n "${AOT_RUNS:-}" ]; then
+            all=("${runs[@]}"); runs=()
+            for r in "${all[@]}"; do [[ " $AOT_RUNS " == *" ${r% *} "* ]] && runs+=("$r"); done
+        fi
         out=build/m4-aot
         fail=0
         for r in "${runs[@]}"; do
             name="${r% *}"; ms="${r#* }"
             rm -rf "${ROOT:?}/$out/write" && mkdir -p "$ROOT/$out/write"
+            rm -f "$ROOT/$out/err.txt"   # a lane that didn't build or start leaves none: not the last run's
             [ "$name" = act2-east ] && cp -R "$3/." "$ROOT/$out/write/"
-            RUN_EXTRA=(-v "$(host_path "$(cd "$2" && pwd)"):/game:ro" -e D2_AOT=5 -e M4_VIRTUAL_CLOCK=1 -e WX86_FAKETSC=1
+            RUN_EXTRA=(-v "$(host_path "$(cd "$2" && pwd)"):/game:ro" -e "D2_AOT=${AOT_MODE:-5}" -e "D2_AOT_FNS=${D2_AOT_FNS:-}" -e M4_VIRTUAL_CLOCK=1 -e WX86_FAKETSC=1
                        -e "M4_SCRIPT=$(cat "$ROOT/tests/m4/scripts/$name.txt")")
-            run_in "$HOSTTEST_IMAGE" make -C tests/m4 run MS="$ms" OUT="/work/$out" "${AOT_MAKE[@]}" > "$ROOT/$out/$name-make.txt" 2>&1 || true
+            for v in ${AOT_ENV:-}; do RUN_EXTRA+=(-e "$v"); done   # AOT_ENV="M4_ASYNCIO=1 D2_DCC=2": the console's ways
+            run_in "$HOSTTEST_IMAGE" make -C tests/m4 run MS="$ms" OUT="/work/$out" "${AOT_MAKE[@]}" \
+                ${AOT_SPLIT:+AOT_SPLIT=1} > "$ROOT/$out/$name-make.txt" 2>&1 || true
             cp "$ROOT/$out/err.txt" "$ROOT/$out/$name.txt" 2>/dev/null || : > "$ROOT/$out/$name.txt"
-            last="$(grep -h "aot check: .* since the start" "$ROOT/$out/$name.txt" | tail -1 || true)"
-            differs="$(grep -c "aot check: .* differs on its call" "$ROOT/$out/$name.txt" || true)"
+            last="$(grep -ah "aot check: .* since the start" "$ROOT/$out/$name.txt" | tail -1 || true)"
+            differs="$(grep -ac "aot check: .* differs on its call" "$ROOT/$out/$name.txt" || true)"
             calls="$(sed -n 's/.*since the start \([0-9]*\) calls.*/\1/p' <<<"$last")"
             ndiff="$(sed -n 's/.*functions, \([0-9]*\) differ.*/\1/p' <<<"$last")"
             status="$(sed -n 's/^exit status //p' "$ROOT/$out/$name-make.txt" | tail -1)"
-            if [ -n "$calls" ] && [ "$calls" -gt 0 ] && [ "${ndiff:-1}" = 0 ] && [ "${differs:-0}" = 0 ]; then
+            # The game's own end: a script's run ends at its time (code 0); an exit of the game's
+            # (an exception it raised, say) is a failure whatever was checked before it.
+            code="$(sed -n 's/^\[rt\] RESULT .*code=\([0-9]*\).*/\1/p' "$ROOT/$out/$name.txt" | tail -1)"
+            # The script's own end (issue #115): its last wait reached, else the game played something
+            # else (a run that never got in game measures the menus).
+            goal="$(sed -En 's/^[0-9]+ (wait|tapuntil) ([a-z0-9]+).*/\2/p' "$ROOT/tests/m4/scripts/$name.txt" | tail -1)"
+            if [ -n "$goal" ] && ! grep -aq "autoplay: $goal reached" "$ROOT/$out/$name.txt"; then
+                echo "RESULT aot.check.$name FAIL (the script never reached its last wait, $goal; see $out/$name.txt)"
+                fail=1
+            elif [ "${code:-x}" != 0 ]; then
+                echo "RESULT aot.check.$name FAIL (the game ended with code ${code:-none}; ${last:-no aot check line}; see $out/$name.txt)"
+                grep -ah "RaiseException\|exception" "$ROOT/$out/$name.txt" | head -3 || true
+                fail=1
+            elif [ "${AOT_MODE:-5}" != 5 ]; then
+                echo "RESULT aot.run.$name PASS (mode ${AOT_MODE}, the game ran to its time)"
+            elif [ -n "$calls" ] && [ "$calls" -gt 0 ] && [ "${ndiff:-1}" = 0 ] && [ "${differs:-0}" = 0 ]; then
                 echo "RESULT aot.check.$name PASS (lane exit ${status:-?}; since the start ${last#*since the start })"
             else
                 echo "RESULT aot.check.$name FAIL (lane exit ${status:-?}; ${last:-no aot check line: see $out/$name.txt})"
-                grep -h "aot check: .* differs" "$ROOT/$out/$name.txt" | head -5 || true
+                grep -ah "aot check: .* differs" "$ROOT/$out/$name.txt" | head -5 || true
                 fail=1
             fi
         done
         exit "$fail" ;;
-    *)    die "test host | test x86 [golden] | test cpu [armv7|armv6] | test m3 | test report | test governor | test gameexe | test frames | test pad | test pool | test d2d [<game-dir>] | test tls | test m4 <game-dir> | test aot <game-dir> [<save-dir>]" ;;
+    aot-explain)  # <game-dir> <va,va,...> (issue #115): why each is left to Box86, with D2_AOT_SET's summaries
+        [ -n "${2:-}" ] && [ -f "$2/Game.exe" ] && [ -n "${3:-}" ] || die "test aot-explain <game-dir> <va,...>"
+        RUN_EXTRA=(-v "$(host_path "$(cd "$2" && pwd)/Game.exe"):/aot/Game.exe:ro")
+        # shellcheck disable=SC2046
+        run_in "$HOSTTEST_IMAGE" python3 -I tools/aot/recompile.py /aot/Game.exe --explain "$3" $(aot_args) ;;
+    *)    die "test host | test x86 [golden] | test cpu [armv7|armv6] | test m3 | test report | test governor | test gameexe | test frames | test pad | test pool | test d2d [<game-dir>] | test tls | test m4 <game-dir> | test aot <game-dir> [<save-dir>] | test aot-explain <game-dir> <va,...>" ;;
     esac
     ;;
 package)
@@ -251,8 +289,8 @@ package-cia)   # [<game-dir> | --slim|--full <game-dir>]: the game app (+ the us
     ensure_image ctrtools "$CTRTOOLS_IMAGE"
     saved_extra=("${RUN_EXTRA[@]}"); RUN_EXTRA=()
     run_in "$HOSTTEST_IMAGE" make -C tests/cpu VARIANT=armv6 lib >/dev/null     # the patched backend tree
-    if [ "${D2_AOT_BUILD:-}" = 1 ]; then   # the AOT spike (issue #113): needs the user's Game.exe
-        [ -n "$art" ] || die "D2_AOT_BUILD=1 package-cia <game-dir>: the recompiler reads its Game.exe"
+    if [ "${D2_AOT_BUILD:-}" = 1 ] || [ "${D2_AOT_BUILD:-}" = keep ]; then   # the AOT spike (issue #113): needs the user's Game.exe (keep: the C the last run wrote)
+        [ -n "$art" ] || die "D2_AOT_BUILD=$D2_AOT_BUILD package-cia <game-dir>: the recompiler reads its Game.exe"
         aot_prepare "$art"
         echo "docker.sh: this CIA holds code made from your Game.exe: it is yours alone, never share it (docs/aot.md)"
     fi
@@ -264,7 +302,7 @@ package-cia)   # [<game-dir> | --slim|--full <game-dir>]: the game app (+ the us
     bid="$(build_id)"
     # The build ID covers the AOT step: the recompiler's and its arguments'
     # hash, never Game.exe's.
-    [ ${#AOT_MAKE[@]} -gt 0 ] && bid="$bid-aot$(cat "$ROOT/tools/aot/recompile.py" "$ROOT/tools/aot/spike.args" | sha256sum | cut -c1-6)"
+    [ ${#AOT_MAKE[@]} -gt 0 ] && bid="$bid-aot$(cat "$ROOT/tools/aot/recompile.py" "$(aot_args_file)" | sha256sum | cut -c1-6)"
     report_vars=(BUILD_ID="$bid" D2_VERSION="$version" ${AOT_MAKE[@]+"${AOT_MAKE[@]}"})
     [ -n "${D2_REPORT_DSN+x}" ] && report_vars+=(D2_REPORT_DSN="$D2_REPORT_DSN")
     run_in "$TOOLCHAIN_IMAGE" make -s -j8 -C tests/cpu/ctr "${report_vars[@]}" ../../../build/cpu/ctr/3ds-d2-game-cia.elf ../../../build/cpu/ctr/tls.bin

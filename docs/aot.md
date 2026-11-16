@@ -263,6 +263,91 @@ The spike's check compared the two roots only. `D2_AOT=5` now checks every compi
 
 98 were hooked on the lane, not 99: one entry had other bytes there when the hooks went in.
 
+## Coverage, stage 1 (#115)
+
+`tools/aot/coverage.py` folds the lane's block counter (`WX86_HOTPROF=1 D2_NOLINK=1`) into functions and ranks them by the x86 bytes they ran. The 814 that ran 99.9% of the bytes over the town walk, the fight and Act II are `tools/aot/coverage.args` (`D2_AOT_SET=coverage`). Box86 enters every compiled function it calls: the functions' table is in every build, and Sig mode hooks each.
+
+What the list found, in the recompiler and the runtime:
+
+- **Refusals a round at a time:** one refusal used to start the whole fixed point again. Over 814 functions that was an hour; now 80 s.
+- **The analysis:**
+  - A stack slot unknown on one path was kept at a merge, and the walk never settled.
+  - A function that leaves only by tail jumps was taken to keep every register, eax included.
+  - Callee-saved registers lost at an indirect call are taken as kept (MSVC's ABI), unless the function moves its caller's frame (the SEH epilogues).
+  - A helper whose flags its caller reads after the call stays with Box86. Found in the CRT's math helpers: `6987d8`, then `6879dd`'s first `je`.
+  - ecx and edx after memset, memcpy or a native are the library's garbage, and leave the outs.
+- **Natives:** a function whose bytes changed since it was compiled (a native's patch), and every compiled caller that reaches it in C, stays with Box86. This is checked each time the code is turned on (`code_hash`). On the lane, Sig and Check now go on after the natives, as on the console.
+- **Waits:** a shim that blocks the thread inside a nested run left the wait's placeholder in EAX: on the console, Storm's reads got 0. A wait on the I/O worker is now done in place. A wait on another guest thread can't be: running the other threads from inside a nested run livelocked when one of them was waiting on a thread held lower on the host stack. So nothing is compiled that calls, under Box86, code that can reach a blocking import or an indirect call (`may_block`).
+- **Finding a fault:** `AOT_MODE=1`, `AOT_SPLIT=1` and `D2_AOT_FNS` (or settings.txt's `aotfns=` in Azahar) halve the hooked set. `test aot-explain` says why a function is left to Box86.
+
+Of the 814, 450 compile. The check passes on all three scripts: 21.1M, 46.1M and 40.1M calls checked, none differ. Box86's executed bytes with the 660-function set before `may_block` (Sig, the lane's profile; same frames in the town walk and the fight):
+
+| Script | Box86 bytes, no AOT | With AOT | Off Box86 |
+| --- | --- | --- | --- |
+| Town walk | 2.48G | 1.75G | 30% |
+| Fight | 7.78G | 3.27G | 58% |
+| Act II east (per frame) | 2.54M | 0.61M | 76% |
+
+With `may_block`, the compiled functions cover 49–52% of the bytes the profile ran, against 68–80% before.
+
+The town walk's and the fight's rows may not be what they say: until stage 3, the game-state reader checked Game.exe's layout on the first byte of `45b440`, a function on the list, and with it hooked the lane's scripts never saw the game start (below).
+
+**Azahar, Act II walking:** with the same CIA, the game runs at 25 fps with the code off and 12.4–13 fps with it on. Fewer bytes run under Box86, but each crossing costs more than it saves. Every call from Box86 into a compiled function is a trap, and every call from compiled code to a Box86 callee is a nested run: about 9,500 a second here (`00517abb`, `00609180`). Stage 1 is therefore off by default (the OPTIONS row). The crossings are stage 3's work: imports to shims, dispatcher exits, return sites.
+
+## Crossings, stage 3 (#115)
+
+What changed:
+
+- **More compiled per crossing:** the list's callees, two calls deep, where they compile (`--callees 2`: 1,149 functions, 961 hookable). Tail jumps to other functions compile as calls with a return. `bsf` and `bsr` compile.
+- **Leaves:** a function with no Box86 call anywhere under it is entered in line (the dynarec calls the trap without leaving its run): 668 of the 1,149.
+- **The analysis:** ecx and edx a compiled callee leaves as garbage are its callers' garbage too. `may_block` is applied again after each round's other refusals. A segment register's `mov` is refused.
+- **The probe:** each function's calls from Box86, 32 on, 256 of them, are timed. One whose compiled code takes less than the threshold a call (8 µs since exits, 2 before; its nested runs taken off, and the threshold counted for each) is left to Box86 from then on. settings.txt's `aotmin=`, the lane's `D2_AOT_MIN_US`. Box86's own time, run nested, can't be the measure: on the lane a nested run costs 8–10 µs empty, and 11–29 µs for functions whose compiled code takes 0.6–2.7.
+- **The natives' calls:** a native's `rt::guest_call` into a compiled function runs it in C, not in a nested run. In the fight that's the floor's interpolated light, `4f8850` and `4f89f0` from `4f8b80`'s native: about 140,000 calls a window.
+- **The lane's scripts:** the game-state reader's layout check is now an operand inside `45b440`, not its first byte (a hook's jump). `test aot` fails a script that never reached its last wait.
+
+On the lane, host ms over windows 3 onward (10 s of game each, the virtual clock), each run in game to its script's end:
+
+| Script | Off | On, the probe at 2 µs | On, every function hooked |
+| --- | --- | --- | --- |
+| Fight (8 windows) | 59,992 | 60,573 | 110,313 |
+| Act II east (11 windows) | 57,909 | 61,031 | 132,321 |
+
+With every function hooked, Box86 enters compiled code about 5 million times a fight window, and each costs about 1 µs more than Box86 running the function itself. The probe takes back the functions that aren't worth it, which leaves the code no faster than Box86. The calls come from callers that `may_block` keeps with Box86: `467ac0`, `466870`, `64f380`, `64f060`, `480810`, `4cb460` (each calls Box86 code with an indirect call or a blocking import under it). Compiling them needs one of:
+
+- **A host stack per guest thread:** a nested run could then block, and the scheduler switch to another thread.
+- **Exits:** compiled code that hands the rest of its call back to Box86 at a call that may block. The guest's registers and stack are whole at a call, but each compiled caller above it in C would have to exit too.
+
+Exits were chosen.
+
+### Exits
+
+- **Where:** a compiled function's indirect calls, its import calls, and its calls or tail jumps to Box86 code that may block. Before exits, any of these left the function to Box86, and every caller that might reach one too.
+- **How:** the call's return address is pushed as the original does. Then `aot_exit` hands over the target and all eight registers, and longjmps to the trap that entered compiled code. That trap gives Box86 those registers, with esp as at the call, and redirects it to the target. Box86 then runs the rest of the call, and every compiled caller's rest above it, from the original's code. Only the functions that may exit (their own sites, or a compiled callee's) pay for the `setjmp`.
+- **The analysis:** an exit site ends its path, as a call that never returns does, and reads every register. A function that may exit stores every save its prologue makes, because Box86 restores them from the stack.
+- **The check:** a call that exits is rolled back from the journal and run again in Box86 from its entry, and counted unchecked (3.5–4.4% of the lane's calls).
+- **Garbage:** ecx and edx are no value of a function's when, on any path to one of its rets, they hold a library call's leftovers (memset's, a native's). Exit sites read every register, which made the check compare memset's leftovers in `0041d300` and `00412e40`.
+- **Result:** 2,236 functions compiled (1,149 before), 568 of them with exits at 1,719 sites. 1,097 may exit, counting their callers. 179 of the closure are still left to Box86. The check lane: 0 differ on the three scenes (30, 56 and 88 million calls).
+
+On the lane (host ms over windows 3 onward; off measured in the same session, because the host's speed moved about 10% between sessions):
+
+| Script | Off | On, 2 µs | On, 8 µs | On, 16 µs |
+| --- | --- | --- | --- | --- |
+| Fight (8 windows) | 67,646 / 69,801 | 73,537 | 64,775 | 67,778 |
+| Act II east (11 windows) | 65,147 / 64,669 / 65,447 | 75,892 | 68,700 | 69,283 |
+
+At 2 µs, the traps from Box86 go up about 4× (300–500k a fight window), mostly into `00470860` from `UnitPickFilter`'s native, which stays with Box86. In Act II at 8 µs, compiled code takes about 200 ms of a 5.2 s window, with 20,000 traps and 1,800 exits. That's too little of the window for it to win much: the lane is at parity, within its noise.
+
+**Azahar, Act II, walking in Lut Gholein** (the same CIA, `aotmin=8`; frames per 10 s window once in Act II):
+
+| | Windows | Average |
+| --- | --- | --- |
+| Off | 241 234 238 250 246 247 251 246 | 24.4 fps |
+| On | 248 235 243 250 247 250 250 251 | 24.7 fps |
+
+At 50% emulated CPU (one run each, frames climbing through the walk in both modes), off got 41 40 78 70 91 148 146 150 159 188 frames, and on got 55 67 102 81 112 143 179 168 186 227: ahead in 9 of 10 windows, 19% more frames in all.
+
+Stage 1 dropped to 12.4–13 fps here. With exits, the code no longer costs frames. It doesn't gain any either, because the game runs at 25. The window that loads Act II is slower with it on (171 frames against 206), while the probe times each function's first calls.
+
 ## Open questions
 
 - **Is the gain there?** Yes, on the console: about 5× Box86 on A* and 3–4.7× on CofParams (#113). The lane's qemu showed 4.1× and 1.6×. What a full build gains depends on how much of a frame's code it covers (#115), and on its calls to code it doesn't compile going through the target table rather than a nested run.

@@ -267,6 +267,7 @@ int main(int argc, char **argv)
         if (video)
             game::install_cinematics(c);
         game::install_automap_capture(c);
+        game::aot_after_natives(c);   // D2_AOT's Sig or Check, once the natives are in (issue #115)
     };
     static LaneVideoAudio video_audio;
     opt.video_audio = &video_audio;
@@ -643,7 +644,9 @@ int main(int argc, char **argv)
     sampler_stop = true;
     sampler.join();
 #endif
-    dyn86_hotprof_dump(stderr, 600);
+    // M4_HOTPROF_TOP=<n>: that many blocks (600 by default); a large number lists
+    // every block that ran, for the AOT coverage list (issue #115).
+    dyn86_hotprof_dump(stderr, std::getenv("M4_HOTPROF_TOP") ? std::atoi(std::getenv("M4_HOTPROF_TOP")) : 600);
     save("last.png");
     if (!r.loaded) {
         std::fprintf(stderr, "[rt] FATAL %s\n", r.error.c_str());

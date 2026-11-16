@@ -673,6 +673,12 @@ uint32_t current_teb()
 
 void set_last_error(Cpu &c, uint32_t err) { c.write_u32(current_teb() + kTebLastError, err); }
 
+namespace {
+GuestDirectFn g_guest_direct = nullptr;
+}
+
+void set_guest_direct(GuestDirectFn fn) { g_guest_direct = fn; }
+
 uint32_t guest_call(Cpu &c, uint32_t va, std::initializer_list<uint32_t> args)
 {
     X86Context saved;
@@ -686,6 +692,14 @@ uint32_t guest_call(Cpu &c, uint32_t va, std::initializer_list<uint32_t> args)
     esp -= 4;
     c.write_u32(esp, g_br->sentinel());
     c.set_reg(R_ESP, esp);
+    if (g_guest_direct) {
+        uint32_t r[8];
+        c.regs_gp(r);
+        if (g_guest_direct(c, va, r)) {
+            c.load_context(saved);
+            return r[0];
+        }
+    }
     const char *fault = nullptr;
     const bool ok = c.run(va, &fault);
     const uint32_t ret = c.reg(R_EAX);
@@ -1411,6 +1425,47 @@ uint64_t now_us()
     uint64_t v = g_sched->virt_ms() * 1000ull;
     last = v > last ? v : last + 1;
     return last;
+}
+
+// See rt_host.h.
+uint32_t finish_nested_block(Cpu &c)
+{
+    GuestThread *t = g_sched ? g_sched->current() : nullptr;
+    if (!t || t->state != GuestThread::State::Blocked || !t->wait_obj)
+        return 0;
+    Waitable *w = static_cast<Waitable *>(t->wait_obj);
+    const uint64_t start = wx86_now_us();
+    // A timed wait: on the real clock, its time left by the scheduler's clock;
+    // on the virtual clock at once, since that clock can't run while this
+    // thread holds the core.
+    uint64_t until = start;
+    if (t->wake_deadline && g_opt.real_clock && t->wake_deadline > g_sched->virt_ms())
+        until = start + (t->wake_deadline - g_sched->virt_ms()) * 1000;
+    bool got = false, warned = false;
+    for (;;) {
+        if (w->try_acquire(t)) {
+            got = true;
+            break;
+        }
+        const uint64_t now = wx86_now_us();
+        if (t->wake_deadline && now >= until)
+            break;
+        if (!warned && now - start > 10000000) {   // only another guest thread could end it: it never will
+            logf("aot: a nested run has waited 10 s on a %s no host thread will signal", w->kind());
+            warned = true;
+        }
+        if (g_opt.sleep_ms)
+            g_opt.sleep_ms(1);
+    }
+    if (t->wake_writes_eax)
+        c.set_reg(R_EAX, got ? w->result() : t->wake_timeout_eax);
+    t->wait_obj = nullptr;
+    t->wake_writes_eax = true;
+    t->wake_timeout_eax = 0x102;
+    t->wake_deadline = 0;
+    t->state = GuestThread::State::Running;
+    const uint32_t us = (uint32_t)std::min<uint64_t>(wx86_now_us() - start, 0xffffffffu);
+    return us ? us : 1;
 }
 
 void request_exit(uint32_t code)

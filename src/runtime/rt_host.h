@@ -378,6 +378,11 @@ void set_last_error(d2rt::Cpu &c, uint32_t err);
 // Calls guest code from inside a shim (window procedures, callbacks): builds the
 // frame below the caller's ESP, runs to the bridge sentinel, restores registers.
 uint32_t guest_call(d2rt::Cpu &c, uint32_t va, std::initializer_list<uint32_t> args);
+// AOT (issue #115): guest_call's callee as compiled code, in C, instead of a
+// nested run (8-10 us each on the lane): true when it ran, regs (eax..edi,
+// esp at the return address) in and out. Off: nullptr.
+using GuestDirectFn = bool (*)(d2rt::Cpu &c, uint32_t va, uint32_t *regs);
+void set_guest_direct(GuestDirectFn fn);
 // Ends the current stdcall shim (registered with `shim_argc` arguments) by
 // jumping to guest function `va` with `args`, as if the guest had called it
 // in the shim's place: its return value and stack cleanup become the shim's.
@@ -454,6 +459,14 @@ bool hook_function(d2rt::Cpu &c, uint32_t va, const uint8_t *expect, uint32_t n,
 // and returns its guest address (0 on failure). hook_function is this plus
 // a jmp over a guest function.
 uint32_t native_entry(const char *name, uint32_t stack_args, std::function<uint32_t(d2rt::Cpu &)> fn);
+// A shim blocked the running thread inside a nested run (the AOT code's call
+// to Box86, issue #115): the scheduler can't switch away there, so the wait
+// is done in place, the host polling its object (the I/O worker's read), and
+// EAX set as a wake sets it. A wait only another guest thread could end never
+// ends here: recompile.py compiles nothing that calls, under Box86, code that
+// can reach a shim. Returns the microseconds waited (at least 1), or 0 when
+// the thread wasn't blocked (an advisory yield).
+uint32_t finish_nested_block(d2rt::Cpu &c);
 // Called at each of the game's frames (its StretchBlt or BitBlt of an 8-bit
 // DIB), before the frame is presented: the DIB's guest address and size in
 // bytes. For the draw census (game/draw_census.h, issue #80); null: none.

@@ -43,6 +43,11 @@ enum PortOption : uint32_t {
     // a mix louder than full scale is turned down for that grain and eased
     // back, instead of clipped sample by sample. Off, the old hard clamp.
     kPortSoundLimit = 1u << 6,
+    // The game's hot functions run as compiled code (issue #115, the AOT
+    // build's coverage list, aot_spike.h's register-signature mode): Box86
+    // enters each compiled function it calls. Shares the AOT row with the
+    // bench: a tap steps off, compiled, bench. Nothing in any other build.
+    kPortAot = 1u << 7,
 };
 
 struct PortOptionInfo {
@@ -50,6 +55,11 @@ struct PortOptionInfo {
     const char *name;    // in settings.txt
     const char *label;   // on the page
     const char *note;    // under it: what it does
+    // A second state the row steps to (off, bit, alt, off), with its own
+    // settings.txt name and note; the two are never on together.
+    uint32_t alt = 0;
+    const char *alt_name = nullptr;
+    const char *alt_note = nullptr;
 };
 
 // In the OPTIONS page's order (issue #97): the drawing and the screen's
@@ -61,7 +71,8 @@ inline constexpr PortOptionInfo kPortOptions[] = {
     {kPortFrameLock, "framelock", "frame lock at 50 Hz", "game frames timed by the screen"},
     {kPortNativeDcc, "dcc", "native sprite decoder", "new sprites decoded off core 0"},
     {kPortTilePrefetch, "tiles", "read tiles ahead", "tiles near the player read on core 2"},
-    {kPortAotBench, "aotbench", "AOT spike: time each way", "an AOT build only: aot: in game.log"},
+    {kPortAot, "aot", "compiled code (AOT)", "an AOT build only; tap again: bench", kPortAotBench, "aotbench",
+     "bench: each way timed, in game.log"},
     {kPortSoundLimit, "limiter", "sound limiter", "loud mixes turned down, not clipped"},
 };
 inline constexpr int kPortOptionCount = sizeof kPortOptions / sizeof kPortOptions[0];
@@ -72,12 +83,13 @@ constexpr bool port_text_fits(const char *t, int n = 0) { return *t ? port_text_
 constexpr bool port_options_fit(int i = 0)
 {
     return i == kPortOptionCount ||
-           (port_text_fits(kPortOptions[i].label) && port_text_fits(kPortOptions[i].note) && port_options_fit(i + 1));
+           (port_text_fits(kPortOptions[i].label) && port_text_fits(kPortOptions[i].note) &&
+            (!kPortOptions[i].alt_note || port_text_fits(kPortOptions[i].alt_note)) && port_options_fit(i + 1));
 }
 static_assert(port_options_fit(), "an OPTIONS label or note is longer than the 36 characters the page shows");
 inline constexpr uint32_t kPortDefault = kPortCore2Draw | kPortScreen50 | kPortNativeDcc | kPortTilePrefetch | kPortSoundLimit;
-inline constexpr uint32_t kPortAll =
-    kPortCore2Draw | kPortScreen50 | kPortNativeDcc | kPortFrameLock | kPortTilePrefetch | kPortAotBench | kPortSoundLimit;
+inline constexpr uint32_t kPortAll = kPortCore2Draw | kPortScreen50 | kPortNativeDcc | kPortFrameLock |
+                                     kPortTilePrefetch | kPortAotBench | kPortSoundLimit | kPortAot;
 // The options of the first "port=" lines, which named only those on.
 inline constexpr uint32_t kPortFirst = kPortCore2Draw;
 
@@ -94,9 +106,12 @@ inline uint32_t port_bits(const char *names)
         const bool off = n > 0 && *names == '-';
         const char *name = names + (off ? 1 : 0);
         const size_t len = n - (off ? 1 : 0);
-        for (const PortOptionInfo &o : kPortOptions)
+        for (const PortOptionInfo &o : kPortOptions) {
             if (len == std::strlen(o.name) && std::strncmp(name, o.name, len) == 0)
-                bits = off ? bits & ~o.bit : bits | o.bit;
+                bits = off ? bits & ~o.bit : (bits & ~o.alt) | o.bit;
+            if (o.alt_name && len == std::strlen(o.alt_name) && std::strncmp(name, o.alt_name, len) == 0)
+                bits = off ? bits & ~o.alt : (bits & ~o.bit) | o.alt;
+        }
         names += n;
         names += *names ? 1 : 0;
     }
@@ -112,8 +127,25 @@ inline std::string port_names(uint32_t bits)
         if (!(bits & o.bit))
             s += '-';
         s += o.name;
+        if (o.alt_name) {
+            s += (bits & o.alt) ? "," : ",-";
+            s += o.alt_name;
+        }
     }
     return s;
+}
+
+// A tap on a row: on or off, or a row with a second state stepped off,
+// on, the second, off.
+inline uint32_t port_option_tap(uint32_t bits, const PortOptionInfo &o)
+{
+    if (!o.alt)
+        return bits ^ o.bit;
+    if (bits & o.bit)
+        return (bits & ~o.bit) | o.alt;
+    if (bits & o.alt)
+        return bits & ~o.alt;
+    return bits | o.bit;
 }
 
 }  // namespace game

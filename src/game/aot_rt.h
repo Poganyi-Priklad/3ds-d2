@@ -41,20 +41,45 @@ typedef struct {
     uint8_t pops;         /* the bytes its ret pops after the return address */
     uint8_t head[16];     /* the game's first bytes there */
 } AotRoot;
-/* The check's table (issue #114, AOT_JOURNAL only): every compiled function,
- * entered with all eight registers as a root is. keep 0: its entry can't be
- * hooked (recompile.py's hookable(): a branch in its first bytes or into
- * them, or pops not known). */
+/* The functions' table (issues #114, #115; AOT_SYM(funcs) in each build):
+ * every compiled function, entered with all eight registers as a root is.
+ * keep 0: its entry can't be hooked (recompile.py's hookable(): a branch in
+ * its first bytes or into them, or pops not known). */
 typedef struct {
     uint32_t va;
-    AotRootFn sig;        /* its register-signature code, journaled */
+    AotRootFn sig;        /* its register-signature code (journaled in aotj_funcs) */
     const char *name;
     uint8_t keep, pops;
     uint8_t out;          /* bit k: r[k] is an output its compiled callers read */
     uint8_t preserved;    /* bit k: r[k] comes back as it went in */
     uint8_t root;         /* also in aot_roots */
     uint8_t head[16];
+    /* Its code as compiled (issue #115): FNV-1a of the bytes of its ranges
+     * (lo, hi pairs), and the indexes in this table of the compiled
+     * functions it calls in C. A function whose bytes changed since (a
+     * native's patch) runs under Box86, with every compiled caller that
+     * reaches it in C. */
+    uint32_t hash;
+    uint16_t nranges, ncallees;
+    const uint32_t *ranges;
+    const uint16_t *callees;
+    /* 1: its C never calls Box86, nor does any compiled callee's (no nested
+     * run), so Box86 may enter it in line (the backend's in-line shim). 0
+     * under AOT_SPLIT, where every call between compiled functions is
+     * Box86's. */
+    uint8_t leaf;
+    /* 1: its C, or a compiled callee's, may exit (aot_exit, issue #115):
+     * hand the rest of the call to Box86 at a call that may block, an
+     * import or an indirect call. Its own exits alone under AOT_SPLIT. */
+    uint8_t may_exit;
 } AotFunc;
+#ifdef AOT_SPLIT
+#define AOT_LEAF(x) 0
+#define AOT_EXIT(own, tree) (own)
+#else
+#define AOT_LEAF(x) (x)
+#define AOT_EXIT(own, tree) (tree)
+#endif
 
 extern uint8_t *aot_mem;   /* host address of guest 0 */
 
@@ -63,6 +88,12 @@ uint32_t aot_fs_base(void);                       /* the running thread's TEB */
 void aot_guest_call(uint32_t va, AotRegs *r);     /* a callee not compiled: Box86, nested */
 __attribute__((noreturn)) void aot_bad_ret(uint32_t fn, uint32_t esp0, uint32_t esp);
 __attribute__((noreturn)) void aot_unreachable(uint32_t va);
+/* Box86 goes on at `target` with these registers (issue #115): back to the
+ * trap that entered compiled code, the C frames above dropped. The guest's
+ * stack holds each compiled caller's return address, so Box86 runs the rest
+ * of each from the game's own code. */
+__attribute__((noreturn)) void aot_exit(uint32_t target, uint32_t eax, uint32_t ecx, uint32_t edx, uint32_t ebx,
+                                        uint32_t esp, uint32_t ebp, uint32_t esi, uint32_t edi);
 __attribute__((noreturn)) void aot_fault(uint32_t va);
 void aot_journal(uint32_t va, uint32_t n);        /* AOT_JOURNAL: before a store */
 /* d2_native.cpp: our natives, called in C. The high word: 1 if the native
