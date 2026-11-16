@@ -344,6 +344,8 @@ At 2 µs, the traps from Box86 go up about 4× (300–500k a fight window), most
 | Off | 241 234 238 250 246 247 251 246 | 24.4 fps |
 | On | 248 235 243 250 247 250 250 251 | 24.7 fps |
 
+At 50% emulated CPU (one run each, frames climbing through the walk in both modes), off got 41 40 78 70 91 148 146 150 159 188 frames, and on got 55 67 102 81 112 143 179 168 186 227: ahead in 9 of 10 windows, 19% more frames in all.
+
 Stage 1 dropped to 12.4–13 fps here. With exits, the code no longer costs frames. It doesn't gain any either, because the game runs at 25. The window that loads Act II is slower with it on (171 frames against 206), while the probe times each function's first calls.
 
 ## Open questions
