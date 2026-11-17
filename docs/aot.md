@@ -378,7 +378,18 @@ Off by default: on the lane the natives' calls from C cost more than the callers
 
 The fight gains 13%; Act II is 4% behind, as with exits alone in the same session (`f68fedc`: 61,821 against 59,243).
 
-**Azahar, Act II at 50% emulated CPU** (callouts, before changed functions; frames over the first 11 windows once in Act II, two runs each): on 1,460 and 1,686, off 1,183 and 833. That's 56% more frames with the code on, against 19% with exits alone.
+**Azahar, Act II at 50% emulated CPU** (CIA `cf8a9021f497-aota64c18`, `4575dbb`; frames per 10 s window once in Act II, two runs each):
+
+| | First 10 windows | Last 5 |
+| --- | --- | --- |
+| Off | 1,564 / 1,577 | 968 / 982 |
+| On | 1,610 / 1,665 | 1,025 / 1,062 |
+
+That's 4–5% more frames over the walk with the code on, and 7% once it settles. An earlier pair of runs (f68fedc) gave 56%, but its off runs started unusually slowly (8, 7, 58 frames in their first windows, where these got 35, 119, 135), so that figure doesn't hold.
+
+### The JIT pool
+
+The code on doesn't shrink what Box86 translates much: after the same walk, 7.36 MiB of blocks with it on against 7.76 off, in 8 MiB of chunks either way (14 MiB pool). Box86 still translates the code around the compiled functions, and the functions it runs again when the probe drops them. So the pool stays at 14 MiB: nothing measured supports a smaller one.
 
 ## Open questions
 
