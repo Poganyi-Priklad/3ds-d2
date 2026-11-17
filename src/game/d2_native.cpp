@@ -2882,7 +2882,15 @@ uint32_t unit_pick_filter(Cpu &c)
     const uint32_t esp = c.reg(R_ESP);
     // The function's compiled code, when it's on (issue #115: else Box86 runs
     // the rest, and enters compiled 470860 about 340k times a fight window):
-    // its trap, from the entry, with everything as at the hook.
+    // in C, as at the hook, when it can be (no trap to enter: about 200k a
+    // window in Act II), else its trap, from the entry, with everything as
+    // at the hook (the check's).
+    {
+        uint32_t r[8];
+        c.regs_gp(r);
+        if (game::aot_direct(c, 0x00466870, r))
+            return r[0];
+    }
     if (const uint32_t trap = game::aot_trap_for(0x00466870)) {
         resume_original(c, trap, esp, 2);
         return c.reg(R_EAX);

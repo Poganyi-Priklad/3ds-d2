@@ -86,10 +86,17 @@ typedef struct {
 #endif
 
 extern uint8_t *aot_mem;   /* host address of guest 0 */
+/* By the functions' table's rows (issue #115): 1 when the app found that
+ * function changed since compiled (a native's hook or patch). A compiled
+ * call to it then goes through Box86 (aot_guest_call), which reaches the
+ * native, and its callers stay compiled. */
+extern uint8_t aot_stale[];
+#define AOT_LIVE(k) __builtin_expect(!aot_stale[(k)], 1)
 
 /* aot_spike.cpp */
 uint32_t aot_fs_base(void);                       /* the running thread's TEB */
 void aot_guest_call(uint32_t va, AotRegs *r);     /* a callee not compiled: Box86, nested */
+void aot_call_stale(uint32_t va, AotRegs *r);     /* a compiled callee a native changed (AOT_LIVE): its native */
 __attribute__((noreturn)) void aot_bad_ret(uint32_t fn, uint32_t esp0, uint32_t esp);
 __attribute__((noreturn)) void aot_unreachable(uint32_t va);
 /* Box86 goes on at `target` with these registers (issue #115): back to the

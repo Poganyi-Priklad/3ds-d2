@@ -1333,6 +1333,7 @@ MASK = {1: "0xffu", 2: "0xffffu", 4: "0xffffffffu"}
 class Emitter:
     def __init__(self, prog, compiled, mode, sigs):
         self.p, self.compiled, self.mode, self.sigs = prog, compiled, mode, sigs
+        self.index = None   # compiled function -> its row in the functions' table (live)
     def name(self, va):
         return "AOT_SYM(%s_%08x)" % (self.mode, va)
 
@@ -1547,6 +1548,20 @@ class Emitter:
                 self.name(t), args, REGS[outs[0]], REGS[outs[1]], tail)
         back = " ".join("%s = o[%d];" % (REGS[r], k) for k, r in enumerate(outs))
         return "{ uint32_t o[%d]; %s(%s, o); %s }%s" % (len(outs), self.name(t), args, back, tail)
+
+    def live(self, t, compiled):
+        """A call to compiled t: its C while the app hasn't found it changed
+        since compiled (a native's hook or patch: aot_stale, issue #115),
+        else the native's (aot_call_stale: its shim in C when it hooks the
+        entry, else Box86's call); the caller stays compiled either way."""
+        if self.index is None:
+            self.index = {v: k for k, v in enumerate(sorted(self.compiled))}
+        # Every register back from it, not as the original's summary says:
+        # a native's leftovers in ecx or edx aren't the original's.
+        fill = ", ".join(REGS[r] for r in range(8))
+        back = " ".join("%s = t.r[%d];" % (REGS[r], r) for r in range(8))
+        stale = "{ AotRegs t = {{%s}}; aot_call_stale(0x%08xu, &t); %s }" % (fill, t, back)
+        return "if (AOT_LIVE(%du)) { %s } else %s" % (self.index[t], compiled, stale)
 
     def call_guest(self, t, va):
         """Box86 runs the callee nested; every register through the context."""
@@ -1797,7 +1812,7 @@ class Emitter:
         if t in self.compiled:
             # call_compiled's esp += after the call is dropped: esp is ours to hand back.
             inner = "\n#ifdef AOT_SPLIT\n    %s\n#else\n    %s\n#endif\n    " % (
-                self.call_guest(t, va), self.call_compiled(t, va, after=False))
+                self.call_guest(t, va), self.live(t, self.call_compiled(t, va, after=False)))
         else:
             inner = self.call_guest(t, va)
         if va in f.noreturn:
@@ -1860,7 +1875,7 @@ class Emitter:
             # found by halves among the hooked functions is then one
             # function's own code, not a call between two.
             inner = "\n#ifdef AOT_SPLIT\n    %s\n#else\n    %s\n#endif\n    " % (
-                self.call_guest(t, va), self.call_compiled(t, ra))
+                self.call_guest(t, va), self.live(t, self.call_compiled(t, ra)))
         else:
             inner = self.call_guest(t, va)
         if va in f.noreturn:
