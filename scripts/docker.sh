@@ -192,18 +192,41 @@ test)
             for r in "${all[@]}"; do [[ " $AOT_RUNS " == *" ${r% *} "* ]] && runs+=("$r"); done
         fi
         out=build/m4-aot
-        fail=0
-        for r in "${runs[@]}"; do
-            name="${r% *}"; ms="${r#* }"
-            rm -rf "${ROOT:?}/$out/write" && mkdir -p "$ROOT/$out/write"
-            rm -f "$ROOT/$out/err.txt"   # a lane that didn't build or start leaves none: not the last run's
-            [ "$name" = act2-east ] && cp -R "$3/." "$ROOT/$out/write/"
-            RUN_EXTRA=(-v "$(host_path "$(cd "$2" && pwd)"):/game:ro" -e "D2_AOT=${AOT_MODE:-5}" -e "D2_AOT_FNS=${D2_AOT_FNS:-}" -e M4_VIRTUAL_CLOCK=1 -e WX86_FAKETSC=1
+        save="${3:-}"
+        mkdir -p "$ROOT/$out"
+        # One build for every script (-j3: the generated C's three objects side by side), then each
+        # script in a folder of its own (build/m4-aot/<script>/, the binary shared: run-built). The
+        # check's scripts run side by side, each qemu a thread of its own (AOT_PARALLEL=0: one at a
+        # time); a timed run (AOT_MODE) one at a time unless AOT_PARALLEL=1, so the runs don't share
+        # the host's cores. Each run is cut after AOT_TIMEOUT seconds (3600: side by side, Act II's
+        # took over 1800 with another lane on the host).
+        if ! run_in "$HOSTTEST_IMAGE" make -j3 -C tests/m4 host OUT="/work/$out" "${AOT_MAKE[@]}" \
+                ${AOT_SPLIT:+AOT_SPLIT=1} > "$ROOT/$out/make.txt" 2>&1 < /dev/null; then
+            echo "RESULT aot.build FAIL (see $out/make.txt)"
+            grep -a "error" "$ROOT/$out/make.txt" | head -10 || true
+            exit 1
+        fi
+        par="${AOT_PARALLEL:-}"
+        [ -n "$par" ] || { [ "${AOT_MODE:-5}" = 5 ] && par=1 || par=0; }
+        aot_run_one() { # <script> <ms>
+            local name="$1" ms="$2" dir="$out/$1"
+            rm -rf "${ROOT:?}/$dir" && mkdir -p "$ROOT/$dir/write"
+            [ "$name" = act2-east ] && cp -R "$save/." "$ROOT/$dir/write/"
+            local RUN_EXTRA=(-v "$game_mount:/game:ro" -e "D2_AOT=${AOT_MODE:-5}" -e "D2_AOT_FNS=${D2_AOT_FNS:-}" -e M4_VIRTUAL_CLOCK=1 -e WX86_FAKETSC=1
                        -e "M4_SCRIPT=$(cat "$ROOT/tests/m4/scripts/$name.txt")")
             for v in ${AOT_ENV:-}; do RUN_EXTRA+=(-e "$v"); done   # AOT_ENV="M4_ASYNCIO=1 D2_DCC=2": the console's ways
-            run_in "$HOSTTEST_IMAGE" make -C tests/m4 run MS="$ms" OUT="/work/$out" "${AOT_MAKE[@]}" \
-                ${AOT_SPLIT:+AOT_SPLIT=1} > "$ROOT/$out/$name-make.txt" 2>&1 || true
-            cp "$ROOT/$out/err.txt" "$ROOT/$out/$name.txt" 2>/dev/null || : > "$ROOT/$out/$name.txt"
+            run_in "$HOSTTEST_IMAGE" make -C tests/m4 run-built MS="$ms" OUT="/work/$dir" BIN_OUT="/work/$out" TIMEOUT="${AOT_TIMEOUT:-3600}" \
+                "${AOT_MAKE[@]}" ${AOT_SPLIT:+AOT_SPLIT=1} > "$ROOT/$out/$name-make.txt" 2>&1 < /dev/null || true
+            cp "$ROOT/$dir/err.txt" "$ROOT/$out/$name.txt" 2>/dev/null || : > "$ROOT/$out/$name.txt"
+        }
+        game_mount="$(host_path "$(cd "$2" && pwd)")"
+        for r in "${runs[@]}"; do
+            if [ "$par" = 1 ]; then aot_run_one "${r% *}" "${r#* }" & else aot_run_one "${r% *}" "${r#* }"; fi
+        done
+        wait
+        fail=0
+        for r in "${runs[@]}"; do
+            name="${r% *}"
             last="$(grep -ah "aot check: .* since the start" "$ROOT/$out/$name.txt" | tail -1 || true)"
             differs="$(grep -ac "aot check: .* differs on its call" "$ROOT/$out/$name.txt" || true)"
             calls="$(sed -n 's/.*since the start \([0-9]*\) calls.*/\1/p' <<<"$last")"

@@ -7,6 +7,11 @@ ROOT  := ../..
 W     := $(ROOT)/build/cpu/armv6/winx86
 # M4_OUT=<dir> (scripts/docker.sh): another output directory, so that lanes can run side by side.
 OUT   ?= $(ROOT)/build/m4
+# BIN_OUT: where the binary and its AOT objects go (OUT's by default). A lane
+# that runs several scripts at once (scripts/docker.sh test aot) builds once
+# there, then gives each run an OUT of its own (run-built: no build step, so
+# the runs never race on one).
+BIN_OUT ?= $(OUT)
 CXX   := arm-linux-gnueabi-g++
 ARCH  := -marm -march=armv6k -mtune=mpcore -mfpu=vfp -mfloat-abi=softfp
 INC   := -I$(ROOT)/src -I$(W)/src -I$(W)/src/dynarec86 -I$(W)/src/dynarec86/shim \
@@ -23,9 +28,9 @@ QEMU  := qemu-arm -cpu arm11mpcore $(M4_QEMU_FLAGS)
 ifeq ($(M4_PROF),1)
 LIBTAG := _prof
 PROFDEF := -DPROF_COUNTERS
-HOST := $(OUT)/m4_host_prof
+HOST := $(BIN_OUT)/m4_host_prof
 else
-HOST := $(OUT)/m4_host
+HOST := $(BIN_OUT)/m4_host
 endif
 LIB   := $(W)/build-arm/libwinx86$(LIBTAG).a
 # AOT=<dir> (scripts/docker.sh with D2_AOT_BUILD=1): the AOT spike's C,
@@ -36,7 +41,7 @@ LIB   := $(W)/build-arm/libwinx86$(LIBTAG).a
 # their own.
 AOT   ?=
 AOT_SPLIT ?=
-AOTDIR := $(OUT)/aot$(if $(AOT_SPLIT),-split)
+AOTDIR := $(BIN_OUT)/aot$(if $(AOT_SPLIT),-split)
 ifneq ($(AOT),)
 HOST   := $(HOST)_aot$(if $(AOT_SPLIT),_split)
 AOTOBJ := $(AOTDIR)/aot.o $(AOTDIR)/aotn.o $(AOTDIR)/aotj.o
@@ -44,18 +49,30 @@ endif
 AOTCC := arm-linux-gnueabi-gcc -std=gnu17 -O2 -g $(ARCH) -I$(ROOT)/src -w $(if $(AOT_SPLIT),-DAOT_SPLIT)
 GAME  ?= /game
 MS    ?= 20000
+# TIMEOUT: seconds before a run is cut (exit status 124); scripts/docker.sh
+# test aot gives more, its scripts sharing the host's cores.
+TIMEOUT ?= 1800
 CMD   ?= game.exe -w
 
-.PHONY: FORCE run host clean
+.PHONY: FORCE run run-built host clean
 host: $(HOST)
 
-run: $(HOST)
+define RUN_GAME
 	@test -f $(GAME)/Game.exe || { echo "no Game.exe in $(GAME)"; exit 2; }
+	@test -x $(HOST) || { echo "no $(HOST): make host first"; exit 2; }
 	@rm -rf $(OUT)/shots && mkdir -p $(OUT)/write
-	@status=0; timeout 1800 $(QEMU) $(HOST) $(GAME) $(OUT)/write $(MS) "$(CMD)" \
+	@status=0; timeout $(TIMEOUT) $(QEMU) $(HOST) $(GAME) $(OUT)/write $(MS) "$(CMD)" \
 	   > $(OUT)/out.txt 2> $(OUT)/err.txt || status=$$?; \
 	 echo "exit status $$status"; grep -E '^\[rt\]' $(OUT)/err.txt | head -150; \
 	 echo "--- stdout:"; tail -40 $(OUT)/out.txt; echo "--- write root:"; find $(OUT)/write -type f | head -40; echo "--- shots:"; ls $(OUT)/shots
+endef
+
+run: $(HOST)
+	$(RUN_GAME)
+
+# The binary as built (make host), not built again: for runs side by side.
+run-built:
+	$(RUN_GAME)
 
 # Always delegated: the library build is incremental and knows its own inputs.
 $(W)/build-arm/libwinx86.a: FORCE
@@ -74,7 +91,7 @@ $(AOTDIR)/aotj.o: $(AOT)/aot_spike.c $(ROOT)/src/game/aot_rt.h
 
 $(HOST): $(SRCS) png.h $(wildcard $(ROOT)/src/runtime/rt_*.h) $(wildcard $(ROOT)/src/game/*.h) \
                $(wildcard $(ROOT)/src/game/bink/*.h) $(LIB) $(AOTOBJ)
-	@mkdir -p $(OUT)
+	@mkdir -p $(BIN_OUT)
 	$(CXX) -std=gnu++17 -O2 -g $(ARCH) -DD2RT_CPU_BOX86 $(PROFDEF) -Wall -Wextra -Wno-unused-parameter $(INC) \
 	  -static -o $@ $(SRCS) $(AOTOBJ) $(LIB) -lpthread -lm
 
