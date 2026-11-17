@@ -89,6 +89,9 @@ BLOCKING_IMPORTS = ("Wait", "Sleep", "EnterCriticalSection", "ReadFile", "GetOve
 # The game's fatal-error report (Fog's assert message, its string lookup):
 # calls to them are on paths that end the game.
 ERROR_PATH_FUNCS = {0x00408090, 0x00408a60}
+# Indirect and import calls as callouts (issue #115, aot_call_out), not plain
+# exits: --no-callouts turns them off, for comparing.
+CALLOUTS = True
 
 
 class Refused(Exception):
@@ -285,6 +288,8 @@ class Func:
         self.rets = {}           # va -> bytes popped
         self.noreturn = set()    # call sites not coming back
         self.exits = frozenset() # compiled (issue #115): call sites that hand the rest of the call to Box86
+        self.callouts = {}       # exits that come back when they can (issue #115): va -> the bytes the callee is taken to pop
+        self.plain = False       # its indirect and import calls plain exits (a callout's pops threw its stack off)
         self.data = set()        # table bytes
         self.refused = None
         self.stats = collections.Counter()
@@ -379,12 +384,45 @@ class Func:
             return False
         return self.cut(hit)
 
-    def set_exits(self, sites):
+    def set_exits(self, sites, callouts=True):
         """Compiled, the call sites (and tail jumps) whose callee Box86 runs
         from the site on (issue #115): its compiled code ends there, so their
-        paths end too, as at a call that never returns."""
+        paths end too, as at a call that never returns. An indirect or import
+        call is a callout instead (aot_call_out): our shim or a compiled
+        function called in C, the code after it compiled, and an exit only
+        where neither (or where what came back isn't what was assumed)."""
         self.exits = frozenset(sites)
-        self.cut([va for va in sites if va in self.calls and va not in self.noreturn])
+        self.plain = not callouts
+        if CALLOUTS and callouts:
+            self.callouts = {va: self.callout_pops(va) for va in sites
+                             if va in self.calls and va not in self.noreturn and
+                             (self.calls[va] is None or isinstance(self.calls[va], tuple))}
+        self.cut([va for va in sites if va in self.calls and va not in self.noreturn and va not in self.callouts])
+
+    def callout_pops(self, va):
+        """What a callout's callee is taken to pop (checked at run time: an
+        exit at the return address where it differs). An import's, where the
+        image knows it; none where the caller cleans up (add esp after);
+        else the arguments pushed just before it, as stdcall and thiscall do."""
+        t = self.calls[va]
+        if isinstance(t, tuple) and self.img.import_pops.get(t[1]) is not None:
+            return self.img.import_pops[t[1]]
+        i = self.insns[va]
+        nxt = self.insns.get(va + i.size)
+        if nxt is not None and nxt.mnemonic == "add" and nxt.op_str.startswith("esp, "):
+            return 0
+        ends = {k + j.size: k for k, j in self.insns.items()}
+        n, cur = 0, va
+        while cur not in self.leaders and cur in ends:
+            k = ends[cur]
+            j = self.insns[k]
+            if j.mnemonic == "push":
+                n += 1
+            elif j.mnemonic in ("call", "pop", "ret", "leave", "pushal", "popal") or \
+                    j.op_str.split(",")[0].strip() == "esp":
+                break
+            cur = k
+        return 4 * n
 
     def cut(self, hit):
         for va in hit:
@@ -498,6 +536,8 @@ class Program:
         self.summ = {}
         self.compiled = set()   # what compile_set compiles: their summaries are proven, not assumed
         self.may_exit = set()   # compiled functions that may hand a call to Box86 midway (theirs or a callee's exit)
+        self.may_hard = set()   # ... at other than a callout (apply_exits)
+        self.plain = set()      # compiled functions whose indirect and import calls are plain exits (Func.plain)
 
     def func(self, va):
         f = self.funcs.get(va)
@@ -569,6 +609,17 @@ class Program:
                 out.add(site)
         return out
 
+    def make_plain(self, va):
+        """A function whose callouts' pops threw its stack off: its indirect
+        and import calls plain exits instead. False if they were already."""
+        f = self.func(va)
+        if f.plain or not f.callouts:
+            return False
+        self.plain.add(va)
+        g = self.funcs[va] = Func(self.img, va, self.starts)
+        g.set_exits(f.exits, callouts=False)
+        return True
+
     def apply_exits(self, blocks):
         """Each compiled function's exits for the compiled set as it is now;
         a function left to Box86 decoded again without them. The number whose
@@ -580,11 +631,11 @@ class Program:
                 continue
             want = self.exit_sites(Func(self.img, va, self.starts) if f.exits else f, blocks) \
                 if va in self.compiled else set()
-            if frozenset(want) == f.exits:
+            if frozenset(want) == f.exits and f.plain == (va in self.plain):
                 continue
             g = self.funcs[va] = Func(self.img, va, self.starts)
             if want:
-                g.set_exits(want)
+                g.set_exits(want, callouts=va not in self.plain)
             n += 1
         # Who may exit: an exit of its own, or a compiled callee (in C) that may.
         me = {va for va in self.compiled if self.func(va).exits}
@@ -601,6 +652,22 @@ class Program:
         if me != self.may_exit:
             n += 1
         self.may_exit = me
+        # Who may exit other than at a callout (a hard exit: the rest of its
+        # code cut): its own, or a compiled callee's. One that can't runs in
+        # C where there's no trap to exit to (a native's guest_call), its
+        # callouts' fallbacks nested runs there.
+        hard = {va for va in self.compiled if set(self.func(va).exits) - set(self.func(va).callouts)}
+        changed = True
+        while changed:
+            changed = False
+            for va in self.compiled:
+                if va in hard:
+                    continue
+                f = self.func(va)
+                if any(isinstance(t, int) and t in hard for t in list(f.calls.values()) + list(f.tails.values())):
+                    hard.add(va)
+                    changed = True
+        self.may_hard = hard
         return n
 
     def mark_noreturn(self, vas):
@@ -913,6 +980,8 @@ class Analysis:
                 slots[sp - n[1]] = ("k", i.address + i.size)
                 return
             s = self._callee(t)
+            if i.address in self.f.callouts:   # what it's taken to pop, checked at run time
+                s = Summary(s.reads, s.preserved, self.f.callouts[i.address], True)
             slots[sp - 4] = ("k", i.address + i.size)
             for r in range(8):
                 if r != ESP and r not in s.preserved:
@@ -1264,6 +1333,7 @@ MASK = {1: "0xffu", 2: "0xffffu", 4: "0xffffffffu"}
 class Emitter:
     def __init__(self, prog, compiled, mode, sigs):
         self.p, self.compiled, self.mode, self.sigs = prog, compiled, mode, sigs
+        self.index = None   # compiled function -> its row in the functions' table (live)
     def name(self, va):
         return "AOT_SYM(%s_%08x)" % (self.mode, va)
 
@@ -1463,21 +1533,70 @@ class Emitter:
         if self.mode == "ctx":
             fill = ", ".join(REGS[r] for r in range(8))
             back = " ".join("%s = t.r[%d];" % (REGS[r], r) for r in range(8))
-            return "{ AotRegs t = {{%s}}; %s(&t); %s }" % (fill, self.name(t), back)
+            return "{ AotRegs t = {{%s}}; if (AOT_STALE(%du)) aot_call_stale(0x%08xu, &t); else %s(&t); %s }" % (
+                fill, self.row(t), t, self.name(t), back)
         sig = self.sigs[t]
         args = ", ".join(["esp"] + [REGS[r] for r in sig["in"]])
         outs = sig["out"]
         pops = self.p.summ[t].pops
         tail = " esp += %du;" % (4 + pops) if pops is not None and after else ""
         if not outs:
-            return "%s(%s);%s" % (self.name(t), args, tail)
+            return "%s(%s);%s" % (self.wrap(t), args, tail)
         if len(outs) == 1:
-            return "%s = %s(%s);%s" % (REGS[outs[0]], self.name(t), args, tail)
+            return "%s = %s(%s);%s" % (REGS[outs[0]], self.wrap(t), args, tail)
         if len(outs) == 2:
             return "{ uint64_t t = %s(%s); %s = (uint32_t)t; %s = (uint32_t)(t >> 32); }%s" % (
-                self.name(t), args, REGS[outs[0]], REGS[outs[1]], tail)
+                self.wrap(t), args, REGS[outs[0]], REGS[outs[1]], tail)
         back = " ".join("%s = o[%d];" % (REGS[r], k) for k, r in enumerate(outs))
-        return "{ uint32_t o[%d]; %s(%s, o); %s }%s" % (len(outs), self.name(t), args, back, tail)
+        return "{ uint32_t o[%d]; %s(%s, o); %s }%s" % (len(outs), self.wrap(t), args, back, tail)
+
+    def row(self, t):
+        """t's row in the functions' table (aot_stale's index)."""
+        if self.index is None:
+            self.index = {v: k for k, v in enumerate(sorted(self.compiled))}
+        return self.index[t]
+
+    def wrap(self, t):
+        """What a compiled caller calls for t (issue #115): t's C, unless the
+        app found t changed since compiled (a native's hook or patch:
+        aot_stale), then the native (stale_, cold, out of the way)."""
+        return "AOT_SYM(call_%08x)" % t
+
+    def wrappers(self, va):
+        """call_ and stale_ for va, before the functions (sig mode): the
+        same signature as va's own, so a call site's registers flow the
+        same either way."""
+        sig = self.sigs[va]
+        params = ["uint32_t esp"] + ["uint32_t %s" % REGS[r] for r in sig["in"]]
+        args = ["esp"] + [REGS[r] for r in sig["in"]]
+        outs = sig["out"]
+        if not outs:
+            ret = "void"
+        elif len(outs) == 1:
+            ret = "uint32_t"
+        elif len(outs) == 2:
+            ret = "uint64_t"
+        else:
+            ret = "void"
+            params.append("uint32_t *o")
+            args.append("o")
+        fill = ", ".join(REGS[r] if (r == ESP or r in sig["in"]) else "0u" for r in range(8))
+        if not outs:
+            back = "return;"
+        elif len(outs) == 1:
+            back = "return t.r[%d];" % outs[0]
+        elif len(outs) == 2:
+            back = "return (uint64_t)t.r[%d] | (uint64_t)t.r[%d] << 32;" % (outs[0], outs[1])
+        else:
+            back = " ".join("o[%d] = t.r[%d];" % (k, r) for k, r in enumerate(outs)) + " return;"
+        stale = ("static AOT_COLD %s AOT_SYM(stale_%08x)(%s)\n{\n    AotRegs t = {{%s}};\n"
+                 "    aot_call_stale(0x%08xu, &t);\n    %s\n}" % (ret, va, ", ".join(params), fill, va, back))
+        ret_kw = "" if ret == "void" else "return "
+        tail = "\n        return;" if ret == "void" else ""
+        call = ("static inline %s AOT_SYM(call_%08x)(%s)\n{\n    if (AOT_STALE(%du)) {\n        %sAOT_SYM(stale_%08x)(%s);%s\n    }\n"
+                "    %s%s(%s);\n}" % (ret, va, ", ".join(params), self.row(va), ret_kw, va, ", ".join(args), tail,
+                                     ret_kw, self.name(va), ", ".join(args)))
+        return stale + "\n" + call
 
     def call_guest(self, t, va):
         """Box86 runs the callee nested; every register through the context."""
@@ -1757,6 +1876,13 @@ class Emitter:
         if tail:
             return self.tail_call(i, t)
         push = "esp -= 4u; ST32(esp, 0x%08xu); " % ra
+        if va in f.callouts:
+            # Our shim or a compiled function, in C, when the target is one
+            # (aot_call_out): else, or where esp or a callee-saved register
+            # isn't what it's taken to be after, Box86 goes on from there.
+            return ("{ uint32_t x = %s; %sAotRegs t = {{eax, ecx, edx, ebx, esp, ebp, esi, edi}}; "
+                    "aot_call_out(x, &t, %du); eax = t.r[0]; ecx = t.r[1]; edx = t.r[2]; esp = t.r[4]; }"
+                    % (self.get(i, i.operands[0]), push, f.callouts[va]))
         if va in f.exits:
             # The target first: an operand may read esp.
             x = self.get(i, i.operands[0]) if t is None or isinstance(t, tuple) else "0x%08xu" % t
@@ -2053,14 +2179,19 @@ def compile_set(img, starts, roots, extra, mode_list, outdir, names=None):
     # Callees first: a caller returning a callee's garbage as it is leaves it out too.
     garbage = prog.garbage
     for va in prog.callees_first(sorted(compiled)):
-        try:
-            a = Analysis(prog, prog.func(va), outs={EAX, ECX, EDX, EBX, EBP, ESI, EDI}, save_rule=True)
-            if not a.esp_ok:
-                raise Refused("esp at a ret isn't known to be the entry's")
-            Flags(prog.func(va))
-            garbage[va] = a.garbage
-        except Refused as e:
-            refused[va] = str(e)
+        for attempt in (0, 1):
+            try:
+                a = Analysis(prog, prog.func(va), outs={EAX, ECX, EDX, EBX, EBP, ESI, EDI}, save_rule=True)
+                if not a.esp_ok:
+                    raise Refused("esp at a ret isn't known to be the entry's")
+                Flags(prog.func(va))
+                garbage[va] = a.garbage
+                break
+            except Refused as e:
+                if attempt == 0 and str(e).startswith("esp at a ret") and prog.make_plain(va):
+                    continue
+                refused[va] = str(e)
+                break
     for va, site in flags_read_after(img, compiled).items():
         refused[va] = "its flags are read after the call at %08x" % site
     compiled -= set(refused)
@@ -2133,6 +2264,10 @@ def compile_set(img, starts, roots, extra, mode_list, outdir, names=None):
                                     work.append(t)
                 break
             except Refused as e:
+                if str(e).startswith("esp at a ret") and prog.make_plain(cur):
+                    prog.apply_exits(blocks)
+                    prog.summarize(sorted(reach))
+                    continue
                 refused[cur] = str(e)
                 compiled.discard(cur)
                 prog.apply_exits(blocks)
@@ -2170,6 +2305,8 @@ def compile_set(img, starts, roots, extra, mode_list, outdir, names=None):
         em = Emitter(prog, compiled, mode, sigs)
         protos = [em.proto(va) + ";" for va in sorted(compiled)]
         chunks += protos + [""]
+        if mode == "sig":
+            chunks += [em.wrappers(va) for va in sorted(compiled)] + [""]
         for va in sorted(compiled):
             f = prog.func(va)
             em.ana = Analysis(prog, f, outs=set(sigs[va]["out"]), save_rule=(mode == "sig"))
@@ -2233,7 +2370,9 @@ def compile_set(img, starts, roots, extra, mode_list, outdir, names=None):
         report["leaves"] = len(leaf)
         report["exits"] = {"functions": sum(1 for va in compiled if prog.func(va).exits),
                            "sites": sum(len(prog.func(va).exits) for va in compiled),
-                           "may_exit": len(prog.may_exit & compiled)}
+                           "may_exit": len(prog.may_exit & compiled),
+                           "callouts": sum(len(prog.func(va).callouts) for va in compiled),
+                           "plain": len(prog.plain & compiled)}
         chunks.append("const AotFunc AOT_SYM(funcs)[] = {")
         for va in sorted(compiled):
             keep, head = heads.get(va, (0, [0] * 16))
@@ -2243,13 +2382,14 @@ def compile_set(img, starts, roots, extra, mode_list, outdir, names=None):
             ncl = len({t for t in list(f.calls.values()) + list(f.tails.values())
                        if isinstance(t, int) and t in compiled})
             chunks.append("    {0x%08xu, AOT_SYM(fn_%08x), \"%s\", %d, %d, 0x%02x, 0x%02x, %d, {%s}, 0x%08xu, %d, %d, "
-                          "AOT_SYM(rg_%08x), %s, AOT_LEAF(%d), AOT_EXIT(%d, %d)}," % (
+                          "AOT_SYM(rg_%08x), %s, AOT_LEAF(%d), AOT_EXIT(%d, %d), AOT_EXIT(%d, %d)}," % (
                               va, va, names.get(va, "%08x" % va), keep, prog.summ[va].pops or 0,
                               mask(sigs[va]["out"]), mask(sigs[va]["preserved"]), 1 if va in roots else 0,
                               ", ".join("0x%02x" % b for b in head), code_hash(img, rg), len(rg), ncl, va,
                               "AOT_SYM(cl_%08x)" % va if ncl else "0", 1 if va in leaf else 0,
-                              1 if f.exits else 0, 1 if va in prog.may_exit else 0))
-        chunks.append("    {0, 0, 0, 0, 0, 0, 0, 0, {0}, 0, 0, 0, 0, 0, 0, 0}")
+                              1 if f.exits else 0, 1 if va in prog.may_exit else 0,
+                              1 if set(f.exits) - set(f.callouts) else 0, 1 if va in prog.may_hard else 0))
+        chunks.append("    {0, 0, 0, 0, 0, 0, 0, 0, {0}, 0, 0, 0, 0, 0, 0, 0, 0}")
         chunks.append("};")
     report["hooks"] = {"hookable": len(heads), "not": {"%08x" % k: v for k, v in sorted(why.items())}}
     chunks.append("const AotRoot AOT_SYM(roots)[] = {")
@@ -2511,10 +2651,14 @@ def main():
     ap.add_argument("--callees", type=int, default=0,
                     help="N: also the functions the set calls, to depth N (issue #115: a callee left to Box86 "
                          "costs a nested run per call); those that don't compile stay with Box86")
+    ap.add_argument("--no-callouts", action="store_true",
+                    help="indirect and import calls as plain exits to Box86, not callouts (issue #115)")
     ap.add_argument("--survey", action="store_true")
     ap.add_argument("--explain", help="va,va,...: why each is left to Box86 (the calls whose pops aren't "
                                       "known), with the set's summaries; nothing written")
     a = ap.parse_args()
+    global CALLOUTS
+    CALLOUTS = not a.no_callouts
     img = Image(a.exe)
     starts = load_starts(img, a.functions)
     if a.survey:
@@ -2573,9 +2717,10 @@ def main():
     n = len(rep["functions"])
     ex = rep.get("exits", {})
     print("aot: %d functions compiled (%d x86 instructions, %d bytes; %d never call Box86; %d hand Box86 the rest "
-          "of a call at %d sites, %d with their callers), %d left to Box86, in %s"
+          "of a call at %d sites, %d with their callers; %d of the sites callouts, plain exits in %d functions), "
+          "%d left to Box86, in %s"
           % (n, rep["x86_insns"], rep["x86_bytes"], rep.get("leaves", 0), ex.get("functions", 0), ex.get("sites", 0),
-             ex.get("may_exit", 0), len(rep["refused"]), a.out))
+             ex.get("may_exit", 0), ex.get("callouts", 0), ex.get("plain", 0), len(rep["refused"]), a.out))
     for k, v in sorted(rep["refused"].items()):
         print("  left to Box86: %s: %s" % (k, v))
 

@@ -72,6 +72,10 @@ typedef struct {
      * hand the rest of the call to Box86 at a call that may block, an
      * import or an indirect call. Its own exits alone under AOT_SPLIT. */
     uint8_t may_exit;
+    /* 1: ... other than at a callout (aot_call_out), the rest of the code
+     * cut there. One that can't may run where there's no trap to exit to (a
+     * native's guest_call), its callouts' fallbacks nested runs there. */
+    uint8_t may_hard;
 } AotFunc;
 #ifdef AOT_SPLIT
 #define AOT_LEAF(x) 0
@@ -82,10 +86,18 @@ typedef struct {
 #endif
 
 extern uint8_t *aot_mem;   /* host address of guest 0 */
+/* By the functions' table's rows (issue #115): 1 when the app found that
+ * function changed since compiled (a native's hook or patch). A compiled
+ * call to it (call_, recompile.py) then calls the native (aot_call_stale,
+ * from stale_, out of the way), and its callers stay compiled. */
+extern uint8_t aot_stale[];
+#define AOT_STALE(k) __builtin_expect(aot_stale[(k)], 0)
+#define AOT_COLD __attribute__((cold, noinline))
 
 /* aot_spike.cpp */
 uint32_t aot_fs_base(void);                       /* the running thread's TEB */
 void aot_guest_call(uint32_t va, AotRegs *r);     /* a callee not compiled: Box86, nested */
+void aot_call_stale(uint32_t va, AotRegs *r);     /* a compiled callee a native changed (AOT_LIVE): its native */
 __attribute__((noreturn)) void aot_bad_ret(uint32_t fn, uint32_t esp0, uint32_t esp);
 __attribute__((noreturn)) void aot_unreachable(uint32_t va);
 /* Box86 goes on at `target` with these registers (issue #115): back to the
@@ -94,6 +106,12 @@ __attribute__((noreturn)) void aot_unreachable(uint32_t va);
  * of each from the game's own code. */
 __attribute__((noreturn)) void aot_exit(uint32_t target, uint32_t eax, uint32_t ecx, uint32_t edx, uint32_t ebx,
                                         uint32_t esp, uint32_t ebp, uint32_t esi, uint32_t edi);
+/* An indirect or import call (issue #115): `x` called in C when it's our
+ * shim or a compiled function, with *r as at the call (esp at the return
+ * address pushed), *r then as after it. Else, or where the callee popped
+ * other than `pops` bytes, changed a callee-saved register or asked to yield
+ * or to run guest code, an exit: Box86 goes on at x, or at the return. */
+void aot_call_out(uint32_t x, AotRegs *r, uint32_t pops);
 __attribute__((noreturn)) void aot_fault(uint32_t va);
 void aot_journal(uint32_t va, uint32_t n);        /* AOT_JOURNAL: before a store */
 /* d2_native.cpp: our natives, called in C. The high word: 1 if the native

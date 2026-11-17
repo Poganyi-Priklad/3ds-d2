@@ -348,6 +348,49 @@ At 50% emulated CPU (one run each, frames climbing through the walk in both mode
 
 Stage 1 dropped to 12.4–13 fps here. With exits, the code no longer costs frames. It doesn't gain any either, because the game runs at 25. The window that loads Act II is slower with it on (171 frames against 206), while the probe times each function's first calls.
 
+### Callouts
+
+- **Where:** a compiled function's indirect and import calls (549 of the 1,707 exit sites). Instead of an exit, `aot_call_out` looks at the target first:
+  - **One of our shims** (an import, or a pointer to one): its `Shim::fn` runs in C, with the CPU's registers set as at the call. Box86 takes over at the return only when the shim redirected, a yield is pending, or esp or a callee-saved register isn't what the call's pops guess says.
+  - **A compiled function:** its signature function, the journaled one under the check.
+  - **Anything else:** an exit, as before.
+- **Pops guess:** the import's own, 0 when an `add esp` follows the call, else the pushes before it. A function whose guess leaves esp unknown at a ret keeps plain exits (39).
+- **Hard exits:** `may_hard` marks the functions whose exits aren't all callouts. Natives' direct calls (no trap to exit to) refuse only those; there a callout's fallback is a nested run.
+- **The shim's registers:** a callout keeps only the trap's general registers and eip, not the full context. The 768-byte FPU blob each way made Act II 30% slower with the code on than off. The FPU is the shim's to leave: compiled code has no x87.
+- **The check:** what a callout's compiled callee leaves as garbage (neither out nor kept) isn't compared, since the caller can't know it is (`005a7ba0`'s ecx).
+
+### Functions natives changed
+
+A native's hook changes its function's bytes, so the function stays with Box86, and so does every compiled caller that reaches it (388 hookable functions on the lane, 490 with the console's settings). `D2_AOT_STALE=1` keeps those callers compiled:
+
+- **Per function, not per call:** a compiled call goes through an inline `call_<va>`, which calls the function's C, or a cold `stale_<va>` when the app found it changed (`aot_stale`, by the table's row). `stale_` calls the native (`aot_call_stale`): its shim in C when it hooks the entry, Box86 nested on from where it hands back to the game's code, a wait done in place; else Box86's call, nested. A guard at each call site, with every register taken back in line, made Act II 25% slower: the C compiler couldn't hold the callee-saved registers across the calls.
+- **Not one that may exit:** what it hands Box86 may wait on another guest thread, which a nested run can't (`0040a960`'s `WaitForSingleObject` hung the fight). Its callers stay with Box86.
+- **Equivalent natives:** `set_aot_equivalent` names a native whose function's original compiled code does the same, registers included: compiled code calls the original's C, and its callers stay compiled with or without `D2_AOT_STALE`. `465c60` (UnitRelation) is one; its native's town case hands back to the same code anyway (200k calls a window in Act II). StatGet and UnitPickFilter aren't: the check differs on ecx and edx after them.
+
+Off by default: on the lane the natives' calls from C cost more than the callers gained (Act II 63.7 s with it off against 67.2 on, fight 54.5 against 58.4).
+
+**The lane, on against off** (host ms over windows 3 onward, the same session):
+
+| Script | Off | On |
+| --- | --- | --- |
+| Fight (8 windows) | 60,961 | 53,242 |
+| Act II east (11 windows) | 60,788 | 63,175 |
+
+The fight gains 13%; Act II is 4% behind, as with exits alone in the same session (`f68fedc`: 61,821 against 59,243).
+
+**Azahar, Act II at 50% emulated CPU** (CIA `cf8a9021f497-aota64c18`, `4575dbb`; frames per 10 s window once in Act II, two runs each):
+
+| | First 10 windows | Last 5 |
+| --- | --- | --- |
+| Off | 1,564 / 1,577 | 968 / 982 |
+| On | 1,610 / 1,665 | 1,025 / 1,062 |
+
+That's 4–5% more frames over the walk with the code on, and 7% once it settles. An earlier pair of runs (f68fedc) gave 56%, but its off runs started unusually slowly (8, 7, 58 frames in their first windows, where these got 35, 119, 135), so that figure doesn't hold.
+
+### The JIT pool
+
+The code on doesn't shrink what Box86 translates much: after the same walk, 7.36 MiB of blocks with it on against 7.76 off, in 8 MiB of chunks either way (14 MiB pool). Box86 still translates the code around the compiled functions, and the functions it runs again when the probe drops them. So the pool stays at 14 MiB: nothing measured supports a smaller one.
+
 ## Open questions
 
 - **Is the gain there?** Yes, on the console: about 5× Box86 on A* and 3–4.7× on CofParams (#113). The lane's qemu showed 4.1× and 1.6×. What a full build gains depends on how much of a frame's code it covers (#115), and on its calls to code it doesn't compile going through the target table rather than a nested run.

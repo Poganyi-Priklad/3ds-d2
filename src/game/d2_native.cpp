@@ -2880,6 +2880,21 @@ uint32_t unit_pick_filter(Cpu &c)
     if (unit_pick_rejected(unit))
         return 0;
     const uint32_t esp = c.reg(R_ESP);
+    // The function's compiled code, when it's on (issue #115: else Box86 runs
+    // the rest, and enters compiled 470860 about 340k times a fight window):
+    // in C, as at the hook, when it can be (no trap to enter: about 200k a
+    // window in Act II), else its trap, from the entry, with everything as
+    // at the hook (the check's).
+    {
+        uint32_t r[8];
+        c.regs_gp(r);
+        if (game::aot_direct(c, 0x00466870, r))
+            return r[0];
+    }
+    if (const uint32_t trap = game::aot_trap_for(0x00466870)) {
+        resume_original(c, trap, esp, 2);
+        return c.reg(R_EAX);
+    }
     put32(esp - 4, c.reg(R_EBP));
     c.set_reg(R_EBP, esp - 4);
     resume_original(c, 0x00466876, esp - 4 - 0x34, 2);
@@ -3714,6 +3729,14 @@ uint32_t unit_relation_native(Cpu &c)
     uint32_t r;
     if (unit_relation(c.reg(R_ECX), c.reg(R_EDX), r))
         return r;
+    {   // the function's compiled code, when it's on (issue #115): in C, as at
+        // the hook (a town's every call: 200k a window in Act II's, each a
+        // nested run of the game's code when compiled code calls this native)
+        uint32_t regs[8];
+        c.regs_gp(regs);
+        if (game::aot_direct(c, 0x00465c60, regs))
+            return regs[0];
+    }
     const uint32_t esp = c.reg(R_ESP);
     put32(esp - 4, c.reg(R_EBP));
     c.set_reg(R_EBP, esp - 4);
@@ -4566,6 +4589,9 @@ int install_d2_native(Cpu &c)
     static const uint8_t k465c60[] = {0x55, 0x8b, 0xec, 0x83, 0xec, 0x10, 0x85, 0xc9, 0x53};
     HOOK(c, 0x00465c60, k465c60, sizeof k465c60, 0, remap_check ? unit_relation_checked : unit_relation_native,
          "UnitRelation", !remap_check);
+    // Compiled code calls the original's C instead (issue #115: 200k calls a
+    // window in Act II's town, where the native only hands back to it).
+    game::set_aot_equivalent(0x00465c60);
     // Rooms and collision (room_find, collision_cross): Act II's pathfinding.
     static const uint8_t k463740[] = {0x55, 0x8b, 0xec, 0x83, 0xec, 0x08, 0x56, 0x8b, 0xc1, 0x33, 0xf6};
     HOOK(c, 0x00463740, k463740, sizeof k463740, 1, remap_check ? room_find_checked : room_find_native, "RoomFind",
