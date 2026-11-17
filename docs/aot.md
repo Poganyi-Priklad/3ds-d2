@@ -199,6 +199,7 @@ Updated 2026-11-17 (#111, the owner's decisions of 2026-11-15 on #25 and 2026-11
 - **Box86 stays as the reference:** in the recompile step and the test lanes (`test aot`'s differential check, #114).
 - **No generated C, object or table** goes into the repository or a container image. They stay under `build/` (git-ignored) and in the CIA.
 - **d2d's function list is the target** (#105, #107): the functions AOT compiles are d2d's, by address and name, so that game code can later be changed function by function. The list is read from the submodule at build time and never copied. The CIA contains no d2d code.
+- **d2d's names may stay in the CIA** (owner, 2026-11-17): the compiled code's function table carries each function's name, d2d's (GPL-3.0-or-later) where it has one. If that turns out to be a problem, a distributed CIA carries addresses only.
 
 ## The spike (#113)
 
@@ -400,6 +401,5 @@ The code on doesn't shrink what Box86 translates much: after the same walk, 7.36
 - **Does the game write its own code?** If anything other than our patches writes into `.text` at run time, the AOT code for it is stale. Box86's invalidations of `.text` on the lane answer this.
 - **Exceptions:** does any function rely on Windows exception handling for a fault (an access violation caught by `__try`)? If one does, it stays with Box86.
 - **Return sites:** does every call's return site need an entry, or only those a thread can be switched or fall back under?
-- **d2d's names in the CIA:** the functions' table carries each function's name, d2d's where it has one (GPL-3.0-or-later). Keep them (a build input's facts), or put only addresses in a distributed CIA?
 - **`LODPatch_114d.exe`:** how its Game.exe is stored, and whether extracting it needs anything we would rather not depend on.
 - **Faults:** is a report with the function and offset enough, or does the check build need precise x86 state at each memory access?
