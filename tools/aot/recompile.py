@@ -2502,8 +2502,10 @@ def refusal_kind(reason):
     r = HEX.sub("X", reason)
     m = re.match(r"^(\S+)( \S.*)? at X$", r)
     if m and not r.startswith(("a ", "indirect", "branch", "tail", "flags", "direction", "esp", "code", "no ",
-                                "stack", "imul", "an ")):
+                                "stack", "imul", "an ", "its ")):
         mn = m.group(1)
+        if mn in ("rep", "repz", "repe", "repne", "repnz", "lock") and m.group(2):   # capstone's prefixed mnemonics
+            return "instruction %s %s" % (mn, m.group(2).split()[0])
         if mn.startswith("f"):
             return "x87 (%s)" % mn
         if m.group(2):
@@ -2515,6 +2517,7 @@ def refusal_kind(reason):
     r = re.sub(r"^flags of \S+ read", "flags of an instruction read", r)
     r = re.sub(r"^\S+ reads flags", "an instruction reads flags", r)
     r = re.sub(r"tail call at X: pops .*", "tail call at X: pops differ from the target's", r)
+    r = re.sub(r"^its flags are read after the call at X", "its flags are read after a call to it", r)
     return r.replace(" at X", "").replace(" (X)", "")
 
 
@@ -2559,14 +2562,19 @@ def census(img, starts, tsv, outdir, hot_logs, mode_list):
     refused = {int(k, 16): v for k, v in rep["refused"].items()}
 
     def row():
-        return {"functions": 0, "bytes": 0, "hot": 0, "examples": []}
+        return {"functions": 0, "sites": 0, "bytes": 0, "hot": 0, "examples": [], "_seen": set()}
 
-    def add(d, key, va, n=1):
+    def add(d, key, va):
+        """One site of key's in function va: its bytes and hot bytes once per function."""
         r = d.setdefault(key, row())
-        r["functions"] += n
-        r["bytes"] += sizes.get(va, 0) if n else 0
-        r["hot"] += hot.get(va, 0) if n else 0
-        if len(r["examples"]) < 8 and va not in r["examples"]:
+        r["sites"] += 1
+        if va in r["_seen"]:
+            return
+        r["_seen"].add(va)
+        r["functions"] += 1
+        r["bytes"] += sizes.get(va, 0)
+        r["hot"] += hot.get(va, 0)
+        if len(r["examples"]) < 8:
             r["examples"].append(va)
 
     by_refusal = {}
@@ -2633,6 +2641,7 @@ def census(img, starts, tsv, outdir, hot_logs, mode_list):
     for d in (by_refusal, kinds, exits, nested):
         for r in d.values():
             r["examples"] = ["%08x" % v for v in r["examples"]]
+            del r["_seen"]
     with open(os.path.join(outdir, "census.json"), "w") as fh:
         json.dump(out, fh, indent=1, sort_keys=True)
 
@@ -2649,10 +2658,11 @@ def census(img, starts, tsv, outdir, hot_logs, mode_list):
                      ("calls from compiled code run nested by Box86 (sites)", nested)):
         lines.append("")
         lines.append("%s:" % title)
-        lines.append("  %7s %9s %7s %7s  %s" % ("count", "bytes", "bytes%", "hot%", "cause"))
+        lines.append("  %6s %6s %9s %7s %7s  %s" % ("funcs", "sites", "bytes", "bytes%", "hot%", "cause"))
         for k, r in sorted(d.items(), key=lambda kv: (-kv[1]["hot"], -kv[1]["bytes"], -kv[1]["functions"])):
-            lines.append("  %7d %9d %7s %7s  %s  [%s]" % (r["functions"], r["bytes"], pct(r["bytes"], total_b),
-                                                        pct(r["hot"], hot_total), k, " ".join(r["examples"][:4])))
+            lines.append("  %6d %6d %9d %7s %7s  %s  [%s]" % (
+                r["functions"], r["sites"], r["bytes"], pct(r["bytes"], total_b), pct(r["hot"], hot_total), k,
+                " ".join(r["examples"][:4])))
     lines.append("")
     lines.append("imports called from compiled code (sites): " + ", ".join(
         "%s %d" % kv for kv in imports.most_common(40)))
