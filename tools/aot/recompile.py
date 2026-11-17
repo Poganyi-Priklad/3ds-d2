@@ -2258,20 +2258,36 @@ def compile_set(img, starts, roots, extra, mode_list, outdir, names=None, keep=N
                 work, queued = collections.deque(order), set(order)
                 budget = 100 * max(1, len(compiled))
                 settled = 0
+                # A pass's refusals together (issue #135: one at a time, each
+                # starting the whole worklist again, took hours on d2d's list).
+                # A function whose direct callee was refused in this pass and
+                # that is refused itself is only put off: the next pass, with
+                # that callee left to Box86, decides it.
+                hit, put_off = {}, set()
                 while work:
                     settled += 1
-                    progress("signatures, round %d: %d analysed, still queued" % (rounds, settled), len(work))
+                    progress("signatures, round %d: %d analysed, %d refused this pass, still queued" % (
+                        rounds, settled, len(hit)), len(work))
                     budget -= 1
                     if budget < 0:
                         raise RuntimeError("signatures didn't settle")
                     va = work.popleft()
                     queued.discard(va)
+                    if va in hit:
+                        continue
                     f = prog.func(va)
-                    cur = va
-                    a = Analysis(prog, f, outs=outs[va], save_rule=True)
-                    if not a.esp_ok:
-                        raise Refused("esp at a ret isn't known to be the entry's")
-                    Flags(f)
+                    try:
+                        a = Analysis(prog, f, outs=outs[va], save_rule=True)
+                        if not a.esp_ok:
+                            raise Refused("esp at a ret isn't known to be the entry's")
+                        Flags(f)
+                    except Refused as e:
+                        if any(isinstance(t, int) and t in hit for t in list(f.calls.values()) + list(f.tails.values())):
+                            put_off.add(va)
+                        else:
+                            hit[va] = str(e)
+                        continue
+                    put_off.discard(va)
                     s = prog.summ[va]
                     if frozenset(a.live_in) != s.reads:
                         prog.summ[va] = Summary(a.live_in, s.preserved, s.pops, True)
@@ -2291,16 +2307,21 @@ def compile_set(img, starts, roots, extra, mode_list, outdir, names=None, keep=N
                                 if t not in queued:
                                     queued.add(t)
                                     work.append(t)
-                break
-            except Refused as e:
-                if str(e).startswith("esp at a ret") and prog.make_plain(cur):
-                    prog.apply_exits(blocks)
-                    prog.summarize(sorted(reach))
-                    continue
-                refused[cur] = str(e)
-                compiled.discard(cur)
+                if not hit and not put_off:
+                    break
+                if not hit:   # put off with nothing refused: can't happen, but never loop on it
+                    raise RuntimeError("signatures: %d functions put off with no refusal" % len(put_off))
+                for va, why in hit.items():
+                    if why.startswith("esp at a ret") and prog.make_plain(va):
+                        continue
+                    refused[va] = why
+                    compiled.discard(va)
+                print("aot: signatures, round %d: a pass refused %d (%d put off), %.0f s" % (
+                    rounds, len(hit), len(put_off), time.time() - t0), file=sys.stderr, flush=True)
                 prog.apply_exits(blocks)
-                prog.summarize(sorted(reach))   # the summaries as for a function left to Box86
+                prog.summarize(sorted(reach))   # the summaries as for functions left to Box86
+            except Refused as e:   # from outside a function's own analysis
+                raise RuntimeError("signatures: %s" % e)
         sigs = {va: {"in": sorted(prog.summ[va].reads - {ESP}), "out": sorted(outs[va]),
                      "preserved": sorted(prog.summ[va].preserved)} for va in compiled}
         # Every function emitted once, both ways, before writing anything: what
