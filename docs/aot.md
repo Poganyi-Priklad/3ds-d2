@@ -163,8 +163,8 @@ AOT code has to be checked function by function, as natives are (`D2_NATIVE_CHEC
   - The recompiler (Python, Capstone, the same image as the d2d harness) reads Game.exe, mounted read-only as the art step does. It writes C into `build/aot/<key>/`.
   - devkitARM compiles that C in the toolchain image, and `tests/cpu/ctr/Makefile` links it into `3ds-d2-game-cia.elf`.
 - **The cache key:** Game.exe's SHA-256, the recompiler's version, the site table, and the toolchain lock. Packaging again with the same files reuses the objects.
-- **The app checks the Game.exe it runs.** The AOT code is only valid for the bytes it was made from. The app hashes the Game.exe it loads, and if it doesn't match the CIA's key it runs on Box86 alone and says so. `src/game/game_exe.cpp` already tells 1.14d from the others (#77).
-- **A JIT-only build stays** (#116): `package-cia` without AOT, for comparison and for releases.
+- **The app checks the Game.exe it runs.** The AOT code is only valid for the bytes it was made from. The app hashes the Game.exe it loads; if it doesn't match the CIA's key, a CIA without Box86 stops and says which Game.exe it needs (one built with the Box86 option runs on Box86 alone). `src/game/game_exe.cpp` already tells 1.14d from the others (#77).
+- **Build options** (#116): the default has no Box86; a compile-time option keeps Box86 in as a fallback; a JIT-only build stays for comparison.
 - **The build ID** has to cover the AOT step: the recompiler's version and a short hash of the key, never Game.exe itself.
 - **Game.exe from the official patch, optionally** (#116): taking Game.exe out of a `LODPatch_114d.exe` the user supplies, so a user with another version only needs their MPQs. Its format isn't studied yet (see Open questions).
 
@@ -192,11 +192,13 @@ The 3DS loads an app's whole code segment at start, so the compiled code is resi
 
 ## Distribution
 
-- **We distribute the recompiler, never its output.** The recompiler is our code. Its output is the user's Game.exe in another form: it is made on the user's machine, from the user's own file, and goes only into the user's own CIA. That is the same act the JIT performs at run time (#111).
-- **An AOT CIA is personal,** like a slim or full CIA. Even in sdcard mode it holds code made from Game.exe, so it is never shared, posted or attached. `package-cia` says so when it builds one.
-- **No generated C, object or table** goes into the repository, a container image, a release or a problem report. They stay under `build/` (git-ignored) and in the user's CIA.
-- **Releases stay JIT-only.** The project's own CIA and `.3dsx` never contain AOT code.
-- **d2d's list** is read from its submodule at build time and never copied. The CIA contains no d2d code either way. Whether its GPL-3.0 list should be a build input at all, or only a cross-check, is an open question (below).
+Updated 2026-11-17 (#111, the owner's decisions of 2026-11-15 on #25 and 2026-11-17):
+
+- **AOT output may be distributed.** Public CIAs (dev snapshots, releases) may carry code compiled from Game.exe, as they carry the game art. Game.exe itself, the MPQs and saves never are; in CI they stay behind an access token.
+- **The default CIA has no Box86 and no JIT.** The game runs from AOT-compiled code. Box86 kept in the CIA as a runtime fallback would keep the JIT layer's memory (the pool, the jump tables, the records: about 31 MiB), which is what this track gives back. Keeping Box86 is a compile-time option, for a fallback build.
+- **Box86 stays as the reference:** in the recompile step and the test lanes (`test aot`'s differential check, #114).
+- **No generated C, object or table** goes into the repository or a container image. They stay under `build/` (git-ignored) and in the CIA.
+- **d2d's function list is the target** (#105, #107): the functions AOT compiles are d2d's, by address and name, so that game code can later be changed function by function. The list is read from the submodule at build time and never copied. The CIA contains no d2d code.
 
 ## The spike (#113)
 
@@ -398,6 +400,6 @@ The code on doesn't shrink what Box86 translates much: after the same walk, 7.36
 - **Does the game write its own code?** If anything other than our patches writes into `.text` at run time, the AOT code for it is stale. Box86's invalidations of `.text` on the lane answer this.
 - **Exceptions:** does any function rely on Windows exception handling for a fault (an access violation caught by `__try`)? If one does, it stays with Box86.
 - **Return sites:** does every call's return site need an entry, or only those a thread can be switched or fall back under?
-- **d2d's list as a build input:** read from the submodule at build time, or only used to check our finder? The recompiler is ours either way, and the output is never distributed.
+- **d2d's names in the CIA:** the functions' table carries each function's name, d2d's where it has one (GPL-3.0-or-later). Keep them (a build input's facts), or put only addresses in a distributed CIA?
 - **`LODPatch_114d.exe`:** how its Game.exe is stored, and whether extracting it needs anything we would rather not depend on.
 - **Faults:** is a report with the function and offset enough, or does the check build need precise x86 state at each memory access?

@@ -316,7 +316,7 @@ package-cia)   # [<game-dir> | --slim|--full <game-dir>]: the game app (+ the us
     if [ "${D2_AOT_BUILD:-}" = 1 ] || [ "${D2_AOT_BUILD:-}" = keep ]; then   # the AOT spike (issue #113): needs the user's Game.exe (keep: the C the last run wrote)
         [ -n "$art" ] || die "D2_AOT_BUILD=$D2_AOT_BUILD package-cia <game-dir>: the recompiler reads its Game.exe"
         aot_prepare "$art"
-        echo "docker.sh: this CIA holds code made from your Game.exe: it is yours alone, never share it (docs/aot.md)"
+        echo "docker.sh: this CIA holds code compiled from Game.exe, which may be shared; Game.exe, the MPQs and saves may not (docs/aot.md)"
     fi
     # Reports (issue #26): the build ID and version ("0.4.0-dev" unless built
     # from its release tag: scripts/version.sh, issue #61), and the Sentry
