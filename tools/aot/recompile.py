@@ -134,6 +134,20 @@ def import_pops(imports):
     return out
 
 
+class PlainRet:
+    """`rep ret` (F3 C3, AMD's two-byte return, as in MSVC's
+    __security_check_cookie, 681a48): a ret; the prefix does nothing (issue
+    #135: refused, its 625 compiled call sites each ran it nested by Box86)."""
+
+    def __init__(self, i):
+        self._i = i
+
+    mnemonic = "ret"
+
+    def __getattr__(self, name):
+        return getattr(self._i, name)
+
+
 class Image:
     def __init__(self, path):
         self.pe = pefile.PE(path, fast_load=True)
@@ -172,6 +186,8 @@ class Image:
             i = next(self.md.disasm(self.mem[o:o + 16], va), None)
             if i is None:
                 raise Refused("no instruction decodes at %08x" % va)
+            if i.mnemonic in ("repz ret", "rep ret"):
+                i = PlainRet(i)
             self.cache[va] = i
         return i
 
