@@ -83,6 +83,35 @@ build_id() { run_in "$TOOLCHAIN_IMAGE" sh scripts/build-id.sh; }
 AOT_MAKE=()
 # The set compiled: tools/aot/<D2_AOT_SET>.args (spike, the default, or
 # coverage: tools/aot/coverage.py's list, issue #115), comment lines left out.
+# lane_progress <label|err-file|guest-ms|script-file>...: every LANE_PROGRESS seconds (60; 0: off), one
+# line for the runs still going: each one's guest time against its length (the game's heartbeat, "[rt]
+# t=<s>s" every 10 s of guest time), the script's waits reached so far, and the wall time since the start.
+# Run in the background; killed when the runs end (lane_progress_stop).
+lane_progress() {
+    local every="${LANE_PROGRESS:-60}" t0=$SECONDS
+    [ "$every" -gt 0 ] 2>/dev/null || return 0
+    while sleep "$every"; do
+        local line="" r label err ms script t got nw w el=$((SECONDS - t0))
+        for r in "$@"; do
+            IFS='|' read -r label err ms script <<<"$r"
+            t=0; got=0; nw=0
+            [ -f "$err" ] && t="$(grep -ao '^\[rt\] t=[0-9]*s' "$err" | tail -1 | tr -dc 0-9 || true)"
+            if [ -n "$script" ] && [ -f "$script" ]; then   # the script's waits, those its game reached
+                for w in $(sed -En 's/^[0-9]+ (wait|tapuntil) ([a-z0-9]+).*/\2/p' "$script" | sort -u); do
+                    nw=$((nw + 1))
+                    [ -f "$err" ] && grep -aq "autoplay: $w reached" "$err" && got=$((got + 1))
+                done
+            fi
+            t="${t:-0}"
+            line+=" $label ${t}/$((ms / 1000))s ($((t * 100000 / ms))%)"
+            [ "${nw:-0}" -gt 0 ] && line+=", waits ${got:-0}/$nw"
+            line+=";"
+        done
+        echo "progress $((el / 60))m$(printf %02d $((el % 60)))s:${line%;}"
+    done
+}
+lane_progress_stop() { [ -n "${1:-}" ] && { kill "$1" 2>/dev/null; wait "$1" 2>/dev/null; } || true; }
+
 aot_args_file() { echo "$ROOT/tools/aot/${D2_AOT_SET:-spike}.args"; }
 aot_args() {
     [ -f "$(aot_args_file)" ] || die "no $(aot_args_file) (D2_AOT_SET)"
@@ -173,7 +202,12 @@ test)
         [ -n "${4:-}" ] && make_args+=(CMD="$4")
         RUN_EXTRA=(-v "$(host_path "$(cd "$2" && pwd)"):/game:ro")
         for v in M4_LAYOUT M4_VIRTUAL_CLOCK M4_SCRIPT M4_BOTTOM RT_MSGLOG M4_PHYS_MB M4_FAST M4_QEMU_FLAGS WX86_SON WX86_SONDUMP WX86_SONMAXS WX86_HOTPROF D2_NOLINK M4_FRAMEHASH M4_NATIVE D2_NATIVE_MASK M4_DUMPFRAME M4_VIDEO M4_VIDEO_WAV M4_PROF RT_FILETRACE M4_HASHMEM WX86_FAKETSC M4_ASYNCIO M4_SPRITE_MB M4_POOL_RESERVE_MB M4_POOL_SPARE_KB M4_SPRITE_TRACE M4_STORM_PRIO M4_STORM_DIRECT D2_NATIVE_CHECK M4_SPRITE_FRAMES M4_META_CAP_KB D2_JITEVICT D2_JITFAILAFTER D2_JITCHUNK_KB M4_POOL_PIECES M4_POOL_BALLAST_MB M4_POOL_LARGE_KB M4_POOL_LARGE_MIN_KB M4_BG_QUANTUM M4_CALLRET M4_NOPEND M4_BUDGETTAIL M4_FORWARD M4_HOTPROF_LEVEL M4_HOTPROF_TOP D2_DRAW_CENSUS D2_FLOOR_QUEUE D2_DCC D2_AOT D2_AOT_ONLY WX86_BLOCKLOG; do [ -n "${!v:-}" ] && RUN_EXTRA+=(-e "$v=${!v}"); done
-        run_in "$HOSTTEST_IMAGE" make "${make_args[@]}" ;;
+        m4err="$ROOT/${M4_OUT:-build/m4}/err.txt"
+        rm -f "$m4err"
+        lane_progress "m4|$m4err|${3:-20000}|" & progress_pid=$!
+        st=0; run_in "$HOSTTEST_IMAGE" make "${make_args[@]}" || st=$?
+        lane_progress_stop "$progress_pid"
+        exit "$st" ;;
     aot)  # <game-dir> [<save-dir>] (issue #114): the recompiler on its Game.exe, then the lane's scripts with
           # D2_AOT=5 in one lane of their own (build/m4-aot), each from a fresh write folder (Act II's a copy
           # of the save) and its log kept as build/m4-aot/<script>.txt; from each, the "aot check:" totals:
@@ -221,10 +255,18 @@ test)
             cp "$ROOT/$dir/err.txt" "$ROOT/$out/$name.txt" 2>/dev/null || : > "$ROOT/$out/$name.txt"
         }
         game_mount="$(host_path "$(cd "$2" && pwd)")"
+        prog=()
         for r in "${runs[@]}"; do
-            if [ "$par" = 1 ]; then aot_run_one "${r% *}" "${r#* }" & else aot_run_one "${r% *}" "${r#* }"; fi
+            rm -f "$ROOT/$out/${r% *}/err.txt"   # no earlier run's progress
+            prog+=("${r% *}|$ROOT/$out/${r% *}/err.txt|${r#* }|$ROOT/tests/m4/scripts/${r% *}.txt")
         done
-        wait
+        lane_progress "${prog[@]}" & progress_pid=$!
+        pids=()
+        for r in "${runs[@]}"; do
+            if [ "$par" = 1 ]; then aot_run_one "${r% *}" "${r#* }" & pids+=($!); else aot_run_one "${r% *}" "${r#* }"; fi
+        done
+        [ "${#pids[@]}" = 0 ] || wait "${pids[@]}"
+        lane_progress_stop "$progress_pid"
         fail=0
         for r in "${runs[@]}"; do
             name="${r% *}"
@@ -257,12 +299,21 @@ test)
             fi
         done
         exit "$fail" ;;
+    aot-census)  # <game-dir> (issue #135): every function on d2d's list given to the recompiler; what it refuses and
+                 # what compiled code still hands to Box86, by cause, weighted by size and by the lane's executed
+                 # bytes (build/m4-prof/*.err, WX86_HOTPROF=1 D2_NOLINK=1, where present); build/aot/census/census.txt
+        [ -n "${2:-}" ] && [ -f "$2/Game.exe" ] || die "test aot-census <game-dir with Game.exe>"
+        RUN_EXTRA=(-v "$(host_path "$(cd "$2" && pwd)/Game.exe"):/aot/Game.exe:ro")
+        hot=()
+        for f in "$ROOT"/build/m4-prof/*.err; do [ -f "$f" ] && hot+=(--hot "build/m4-prof/$(basename "$f")"); done
+        run_in "$HOSTTEST_IMAGE" python3 -I tools/aot/recompile.py /aot/Game.exe --census --modes sig \
+            --out build/aot/census "${hot[@]}" ;;
     aot-explain)  # <game-dir> <va,va,...> (issue #115): why each is left to Box86, with D2_AOT_SET's summaries
         [ -n "${2:-}" ] && [ -f "$2/Game.exe" ] && [ -n "${3:-}" ] || die "test aot-explain <game-dir> <va,...>"
         RUN_EXTRA=(-v "$(host_path "$(cd "$2" && pwd)/Game.exe"):/aot/Game.exe:ro")
         # shellcheck disable=SC2046
         run_in "$HOSTTEST_IMAGE" python3 -I tools/aot/recompile.py /aot/Game.exe --explain "$3" $(aot_args) ;;
-    *)    die "test host | test x86 [golden] | test cpu [armv7|armv6] | test m3 | test report | test governor | test gameexe | test frames | test pad | test pool | test d2d [<game-dir>] | test tls | test m4 <game-dir> | test aot <game-dir> [<save-dir>] | test aot-explain <game-dir> <va,...>" ;;
+    *)    die "test host | test x86 [golden] | test cpu [armv7|armv6] | test m3 | test report | test governor | test gameexe | test frames | test pad | test pool | test d2d [<game-dir>] | test tls | test m4 <game-dir> | test aot <game-dir> [<save-dir>] | test aot-explain <game-dir> <va,...> | test aot-census <game-dir>" ;;
     esac
     ;;
 package)
