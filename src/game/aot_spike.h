@@ -59,6 +59,11 @@ std::vector<std::string> aot_lines();
 // at its hook (resume_original). 0 when there's none, or compiled code is off.
 uint32_t aot_trap_for(uint32_t va);
 
+// A native that does what the game's function at va does, its registers
+// included (the check lane with it: 0 differ): compiled code calls the
+// function's compiled original, not the native.
+void set_aot_equivalent(uint32_t va);
+
 // The same for a native that can call it outright (Sig): the compiled
 // function run in C with regs (the eight general registers, esp at the
 // return address), as natives' guest_call would; false when it can't be

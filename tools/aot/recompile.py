@@ -1533,35 +1533,70 @@ class Emitter:
         if self.mode == "ctx":
             fill = ", ".join(REGS[r] for r in range(8))
             back = " ".join("%s = t.r[%d];" % (REGS[r], r) for r in range(8))
-            return "{ AotRegs t = {{%s}}; %s(&t); %s }" % (fill, self.name(t), back)
+            return "{ AotRegs t = {{%s}}; if (AOT_STALE(%du)) aot_call_stale(0x%08xu, &t); else %s(&t); %s }" % (
+                fill, self.row(t), t, self.name(t), back)
         sig = self.sigs[t]
         args = ", ".join(["esp"] + [REGS[r] for r in sig["in"]])
         outs = sig["out"]
         pops = self.p.summ[t].pops
         tail = " esp += %du;" % (4 + pops) if pops is not None and after else ""
         if not outs:
-            return "%s(%s);%s" % (self.name(t), args, tail)
+            return "%s(%s);%s" % (self.wrap(t), args, tail)
         if len(outs) == 1:
-            return "%s = %s(%s);%s" % (REGS[outs[0]], self.name(t), args, tail)
+            return "%s = %s(%s);%s" % (REGS[outs[0]], self.wrap(t), args, tail)
         if len(outs) == 2:
             return "{ uint64_t t = %s(%s); %s = (uint32_t)t; %s = (uint32_t)(t >> 32); }%s" % (
-                self.name(t), args, REGS[outs[0]], REGS[outs[1]], tail)
+                self.wrap(t), args, REGS[outs[0]], REGS[outs[1]], tail)
         back = " ".join("%s = o[%d];" % (REGS[r], k) for k, r in enumerate(outs))
-        return "{ uint32_t o[%d]; %s(%s, o); %s }%s" % (len(outs), self.name(t), args, back, tail)
+        return "{ uint32_t o[%d]; %s(%s, o); %s }%s" % (len(outs), self.wrap(t), args, back, tail)
 
-    def live(self, t, compiled):
-        """A call to compiled t: its C while the app hasn't found it changed
-        since compiled (a native's hook or patch: aot_stale, issue #115),
-        else the native's (aot_call_stale: its shim in C when it hooks the
-        entry, else Box86's call); the caller stays compiled either way."""
+    def row(self, t):
+        """t's row in the functions' table (aot_stale's index)."""
         if self.index is None:
             self.index = {v: k for k, v in enumerate(sorted(self.compiled))}
-        # Every register back from it, not as the original's summary says:
-        # a native's leftovers in ecx or edx aren't the original's.
-        fill = ", ".join(REGS[r] for r in range(8))
-        back = " ".join("%s = t.r[%d];" % (REGS[r], r) for r in range(8))
-        stale = "{ AotRegs t = {{%s}}; aot_call_stale(0x%08xu, &t); %s }" % (fill, t, back)
-        return "if (AOT_LIVE(%du)) { %s } else %s" % (self.index[t], compiled, stale)
+        return self.index[t]
+
+    def wrap(self, t):
+        """What a compiled caller calls for t (issue #115): t's C, unless the
+        app found t changed since compiled (a native's hook or patch:
+        aot_stale), then the native (stale_, cold, out of the way)."""
+        return "AOT_SYM(call_%08x)" % t
+
+    def wrappers(self, va):
+        """call_ and stale_ for va, before the functions (sig mode): the
+        same signature as va's own, so a call site's registers flow the
+        same either way."""
+        sig = self.sigs[va]
+        params = ["uint32_t esp"] + ["uint32_t %s" % REGS[r] for r in sig["in"]]
+        args = ["esp"] + [REGS[r] for r in sig["in"]]
+        outs = sig["out"]
+        if not outs:
+            ret = "void"
+        elif len(outs) == 1:
+            ret = "uint32_t"
+        elif len(outs) == 2:
+            ret = "uint64_t"
+        else:
+            ret = "void"
+            params.append("uint32_t *o")
+            args.append("o")
+        fill = ", ".join(REGS[r] if (r == ESP or r in sig["in"]) else "0u" for r in range(8))
+        if not outs:
+            back = "return;"
+        elif len(outs) == 1:
+            back = "return t.r[%d];" % outs[0]
+        elif len(outs) == 2:
+            back = "return (uint64_t)t.r[%d] | (uint64_t)t.r[%d] << 32;" % (outs[0], outs[1])
+        else:
+            back = " ".join("o[%d] = t.r[%d];" % (k, r) for k, r in enumerate(outs)) + " return;"
+        stale = ("static AOT_COLD %s AOT_SYM(stale_%08x)(%s)\n{\n    AotRegs t = {{%s}};\n"
+                 "    aot_call_stale(0x%08xu, &t);\n    %s\n}" % (ret, va, ", ".join(params), fill, va, back))
+        ret_kw = "" if ret == "void" else "return "
+        tail = "\n        return;" if ret == "void" else ""
+        call = ("static inline %s AOT_SYM(call_%08x)(%s)\n{\n    if (AOT_STALE(%du)) {\n        %sAOT_SYM(stale_%08x)(%s);%s\n    }\n"
+                "    %s%s(%s);\n}" % (ret, va, ", ".join(params), self.row(va), ret_kw, va, ", ".join(args), tail,
+                                     ret_kw, self.name(va), ", ".join(args)))
+        return stale + "\n" + call
 
     def call_guest(self, t, va):
         """Box86 runs the callee nested; every register through the context."""
@@ -1812,7 +1847,7 @@ class Emitter:
         if t in self.compiled:
             # call_compiled's esp += after the call is dropped: esp is ours to hand back.
             inner = "\n#ifdef AOT_SPLIT\n    %s\n#else\n    %s\n#endif\n    " % (
-                self.call_guest(t, va), self.live(t, self.call_compiled(t, va, after=False)))
+                self.call_guest(t, va), self.call_compiled(t, va, after=False))
         else:
             inner = self.call_guest(t, va)
         if va in f.noreturn:
@@ -1875,7 +1910,7 @@ class Emitter:
             # found by halves among the hooked functions is then one
             # function's own code, not a call between two.
             inner = "\n#ifdef AOT_SPLIT\n    %s\n#else\n    %s\n#endif\n    " % (
-                self.call_guest(t, va), self.live(t, self.call_compiled(t, ra)))
+                self.call_guest(t, va), self.call_compiled(t, ra))
         else:
             inner = self.call_guest(t, va)
         if va in f.noreturn:
@@ -2270,6 +2305,8 @@ def compile_set(img, starts, roots, extra, mode_list, outdir, names=None):
         em = Emitter(prog, compiled, mode, sigs)
         protos = [em.proto(va) + ";" for va in sorted(compiled)]
         chunks += protos + [""]
+        if mode == "sig":
+            chunks += [em.wrappers(va) for va in sorted(compiled)] + [""]
         for va in sorted(compiled):
             f = prog.func(va)
             em.ana = Analysis(prog, f, outs=set(sigs[va]["out"]), save_rule=(mode == "sig"))

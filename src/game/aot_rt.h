@@ -88,10 +88,11 @@ typedef struct {
 extern uint8_t *aot_mem;   /* host address of guest 0 */
 /* By the functions' table's rows (issue #115): 1 when the app found that
  * function changed since compiled (a native's hook or patch). A compiled
- * call to it then goes through Box86 (aot_guest_call), which reaches the
- * native, and its callers stay compiled. */
+ * call to it (call_, recompile.py) then calls the native (aot_call_stale,
+ * from stale_, out of the way), and its callers stay compiled. */
 extern uint8_t aot_stale[];
-#define AOT_LIVE(k) __builtin_expect(!aot_stale[(k)], 1)
+#define AOT_STALE(k) __builtin_expect(aot_stale[(k)], 0)
+#define AOT_COLD __attribute__((cold, noinline))
 
 /* aot_spike.cpp */
 uint32_t aot_fs_base(void);                       /* the running thread's TEB */

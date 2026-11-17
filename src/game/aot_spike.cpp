@@ -294,6 +294,8 @@ bool g_callouts = true;   // D2_AOT_NOCALLOUT (the lane): every callout an exit
 // callout's fallback a nested run, as Box86's own call would be.
 __thread int g_no_exit = 0;
 constexpr size_t kMaxStale = sizeof aot_stale;
+std::set<uint32_t> g_equivalent;   // set_aot_equivalent: natives compiled code may call the originals of
+bool g_stale_calls = true;   // D2_AOT_STALE=0 (the lane): every caller that reaches a changed function to Box86, as before
 uint32_t g_handed = 0;   // natives' hand-backs to compiled code (aot_trap_for), this window
 uint32_t g_handed_direct = 0;   // ... and those run in C (aot_direct)
 uint32_t g_callout_shims = 0, g_callout_fns = 0, g_callout_back = 0;
@@ -662,6 +664,7 @@ void aot_set_native(uint32_t va, AotNativeFn fn)
 }
 
 void set_aot_wanted(AotMode mode) { g_wanted = mode; }
+void set_aot_equivalent(uint32_t va) { g_equivalent.insert(va); }
 void set_aot_min_us(double us) { g_min_us = us; }
 
 uint32_t aot_trap_for(uint32_t va)
@@ -784,6 +787,10 @@ void install_fns(Cpu &c)
     if (!std::getenv("D2_AOT_NODIRECT"))
         rt::set_guest_direct(direct_fn);
     g_callouts = !std::getenv("D2_AOT_NOCALLOUT");
+    {
+        const char *e = std::getenv("D2_AOT_STALE");
+        g_stale_calls = !(e && !std::strcmp(e, "0"));
+    }
     rt::logf("aot: %u of %u compiled functions can be hooked (%u entered in line)%s%s%s", (unsigned)g_fns.size(),
              (unsigned)all, (unsigned)in_line, moved ? " (some had other bytes at their entry)" : "", skipped.empty() ? "" : "; not: ",
              skipped.c_str());
@@ -911,32 +918,43 @@ std::vector<uint8_t> stale_funcs(Cpu &c, uint32_t &changed, std::string &names)
         rt::logf("aot: %u functions compiled, more than aot_stale's %u", (unsigned)n, (unsigned)kMaxStale);
         std::abort();
     }
-    std::vector<uint8_t> bad(n);
+    // bad 1: not hooked (changed, or reaches one that may exit); 2: hooked,
+    // but reaches one compiled code calls the native of, so not in line.
+    std::vector<uint8_t> bad(n), block(n);
     changed = 0;
-    for (size_t k = 0; k < n; k++)
-        if (aot_funcs[k].nranges && code_hash(c, &aot_funcs[k]) != aot_funcs[k].hash) {
-            bad[k] = 1;
-            changed++;
-            if (names.size() < 240)
-                names += std::string(names.empty() ? "" : " ") + aot_funcs[k].name;
-        }
-    // Its compiled callers call Box86 for it from now on (aot_stale: the
-    // native's code, nested), so they stay hooked, but not in line: a
-    // nested run can't start there (bad 2: reaches a changed function).
-    // Not one that may exit, though: what it hands Box86 may wait on another
-    // guest thread, which a nested run can't (0040a960's WaitForSingleObject,
-    // from the fight): every compiled caller that reaches it stays with
-    // Box86 (bad 1), as before.
-    for (size_t k = 0; k < n && k < kMaxStale; k++)
-        aot_stale[k] = bad[k];
+    for (size_t k = 0; k < n; k++) {
+        aot_stale[k] = 0;
+        if (!aot_funcs[k].nranges || code_hash(c, &aot_funcs[k]) == aot_funcs[k].hash)
+            continue;
+        bad[k] = 1;
+        changed++;
+        if (names.size() < 240)
+            names += std::string(names.empty() ? "" : " ") + aot_funcs[k].name;
+        // Else its compiled callers call the native (aot_stale): they stay
+        // hooked, but not in line, a nested run can't start there. Not one
+        // that may exit, though: what it hands Box86 may wait on another
+        // guest thread, which a nested run can't (0040a960's
+        // WaitForSingleObject, from the fight): every compiled caller that
+        // reaches it stays with Box86, as before.
+        // A native that does what its function does, by the check's lane
+        // (set_aot_equivalent): compiled callers call the original's C.
+        if (g_equivalent.count(aot_funcs[k].va))
+            continue;
+        aot_stale[k] = 1;
+        block[k] = aot_funcs[k].may_exit || !g_stale_calls;
+    }
     for (bool more = changed != 0; more;) {
         more = false;
         for (size_t k = 0; k < n; k++)
-            for (uint32_t j = 0; j < aot_funcs[k].ncallees && bad[k] != 1; j++) {
+            for (uint32_t j = 0; j < aot_funcs[k].ncallees; j++) {
                 const uint16_t t = aot_funcs[k].callees[j];
-                const uint8_t b = bad[t] == 1 && (aot_stale[t] ? aot_funcs[t].may_exit : true) ? 1 : bad[t] ? 2 : 0;
-                if (b > bad[k]) {
-                    bad[k] = b;
+                if (block[t] && !block[k]) {
+                    block[k] = 1;
+                    bad[k] = 1;
+                    more = true;
+                }
+                if ((aot_stale[t] || bad[t] == 2) && !bad[k]) {
+                    bad[k] = 2;
                     more = true;
                 }
             }
