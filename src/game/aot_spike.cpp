@@ -295,7 +295,12 @@ bool g_callouts = true;   // D2_AOT_NOCALLOUT (the lane): every callout an exit
 __thread int g_no_exit = 0;
 constexpr size_t kMaxStale = sizeof aot_stale;
 std::set<uint32_t> g_equivalent;   // set_aot_equivalent: natives compiled code may call the originals of
-bool g_stale_calls = true;   // D2_AOT_STALE=0 (the lane): every caller that reaches a changed function to Box86, as before
+// D2_AOT_STALE=1: compiled callers of a changed function call its native
+// (aot_call_stale) and stay hooked. Off by default: on the lane, every
+// caller that reaches one with Box86 did better (Act II 63.7 s against
+// 67.2, fight 54.5 against 58.4): the natives' calls from C cost more than
+// the callers gain.
+bool g_stale_calls = false;
 uint32_t g_handed = 0;   // natives' hand-backs to compiled code (aot_trap_for), this window
 uint32_t g_handed_direct = 0;   // ... and those run in C (aot_direct)
 uint32_t g_callout_shims = 0, g_callout_fns = 0, g_callout_back = 0;
@@ -789,7 +794,7 @@ void install_fns(Cpu &c)
     g_callouts = !std::getenv("D2_AOT_NOCALLOUT");
     {
         const char *e = std::getenv("D2_AOT_STALE");
-        g_stale_calls = !(e && !std::strcmp(e, "0"));
+        g_stale_calls = e && !std::strcmp(e, "1");
     }
     rt::logf("aot: %u of %u compiled functions can be hooked (%u entered in line)%s%s%s", (unsigned)g_fns.size(),
              (unsigned)all, (unsigned)in_line, moved ? " (some had other bytes at their entry)" : "", skipped.empty() ? "" : "; not: ",
