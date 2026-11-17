@@ -1150,14 +1150,22 @@ void aot_call_out(uint32_t x, AotRegs *t, uint32_t pops)
             // shim, then its ret's pops. (The trap's own context restored
             // after: its tail goes on from it.)
             const uint32_t popped = 4u + (sh->stdcall_cleanup ? 4u * sh->argc : 0u);
+            // Only the trap's general registers and eip kept: the FPU's
+            // state is the shim's to leave (compiled code has no x87, and a
+            // float result in st0 is the caller's), flags don't outlive a
+            // call (and reading them makes Box86 compute its deferred ones),
+            // and the full context's 768-byte blob each way cost more than
+            // the call.
             Cpu &c = *g_cpu;
-            d2rt::X86Context saved;
-            c.save_context(saved);
+            uint32_t saved[9];
+            c.regs_gp(saved);
+            saved[8] = c.reg(d2rt::R_EIP);
             for (int k = 0; k < 8; k++)
                 c.set_reg(k, r[k]);
             {   // each shim's first callout, named (the lane)
+                static const d2rt::Shim *last;
                 static std::set<const d2rt::Shim *> seen;
-                if (seen.insert(sh).second)
+                if (sh != last && seen.insert(last = sh).second)
                     rt::logf("aot: callout to %s from %08x", sh->tag.c_str(), ra);
             }
             const uint32_t eax = sh->fn(c);
@@ -1166,7 +1174,9 @@ void aot_call_out(uint32_t x, AotRegs *t, uint32_t pops)
             r[4] += popped;   // the trap's tail: from esp as the shim left it
             const uint32_t rd = rt::bridge().take_redirect();
             const bool yield = rt::bridge().yield_requested();
-            c.load_context(saved);
+            for (int k = 0; k < 8; k++)
+                c.set_reg(k, saved[k]);
+            c.set_reg(d2rt::R_EIP, saved[8]);
             g_callout_shims++;
             if (rd || yield || r[4] != want)
                 call_out_back(x, rd ? rd : ra, r);
