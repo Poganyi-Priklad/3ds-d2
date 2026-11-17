@@ -194,13 +194,14 @@ test)
         out=build/m4-aot
         save="${3:-}"
         mkdir -p "$ROOT/$out"
-        # One build for every script (-j3: the generated C's three objects side by side), then each
+        # One build for every script (AOT_JOBS, 2: two of the generated C's three objects side by side;
+        # three at once ran out of Docker's 7.75 GB, cc1 killed, with this branch's C), then each
         # script in a folder of its own (build/m4-aot/<script>/, the binary shared: run-built). The
         # check's scripts run side by side, each qemu a thread of its own (AOT_PARALLEL=0: one at a
         # time); a timed run (AOT_MODE) one at a time unless AOT_PARALLEL=1, so the runs don't share
         # the host's cores. Each run is cut after AOT_TIMEOUT seconds (3600: side by side, Act II's
         # took over 1800 with another lane on the host).
-        if ! run_in "$HOSTTEST_IMAGE" make -j3 -C tests/m4 host OUT="/work/$out" "${AOT_MAKE[@]}" \
+        if ! run_in "$HOSTTEST_IMAGE" make -j"${AOT_JOBS:-2}" -C tests/m4 host OUT="/work/$out" "${AOT_MAKE[@]}" \
                 ${AOT_SPLIT:+AOT_SPLIT=1} > "$ROOT/$out/make.txt" 2>&1 < /dev/null; then
             echo "RESULT aot.build FAIL (see $out/make.txt)"
             grep -a "error" "$ROOT/$out/make.txt" | head -10 || true
