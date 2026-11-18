@@ -314,6 +314,11 @@ class Func:
             self._walk(starts)
         except Refused as e:
             self.refused = str(e)
+        # What its rets pop and where it tail-jumps, as decoded (issue #138:
+        # exits cut the paths behind them, rets and tails too; a function
+        # whose every ret was cut still pops what they say when it returns).
+        self.ret_pops = frozenset(self.rets.values())
+        self.tail_targets = frozenset(self.tails.values())
 
     def _walk(self, starts):
         img = self.img
@@ -547,7 +552,13 @@ class Program:
         self.img = img
         self.starts = starts
         self.natives = natives          # va -> dict (name, args: [regs], stack, glue)
-        self.intrinsics = intrinsics    # va -> name
+        self.intrinsics = dict(intrinsics)    # va -> name
+        self.frame_consts = {}
+        for va, (name, want) in FRAME_HELPERS.items():   # issue #138: only where the code is what we model
+            got = frame_helper_consts(img, va, want)
+            if got is not None:
+                self.intrinsics[va] = name
+                self.frame_consts[name] = got
         self.garbage = {}               # va -> ecx/edx it leaves as a library call's garbage (Analysis.garbage)
         self.funcs = {}
         self.summ = {}
@@ -596,6 +607,11 @@ class Program:
             name = self.intrinsics[t]
             if name == "alloca_probe":
                 return Summary(reads=(EAX, ECX, ESP), preserved=(ECX, EDX, EBX, EBP, ESI, EDI), pops=0, known=True)
+            if name in ("seh_prolog4", "eh_prolog3_catch"):   # saves ebx, esi, edi and ebp in the frame it builds
+                return Summary(reads=(EBX, EBP, ESI, EDI, ESP) + ((EAX,) if name == "eh_prolog3_catch" else ()),
+                               preserved=(ECX, EDX, EBX, ESI, EDI), pops=None, known=True)
+            if name in ("seh_epilog4", "eh_epilog3"):          # restores them from it
+                return Summary(reads=(EBP, ESP), preserved=(EAX, EDX), pops=None, known=True)
             return Summary(reads=(ESP,), preserved=(EBX, EBP, ESI, EDI), pops=0, known=True)
         s = self.summ.get(t, UNKNOWN)
         if t not in self.compiled:
@@ -715,9 +731,28 @@ class Program:
         for va in vas:
             f = self.func(va)
             pops = set(f.rets.values()) if not f.refused else set()
+            if not pops and f.exits and not f.refused:   # every ret behind an exit (issue #138)
+                pops = set(f.ret_pops)
             self.cfg_pops[va] = pops.pop() if len(pops) == 1 else None
             self.summ[va] = Summary(reads=(), preserved=ALL, pops=self.cfg_pops[va],
                                     known=not f.refused and len(pops) <= 1)
+        # A function with no ret of its own that only tail-jumps (a thunk:
+        # 420290, push ebp; mov ebp, esp; pop ebp; jmp) pops what the
+        # functions it jumps to pop, where they agree (issue #138). Its tail
+        # jumps' esp is checked against that as any tail call's.
+        changed = True
+        while changed:
+            changed = False
+            for va in vas:
+                f = self.func(va)
+                if self.cfg_pops[va] is not None or f.refused or f.ret_pops or not f.tail_targets or \
+                        va in self.noreturn_funcs:
+                    continue
+                ps = {self.cfg_pops.get(t) if isinstance(t, int) else None for t in f.tail_targets}
+                if len(ps) == 1 and None not in ps:
+                    self.cfg_pops[va] = ps.pop()
+                    self.summ[va] = Summary(reads=(), preserved=ALL, pops=self.cfg_pops[va], known=True)
+                    changed = True
         # A worklist, callees first (issue #115): a function is analysed again
         # only when the summary of one it calls changed.
         vas = list(vas)
@@ -811,6 +846,8 @@ class Analysis:
         tail_states = []   # a jmp to another function: an exit through it (issue #115)
         visited = collections.Counter()
         esp_conflict = set()   # where two paths brought different known esps: not known, for good
+        self.esp_lost = {}     # va -> why esp stopped being known there (issue #138: the census's causes)
+        self.esp_conflict = esp_conflict
         while work:
             b = work.pop()
             regs, slots = states[b]
@@ -825,7 +862,10 @@ class Analysis:
                 self.sp_at[va] = sp[1] if sp and sp[0] == "sp" else None
                 if va in f.calls or b != f.entry:
                     self._prologue = False
+                before = regs[ESP]
                 self._step(i, regs, slots)
+                if before is not None and regs[ESP] is None:
+                    self.esp_lost.setdefault(va, self._esp_cause(i, before))
                 if va in f.rets:
                     ret_states.append((va, dict(regs)))
                 if va in f.tails and va not in f.exits:
@@ -873,6 +913,7 @@ class Analysis:
         # esp_ok: every ret pops what it says from the entry's esp, so a caller
         # knows esp after the call without asking (what a compiled callee needs).
         self.esp_ok = all(regs[ESP] == ("sp", 0) for _, regs in ret_states)
+        self.ret_states = ret_states
         # Registers that at some ret may hold a library call's garbage: no
         # value of the function's then, by MSVC's ABI (issue #115: one path's
         # memset leftovers made ecx an out, and the check compared them).
@@ -983,6 +1024,9 @@ class Analysis:
             self.const_eax_at[i.address] = regs[EAX]
             if i.address in self.f.noreturn:
                 return
+            if t in p.intrinsics and p.intrinsics[t] in FRAME_NAMES:
+                self._frame_helper(p.intrinsics[t], i, regs, slots)
+                return
             if t in p.intrinsics and p.intrinsics[t] == "alloca_probe":
                 n = regs[EAX]
                 if not n or n[0] != "k":
@@ -1082,6 +1126,90 @@ class Analysis:
             if op.type == X.X86_OP_MEM and (op.access & capstone.CS_AC_WRITE):
                 self._kill_mem(i, op, regs, slots)
 
+    def _frame_helper(self, name, i, regs, slots):
+        """A call to one of the CRT's frame helpers (issue #138, FRAME_HELPERS),
+        esp at the call s (before it pushes its return address)."""
+        s = regs[ESP][1]
+        ra = ("k", i.address + i.size)
+        if name.endswith("prolog4") or name == "eh_prolog3_catch":
+            seh = name == "seh_prolog4"
+            fp = s + 4 if seh else s           # the caller's new ebp: the slot of its pushed size (seh) or of it (eh)
+            n = slots.get(fp if seh else s)
+            saved = {EBX: regs[EBX], ESI: regs[ESI], EDI: regs[EDI]}
+            old_ebp = regs[EBP]
+            for k in list(slots):
+                if k <= fp:
+                    del slots[k]
+            regs[EBP] = ("sp", fp)
+            regs[EAX] = ("sp", s - 12)
+            slots[fp] = old_ebp
+            if not n or n[0] != "k" or n[1] >= 0x10000000:
+                regs[ESP] = None
+                slots.clear()
+                return
+            e = s - 12 - n[1]
+            slots[e - 4], slots[e - 8], slots[e - 12] = saved[EBX], saved[ESI], saved[EDI]
+            regs[ESP] = ("sp", e - 16)
+            return
+        # An epilog: the registers from the frame, esp the frame's top.
+        fp = regs[EBP]
+        regs[ECX] = ra
+        for r, k in ((EDI, 4), (ESI, 8), (EBX, 12)):
+            regs[r] = slots.get(s + k)
+        if not fp or fp[0] != "sp":
+            regs[EBP] = regs[ESP] = None
+            slots.clear()
+            return
+        regs[EBP] = slots.get(fp[1])
+        regs[ESP] = ("sp", fp[1] + 4)
+        for k in list(slots):
+            if k < fp[1] + 4:
+                del slots[k]
+
+    def _esp_cause(self, i, before):
+        """Why an instruction made esp not known (issue #138)."""
+        m = i.mnemonic
+        p = self.p
+        if m != "call":
+            if m == "leave" or (m == "mov" and i.operands[1].type == X.X86_OP_REG):
+                return "%s from a register not known as a frame address" % m
+            return "%s of esp" % m
+        t = self.f.calls[i.address]
+        if t is None:
+            return "an indirect call whose pops aren't known"
+        if isinstance(t, tuple):
+            return "an import whose pops aren't known (%s)" % t[1]
+        if t in p.intrinsics:
+            return "%s of a size not known" % p.intrinsics[t]
+        g = p.func(t)
+        if g.refused:
+            return "a call to a function the decoder refuses"
+        if len(set(g.rets.values())) > 1:
+            return "a call to a function whose rets pop different amounts"
+        if t in getattr(p, "why", {}):
+            return "a call to a function whose own analysis refuses: " + p.why[t]
+        s = p.summ.get(t)
+        if s is not None and s.known and s.pops is None and getattr(p, "cfg_pops", {}).get(t) is not None:
+            return "a call to a helper that moves its caller's frame"
+        if not g.rets:
+            return "a call to a function with no ret"
+        return "a call to a function whose pops aren't known"
+
+    def esp_why(self):
+        """Why esp isn't the entry's at a ret (issue #138): the first cause
+        on the way, a merge of two different esps, or a ret that pops another
+        amount."""
+        for va, regs in self.ret_states:
+            v = regs[ESP]
+            if v is not None and v != ("sp", 0):
+                return "esp at the ret at %08x is the entry's %+d" % (va, v[1])
+        if self.esp_lost:
+            va = min(self.esp_lost)
+            return "%s at %08x" % (self.esp_lost[va], va)
+        if self.esp_conflict:
+            return "two paths bring different esps to %08x" % min(self.esp_conflict)
+        return "no cause found"
+
     def _step_nosp(self, i, regs, slots):
         """esp not known: registers only. `mov esp, ebp` or `leave` can make
         it known again."""
@@ -1101,7 +1229,14 @@ class Analysis:
         if m == "call":
             if i.address in self.f.noreturn:
                 return
-            s = self._callee(self.f.calls[i.address])
+            t = self.f.calls[i.address]
+            if t in self.p.intrinsics and self.p.intrinsics[t] in ("seh_epilog4", "eh_epilog3"):
+                v = regs[EBP]
+                regs[ECX] = ("k", i.address + i.size)
+                regs[EBX] = regs[ESI] = regs[EDI] = regs[EBP] = None
+                regs[ESP] = ("sp", v[1] + 4) if v and v[0] == "sp" else None
+                return
+            s = self._callee(t)
             for r in range(8):
                 if r not in s.preserved:
                     regs[r] = None
@@ -1884,6 +2019,31 @@ class Emitter:
             ret = " ".join("o[%d] = %s;" % (k, REGS[r]) for k, r in enumerate(outs)) + " return;"
         return chk + inner + " " + ret
 
+    def frame_helper(self, name, ra):
+        """The CRT's frame helpers in line (issue #138, FRAME_HELPERS): the
+        same stores, in the same places, as their code; fs:[0] the SEH chain."""
+        k = self.p.frame_consts[name] if name in self.p.frame_consts else {}
+        fs0 = "(uint32_t)(aot_fs_base() + 0x0u)"
+        if name == "seh_prolog4":
+            return ("{ uint32_t s = esp, n = LD32(s + 4u), e; ST32(s - 4u, 0x%08xu); ST32(s - 8u, 0x%08xu); "
+                    "ST32(s - 12u, LD32(%s)); ST32(s + 4u, ebp); ebp = s + 4u; e = s - 12u - n; "
+                    "ST32(e - 4u, ebx); ST32(e - 8u, esi); ST32(e - 12u, edi); "
+                    "{ uint32_t c = LD32(0x%08xu); ST32(ebp - 4u, LD32(ebp - 4u) ^ c); ST32(e - 16u, c ^ ebp); } "
+                    "esp = e - 16u; ST32(ebp - 0x18u, esp); ST32(esp - 4u, LD32(ebp - 8u)); "
+                    "ST32(ebp - 8u, LD32(ebp - 4u)); ST32(ebp - 4u, 0xfffffffeu); eax = ebp - 0x10u; "
+                    "ST32(%s, eax); }" % (ra, k["h"], fs0, k["c"], fs0))
+        if name == "eh_prolog3_catch":
+            return ("{ uint32_t s = esp, n = LD32(s), e; ST32(s - 4u, 0x%08xu); ST32(s - 8u, eax); "
+                    "ST32(s - 12u, LD32(%s)); e = s - 12u - n; "
+                    "ST32(e - 4u, ebx); ST32(e - 8u, esi); ST32(e - 12u, edi); ST32(s, ebp); ebp = s; "
+                    "ST32(e - 16u, LD32(0x%08xu) ^ ebp); esp = e - 16u; ST32(ebp - 0x10u, esp); "
+                    "ST32(esp - 4u, LD32(ebp - 4u)); ST32(ebp - 4u, 0xffffffffu); eax = ebp - 0xcu; "
+                    "ST32(%s, eax); }" % (ra, fs0, k["c"], fs0))
+        off = 0x10 if name == "seh_epilog4" else 0xc
+        return ("{ uint32_t s = esp, f = ebp; ST32(s - 4u, 0x%08xu); ST32(%s, LD32(f - 0x%xu)); ecx = 0x%08xu; "
+                "edi = LD32(s + 4u); esi = LD32(s + 8u); ebx = LD32(s + 12u); ebp = LD32(f); ST32(f, ecx); "
+                "esp = f + 4u; }" % (ra, fs0, off, ra))
+
     def call(self, i):
         va = i.address
         f, p = self.f, self.p
@@ -1915,6 +2075,8 @@ class Emitter:
             if name == "alloca_probe":
                 return push + "ST32(esp - 4u, ecx); ST32(esp - eax, 0x%08xu); esp = esp - eax + 4u; " \
                               "eax = 0x%08xu;" % (ra, ra)
+            if name in FRAME_NAMES:
+                return self.frame_helper(name, ra)
             raise Refused("intrinsic %s" % name)
         if isinstance(t, tuple) or t is None:
             raise Refused("an import or indirect call at %08x" % va)
@@ -1955,6 +2117,49 @@ NATIVES = {  # our natives the spike's code calls in C (src/game/d2_native.cpp, 
                  "reads": [ESI], "handback": True},
 }
 INTRINSICS = {0x00681ef0: "memset", 0x006829c0: "memcpy", 0x006831b0: "alloca_probe"}
+
+# The CRT's frame helpers (issue #138): they build or tear down their
+# caller's SEH or C++ EH frame, so esp after the call is the caller's frame,
+# not what a ret pops. Compiled in line (Emitter.frame_helper, modelled in
+# Analysis._frame_helper), each only where its code is this, instruction by
+# instruction; {h} is the handler, {c} the security cookie's address.
+_EPILOG = ["mov ecx, dword ptr [ebp - {off}]", "mov dword ptr fs:[0], ecx", "pop ecx", "pop edi", "pop edi",
+           "pop esi", "pop ebx", "mov esp, ebp", "pop ebp", "push ecx", "ret "]
+FRAME_NAMES = ("seh_prolog4", "seh_epilog4", "eh_prolog3_catch", "eh_epilog3")
+FRAME_HELPERS = {
+    0x00687fb0: ("seh_prolog4", [
+        "push {h}", "push dword ptr fs:[0]", "mov eax, dword ptr [esp + 0x10]", "mov dword ptr [esp + 0x10], ebp",
+        "lea ebp, [esp + 0x10]", "sub esp, eax", "push ebx", "push esi", "push edi", "mov eax, dword ptr [{c}]",
+        "xor dword ptr [ebp - 4], eax", "xor eax, ebp", "push eax", "mov dword ptr [ebp - 0x18], esp",
+        "push dword ptr [ebp - 8]", "mov eax, dword ptr [ebp - 4]", "mov dword ptr [ebp - 4], 0xfffffffe",
+        "mov dword ptr [ebp - 8], eax", "lea eax, [ebp - 0x10]", "mov dword ptr fs:[0], eax", "ret "]),
+    0x00687ff5: ("seh_epilog4", [x.replace("{off}", "0x10") for x in _EPILOG]),
+    0x0069d4df: ("eh_prolog3_catch", [
+        "push eax", "push dword ptr fs:[0]", "lea eax, [esp + 0xc]", "sub esp, dword ptr [esp + 0xc]", "push ebx",
+        "push esi", "push edi", "mov dword ptr [eax], ebp", "mov ebp, eax", "mov eax, dword ptr [{c}]",
+        "xor eax, ebp", "push eax", "mov dword ptr [ebp - 0x10], esp", "push dword ptr [ebp - 4]",
+        "mov dword ptr [ebp - 4], 0xffffffff", "lea eax, [ebp - 0xc]", "mov dword ptr fs:[0], eax", "ret "]),
+    0x0069d584: ("eh_epilog3", [x.replace("{off}", "0xc") for x in _EPILOG]),
+}
+
+
+def frame_helper_consts(img, va, want):
+    """{h: handler, c: cookie address} where the code at va is want, else None."""
+    got = {}
+    try:
+        for w in want:
+            i = img.insn(va)
+            text = "%s %s" % (i.mnemonic, i.op_str)
+            pat = "^" + re.escape(w).replace(re.escape("{h}"), "(?P<h>0x[0-9a-f]+)").replace(
+                re.escape("{c}"), "(?P<c>0x[0-9a-f]+)") + "$"
+            m = re.match(pat, text)
+            if not m:
+                return None
+            got.update({k: int(v, 16) for k, v in m.groupdict().items()})
+            va += i.size
+    except Exception:
+        return None
+    return got
 
 
 def load_starts(img, tsv):
@@ -2225,9 +2430,19 @@ def compile_set(img, starts, roots, extra, mode_list, outdir, names=None, keep=N
             try:
                 a = Analysis(prog, prog.func(va), outs={EAX, ECX, EDX, EBX, EBP, ESI, EDI}, save_rule=True)
                 if not a.esp_ok:
-                    raise Refused("esp at a ret isn't known to be the entry's")
+                    raise Refused("esp at a ret isn't known to be the entry's: " + a.esp_why())
                 Flags(prog.func(va))
                 garbage[va] = a.garbage
+                # Made plain (attempt 1): its summary was made with its
+                # callouts' guessed pops, which may have moved esp at its ret
+                # (its pops lost) or lost a callee-saved register; its
+                # callers, screened next, need it as summarize would make it
+                # now (issue #138: 688b46's TlsGetValue, taken to pop 8,
+                # cost 688bb4; 405c30 lost ebp the same way).
+                if attempt:
+                    s2 = Analysis(prog, prog.func(va), save_rule=True)
+                    prog.summ[va] = Summary(s2.live_in, s2.preserved,
+                                            None if s2.esp_moved else prog.cfg_pops.get(va), True)
                 break
             except Refused as e:
                 if attempt == 0 and str(e).startswith("esp at a ret") and prog.make_plain(va):
@@ -2295,7 +2510,7 @@ def compile_set(img, starts, roots, extra, mode_list, outdir, names=None, keep=N
                     try:
                         a = Analysis(prog, f, outs=outs[va], save_rule=True)
                         if not a.esp_ok:
-                            raise Refused("esp at a ret isn't known to be the entry's")
+                            raise Refused("esp at a ret isn't known to be the entry's: " + a.esp_why())
                         Flags(f)
                     except Refused as e:
                         if any(isinstance(t, int) and t in hit for t in list(f.calls.values()) + list(f.tails.values())):
@@ -2534,6 +2749,7 @@ def refusal_kind(reason):
     r = re.sub(r"^\S+ reads flags", "an instruction reads flags", r)
     r = re.sub(r"tail call at X: pops .*", "tail call at X: pops differ from the target's", r)
     r = re.sub(r"^its flags are read after the call at X", "its flags are read after a call to it", r)
+    r = re.sub(r"is the entry's [+-]\d+$", "is the entry's +n", r)
     return r.replace(" at X", "").replace(" (X)", "")
 
 
