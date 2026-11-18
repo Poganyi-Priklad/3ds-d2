@@ -394,6 +394,47 @@ That's 4–5% more frames over the walk with the code on, and 7% once it settles
 
 The code on doesn't shrink what Box86 translates much: after the same walk, 7.36 MiB of blocks with it on against 7.76 off, in 8 MiB of chunks either way (14 MiB pool). Box86 still translates the code around the compiled functions, and the functions it runs again when the probe drops them. So the pool stays at 14 MiB: nothing measured supports a smaller one.
 
+## The whole list, census (#135)
+
+`scripts/docker.sh test aot-census <game-dir>` gives the recompiler every function on d2d's list (13,048, 2,600,618 x86 bytes) and writes `build/aot/census/census.txt` (and `.json`): what it refuses, by first cause; the instruction kinds present; and what the compiled code still hands to Box86, by kind. Each line is weighted by function count, by bytes, and by the lane's executed bytes (`build/m4-prof/*.err`, the Box86 lane's `WX86_HOTPROF=1 D2_NOLINK=1` profile of town-walk, fight and Act II). The hot share of an exit or a nested call is that of the functions holding such sites. A run takes about 16 minutes and up to 5 GB.
+
+**Compiled:** 11,673 functions (89.5%), 2,321,656 bytes (89.3%), 93.4% of the lane's hot bytes (`669c497`, d2d `f1533770`). 8,784 of them may hand a call to Box86 (their own exits or a compiled callee's).
+
+**Refused (1,375), the main causes:**
+
+| Cause | Functions | Bytes | Hot |
+| --- | --- | --- | --- |
+| esp at a ret not known to be the entry's | 652 | 148,930 (5.7%) | 3.3% |
+| x87 (fild, fld, fldz, fstp, fmul, fabs, ...) | 155 | 51,156 (2.0%) | 1.0% |
+| a tail call whose pops differ from the target's | 301 | 21,737 (0.8%) | 0.5% |
+| an indirect jump that isn't a bounded switch | 155 | 4,865 (0.2%) | 0.2% |
+| switches the guard rule doesn't bound, or tables over code | 28 | 28,691 (1.1%) | 0.0% |
+| `rep ret` (`__security_check_cookie`; compiled since `52e8692`) | 1 | 15 | 0.1% |
+| the rest: the C runtime's SSE2, `rcr`, `shrd`, `cpuid`, `rdtsc`, `stmxcsr`, segment moves, flag reads, 8- and 16-bit `imul` | 83 | 23,568 (0.9%) | 0.0% |
+
+**Instruction kinds present** (whether or not they were the first cause): x87 in 206 functions (2.6% of the bytes, 1.0% of the hot bytes), `rep` strings in 286 (5.3%, 0.7%; compiled), `fs:` in 83 (0.8%; compiled), `cpuid`, `rdtsc` and `in` in 7.
+
+**What compiled code still hands to Box86:**
+
+| Kind | Sites | Functions | Hot |
+| --- | --- | --- | --- |
+| an import, as a callout (the shim in C) | 1,968 | 896 | 8.4% |
+| an import, as a plain exit | 68 | 65 | 2.1% |
+| an indirect call, as a callout | 1,757 | 731 | 5.9% |
+| an indirect call, as a plain exit | 1,523 | 461 | 2.5% |
+| a call to a function left to Box86 that may block | 1,814 | 1,340 | 6.7% |
+| a nested run: the error paths and exit (408090, 408a60, 681e09; they don't return) | 1,726 | 1,723 | (callers' 39.2%) |
+| a nested run: a refused callee (`__security_check_cookie` 625 sites, compiled since `52e8692`; the others 768) | 1,393 | | 2.5% |
+
+The imports are 271 functions: 268 have a shim in our runtime or winx86. The three without are `ijl11.dll`'s ordinals (the JPEG library). The most called: `EnterCriticalSection` and `LeaveCriticalSection` (695 sites), `GetTickCount` (192), `wsprintfA` (104), `IsBadCodePtr` (72), `CloseHandle` (46).
+
+**What it says for #111's stages:**
+- **x87 (#136) is small:** 206 functions, 1% of the hot bytes. Few of them are in the game's frame (the hottest, 4623c0 at 0.5%).
+- **The stack (#138's entries):** the largest refusal is esp not known at a ret (652 functions, 3.3% hot; why, function by function, is still to be split: `test aot-explain`), then tail calls whose pops differ (301). Indirect jumps that aren't switches are 155 small functions.
+- **Indirect calls (#138):** 3,280 sites in 1,192 functions. Without Box86 every one needs its targets compiled and found in C.
+- **Blocking (#137):** 1,814 calls to functions left to Box86 that may block, and the shims that block (critical sections, `WaitForSingleObject`, `Sleep`).
+- **The error paths** run nested today. They never return, so they cost nothing in a frame, but a build without Box86 has to compile them too.
+
 ## Open questions
 
 - **Is the gain there?** Yes, on the console: about 5× Box86 on A* and 3–4.7× on CofParams (#113). The lane's qemu showed 4.1× and 1.6×. What a full build gains depends on how much of a frame's code it covers (#115), and on its calls to code it doesn't compile going through the target table rather than a nested run.
