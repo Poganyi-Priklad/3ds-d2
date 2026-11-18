@@ -43,12 +43,13 @@ $(LIB): FORCE
 AOT ?=
 AOTCC := arm-linux-gnueabi-gcc -std=gnu17 -O2 -g $(ARCH) -I$(ROOT)/src -w $(AOTFLAGS)
 ifneq ($(AOT),)
-AOTOBJ := $(OUT)/aot/aot.o $(OUT)/aot/aotn.o
+AOTSRC := $(sort $(wildcard $(AOT)/aot_spike*.c))   # the tables and the functions' parts (issue #135)
+AOTOBJ := $(foreach v,d n,$(patsubst $(AOT)/%.c,$(OUT)/aot/$(v)/%.o,$(AOTSRC)))
 AOTDEF := -DD2_AOT_CASES
 endif
-$(OUT)/aot/aot.o: $(AOT)/aot_spike.c $(ROOT)/src/game/aot_rt.h
+$(OUT)/aot/d/%.o: $(AOT)/%.c $(ROOT)/src/game/aot_rt.h
 	@mkdir -p $(@D); $(AOTCC) -c $< -o $@
-$(OUT)/aot/aotn.o: $(AOT)/aot_spike.c $(ROOT)/src/game/aot_rt.h
+$(OUT)/aot/n/%.o: $(AOT)/%.c $(ROOT)/src/game/aot_rt.h
 	@mkdir -p $(@D); $(AOTCC) -DAOT_NOINLINE -c $< -o $@
 $(OUT)/aot.cfg: FORCE
 	@mkdir -p $(@D); echo '$(AOT)' | cmp -s - $@ || echo '$(AOT)' > $@

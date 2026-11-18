@@ -84,17 +84,21 @@ GAMEOBJ := $(CPUOBJ) $(addprefix $(OUT)/rt/,$(RTFULL:.cpp=.o)) $(addprefix $(OUT
 # aot.cfg relinks the app when it comes or goes.
 AOT ?=
 ifneq ($(AOT),)
-AOTOBJ := $(OUT)/aot/aot.o $(OUT)/aot/aotn.o
+AOTSRC := $(sort $(wildcard $(AOT)/aot_spike*.c))   # the tables and the functions' parts (issue #135)
+AOTOBJ := $(foreach v,d n,$(patsubst $(AOT)/%.c,$(OUT)/aot/$(v)/%.o,$(AOTSRC)))
 GAMEOBJ += $(AOTOBJ)
 endif
-$(OUT)/aot/aot.o: $(AOT)/aot_spike.c $(ROOT)/src/game/aot_rt.h
+$(OUT)/aot/d/%.o: $(AOT)/%.c $(ROOT)/src/game/aot_rt.h
 	@mkdir -p $(@D); $(CC) -O2 -g $(ARCH) -std=gnu17 -I$(ROOT)/src -w -c $< -o $@
-$(OUT)/aot/aotn.o: $(AOT)/aot_spike.c $(ROOT)/src/game/aot_rt.h
+$(OUT)/aot/n/%.o: $(AOT)/%.c $(ROOT)/src/game/aot_rt.h
 	@mkdir -p $(@D); $(CC) -O2 -g $(ARCH) -std=gnu17 -I$(ROOT)/src -w -DAOT_NOINLINE -c $< -o $@
 $(OUT)/aot.cfg: FORCE
 	@mkdir -p $(@D); echo '$(AOT)' | cmp -s - $@ || echo '$(AOT)' > $@
+# The AOT objects alone (scripts/docker.sh builds them first at AOT_JOBS:
+# each part takes gcc about 1 GB, too many for the app's -j8).
+aot-objs: $(AOTOBJ)
 
-.PHONY: all clean FORCE
+.PHONY: all clean FORCE aot-objs
 
 # The compile flags: when they change (PROF_COUNTERS joining every build),
 # every object is built again instead of old and new ones linked together.

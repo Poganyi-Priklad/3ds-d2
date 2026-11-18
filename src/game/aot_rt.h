@@ -12,7 +12,9 @@
  * kind and width, constant at compile time, so gcc folds it into a
  * compare.
  *
- * One generated file is compiled several times (the build's AOT_VARIANT):
+ * The generated files (aot_spike.c, the tables; aot_spike_NN.c, the
+ * functions, issue #135) are each compiled several times (the build's
+ * AOT_VARIANT):
  *   default: aot_* symbols;
  *   AOT_JOURNAL: aotj_*, every store journaled first (the check mode);
  *   AOT_NOINLINE: aotn_*, no compiled function inlined into another, so
@@ -129,10 +131,13 @@ uint64_t aot_native_64d4e0(uint32_t esi, uint32_t room, uint32_t x, uint32_t y);
 #define AOT_SYM(x) aot_##x
 #define AOT_STORE_HOOK(a, n) ((void)0)
 #endif
+/* Not static (issue #135): the functions are split over several files
+ * (aot_spike_NN.c), and a call may go from one to another. Hidden, so the
+ * three builds' symbols (AOT_SYM) stay inside the binary. */
 #ifdef AOT_NOINLINE
-#define AOT_FN static __attribute__((noinline))
+#define AOT_FN __attribute__((visibility("hidden"), noinline))
 #else
-#define AOT_FN static
+#define AOT_FN __attribute__((visibility("hidden")))
 #endif
 
 #define AOT_INL static inline __attribute__((always_inline))

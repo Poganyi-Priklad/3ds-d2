@@ -44,7 +44,8 @@ AOT_SPLIT ?=
 AOTDIR := $(BIN_OUT)/aot$(if $(AOT_SPLIT),-split)
 ifneq ($(AOT),)
 HOST   := $(HOST)_aot$(if $(AOT_SPLIT),_split)
-AOTOBJ := $(AOTDIR)/aot.o $(AOTDIR)/aotn.o $(AOTDIR)/aotj.o
+AOTSRC := $(sort $(wildcard $(AOT)/aot_spike*.c))   # the tables and the functions' parts (issue #135)
+AOTOBJ := $(foreach v,d n j,$(patsubst $(AOT)/%.c,$(AOTDIR)/$(v)/%.o,$(AOTSRC)))
 endif
 AOTCC := arm-linux-gnueabi-gcc -std=gnu17 -O2 -g $(ARCH) -I$(ROOT)/src -w $(if $(AOT_SPLIT),-DAOT_SPLIT)
 GAME  ?= /game
@@ -82,11 +83,11 @@ $(W)/build-arm/libwinx86_prof.a: $(W)/build-arm/libwinx86.a FORCE
 	cd $(W) && TARGET=armv6 LIBTAG=_prof EXTRA=-DPROF_COUNTERS bash build.sh > $(abspath $(OUT))/lib-prof-build.log 2>&1 \
 	  || (grep -E 'error|Error' $(abspath $(OUT))/lib-prof-build.log | head -40; exit 1)
 
-$(AOTDIR)/aot.o: $(AOT)/aot_spike.c $(ROOT)/src/game/aot_rt.h
+$(AOTDIR)/d/%.o: $(AOT)/%.c $(ROOT)/src/game/aot_rt.h
 	@mkdir -p $(@D); $(AOTCC) -c $< -o $@
-$(AOTDIR)/aotn.o: $(AOT)/aot_spike.c $(ROOT)/src/game/aot_rt.h
+$(AOTDIR)/n/%.o: $(AOT)/%.c $(ROOT)/src/game/aot_rt.h
 	@mkdir -p $(@D); $(AOTCC) -DAOT_NOINLINE -c $< -o $@
-$(AOTDIR)/aotj.o: $(AOT)/aot_spike.c $(ROOT)/src/game/aot_rt.h
+$(AOTDIR)/j/%.o: $(AOT)/%.c $(ROOT)/src/game/aot_rt.h
 	@mkdir -p $(@D); $(AOTCC) -DAOT_JOURNAL -c $< -o $@
 
 $(HOST): $(SRCS) png.h $(wildcard $(ROOT)/src/runtime/rt_*.h) $(wildcard $(ROOT)/src/game/*.h) \

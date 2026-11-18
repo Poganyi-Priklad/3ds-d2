@@ -125,7 +125,8 @@ aot_prepare() {
     esac
     local game; game="$(cd "$1" && pwd)"
     local saved=(${RUN_EXTRA[@]+"${RUN_EXTRA[@]}"})
-    RUN_EXTRA=(-v "$(host_path "$game/Game.exe"):/aot/Game.exe:ro")
+    # AOT_PART_MB (issue #135): the most C in one of the functions' files (8; a big one takes gcc GBs).
+    RUN_EXTRA=(-v "$(host_path "$game/Game.exe"):/aot/Game.exe:ro" -e "AOT_PART_MB=${AOT_PART_MB:-8}")
     # shellcheck disable=SC2046
     run_in "$HOSTTEST_IMAGE" python3 -I tools/aot/recompile.py /aot/Game.exe --out build/aot/spike \
         $(aot_args)
@@ -228,8 +229,8 @@ test)
         out=build/m4-aot
         save="${3:-}"
         mkdir -p "$ROOT/$out"
-        # One build for every script (AOT_JOBS, 2: two of the generated C's three objects side by side;
-        # three at once ran out of Docker's 7.75 GB, cc1 killed, with this branch's C), then each
+        # One build for every script (AOT_JOBS, 2: two of the generated C's objects side by side; the C is
+        # in parts of AOT_PART_MB, issue #135, after one 44 MB file at -j2 ran out of Docker's 8 GB), then each
         # script in a folder of its own (build/m4-aot/<script>/, the binary shared: run-built). The
         # check's scripts run side by side, each qemu a thread of its own (AOT_PARALLEL=0: one at a
         # time); a timed run (AOT_MODE) one at a time unless AOT_PARALLEL=1, so the runs don't share
@@ -380,6 +381,8 @@ package-cia)   # [<game-dir> | --slim|--full <game-dir>]: the game app (+ the us
     [ ${#AOT_MAKE[@]} -gt 0 ] && bid="$bid-aot$(cat "$ROOT/tools/aot/recompile.py" "$(aot_args_file)" | sha256sum | cut -c1-6)"
     report_vars=(BUILD_ID="$bid" D2_VERSION="$version" ${AOT_MAKE[@]+"${AOT_MAKE[@]}"})
     [ -n "${D2_REPORT_DSN+x}" ] && report_vars+=(D2_REPORT_DSN="$D2_REPORT_DSN")
+    # The AOT parts first, AOT_JOBS at a time (2; issue #135: at -j8 cc1 ran out of Docker's 8 GB).
+    [ ${#AOT_MAKE[@]} -gt 0 ] && run_in "$TOOLCHAIN_IMAGE" make -s -j"${AOT_JOBS:-2}" -C tests/cpu/ctr "${report_vars[@]}" aot-objs
     run_in "$TOOLCHAIN_IMAGE" make -s -j8 -C tests/cpu/ctr "${report_vars[@]}" ../../../build/cpu/ctr/3ds-d2-game-cia.elf ../../../build/cpu/ctr/tls.bin
     RUN_EXTRA=("${saved_extra[@]}" -e "D2_VERSION=$version" -e "D2_BUILD_ID=$bid")   # the CIA's name
     if [ -n "$art" ]; then   # the icon, banner model and tune (packaging/cia/game_art.py)
