@@ -2433,6 +2433,16 @@ def compile_set(img, starts, roots, extra, mode_list, outdir, names=None, keep=N
                     raise Refused("esp at a ret isn't known to be the entry's: " + a.esp_why())
                 Flags(prog.func(va))
                 garbage[va] = a.garbage
+                # Made plain (attempt 1): its summary was made with its
+                # callouts' guessed pops, which may have moved esp at its ret
+                # (its pops lost) or lost a callee-saved register; its
+                # callers, screened next, need it as summarize would make it
+                # now (issue #138: 688b46's TlsGetValue, taken to pop 8,
+                # cost 688bb4; 405c30 lost ebp the same way).
+                if attempt:
+                    s2 = Analysis(prog, prog.func(va), save_rule=True)
+                    prog.summ[va] = Summary(s2.live_in, s2.preserved,
+                                            None if s2.esp_moved else prog.cfg_pops.get(va), True)
                 break
             except Refused as e:
                 if attempt == 0 and str(e).startswith("esp at a ret") and prog.make_plain(va):
