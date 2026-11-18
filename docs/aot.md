@@ -430,10 +430,35 @@ The imports are 271 functions: 268 have a shim in our runtime or winx86. The thr
 
 **What it says for #111's stages:**
 - **x87 (#136) is small:** 206 functions, 1% of the hot bytes. Few of them are in the game's frame (the hottest, 4623c0 at 0.5%).
-- **The stack (#138's entries):** the largest refusal is esp not known at a ret (652 functions, 3.3% hot; why, function by function, is still to be split: `test aot-explain`), then tail calls whose pops differ (301). Indirect jumps that aren't switches are 155 small functions.
+- **The stack (#138's entries):** the largest refusal was esp not known at a ret (652 functions, 3.3% hot), then tail calls whose pops differ (301). Both are now nearly gone (below). Indirect jumps that aren't switches are 155 small functions.
 - **Indirect calls (#138):** 3,280 sites in 1,192 functions. Without Box86 every one needs its targets compiled and found in C.
 - **Blocking (#137):** 1,814 calls to functions left to Box86 that may block, and the shims that block (critical sections, `WaitForSingleObject`, `Sleep`).
 - **The error paths** run nested today. They never return, so they cost nothing in a frame, but a build without Box86 has to compile them too.
+
+### After #138's stack fixes
+
+A refusal for esp now names its cause (the first instruction or call where esp stopped being known, two paths bringing different esps, or a ret popping another amount), so `census.txt` splits it. Most of the 652 were not the functions' own code:
+- **Rets cut with their paths (408 functions):** an exit ends the compiled code's path, and with it the rets behind it. A function whose every ret was behind an exit lost its pops, and every caller lost esp. It now pops what its rets decode with.
+- **Thunks:** a function with no ret of its own that only tail-jumps (420290: `push ebp; mov ebp, esp; pop ebp; jmp`) pops what its targets pop where they agree. This also took away nearly all of the 301 tail calls whose pops differed.
+- **The CRT's frame helpers:** `__SEH_prolog4`, `__SEH_epilog4`, `__EH_prolog3_catch` and `__EH_epilog3` build or tear down their caller's SEH frame, so esp after the call is the caller's frame. They are compiled in line, with the same stores as their code, and only where their code is instruction for instruction what is modelled.
+- **Stale summaries:** a function made plain in the screening (its callouts' guessed pops threw its stack off) kept the summary made with those guesses, which had moved esp at its ret or lost `ebp`, and its callers were refused on it. Its summary is now made again there.
+
+**Compiled:** 12,565 functions (96.3%), 2,479,382 bytes (95.3%), 97.2% of the lane's hot bytes (`0b3a088`, d2d `f1533770`). 9,594 may hand a call to Box86.
+
+**Refused (483), the main causes:**
+
+| Cause | Functions | Bytes | Hot |
+| --- | --- | --- | --- |
+| x87 | 169 | 54,167 (2.1%) | 1.0% |
+| an indirect jump that isn't a bounded switch | 155 | 4,865 (0.2%) | 0.2% |
+| esp at a ret not known to be the entry's | 41 | 8,982 (0.3%) | 0.1% |
+| switches the guard rule doesn't bound, or tables over code | 28 | 28,691 (1.1%) | 0.0% |
+| a tail call whose pops differ, or to an import | 3 | 86 | 0.0% |
+| the rest (the C runtime's SSE2, `rcr`, `shrd`, `stmxcsr`, flag reads, 8- and 16-bit `imul`, ...) | 87 | 24,445 (0.9%) | 0.0% |
+
+The 41 left for esp: 18 rets that pop another amount than the entry's (the C runtime's), 7 merges of two esps, 6 calls to other frame-moving helpers, and a few `sub`, `push`, `xchg` or `leave` on esp (`__alloca_probe` and the frame helpers themselves among them).
+
+x87 is now the largest refusal. On the coverage set (`D2_AOT_SET=coverage`) 2,325 functions compile and 90 are left to Box86 (2,188 and 227 before); the check is 0 differ on the three scripts. The generated C is one 44 MB file at that size; `make -j2` compiling two of them ran out of Docker's 8 GB, so the run used `AOT_JOBS=1`. The whole list will need the C split into several files.
 
 ## Open questions
 
