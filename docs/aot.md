@@ -88,10 +88,21 @@ They become C arguments and results: `esp` and the ins as arguments, one out as 
 - In the spike's code every reader is a `jcc` after `cmp`, `sub`, `test`, `and` or `add`, or an `sbb` after `neg`. The reader's condition is a compare on the defining instruction's operands, which gcc folds.
 
 **x87.** The game takes its x87 and integer paths, because the port reports no SSE (`RunOptions::cpuid_edx`). So the 4,223 x87 instructions matter, though they are 0.5% of the code.
-- The register stack is a small array of `double`s with a top-of-stack index. Within a function whose stack depth is known at each instruction (MSVC's code keeps it balanced), the index is resolved at compile time, and the values become plain C locals.
-- Where the depth isn't known, the array is indexed at run time.
-- Precision is the same as Box86's on this port: 64-bit doubles on VFPv2, not 80-bit. The game itself sets the x87 to 53-bit precision (MSVC's runtime does, #125 found it: Unicorn starts at 64), so for ordinary arithmetic 64-bit doubles match a real CPU too, not only Box86. They differ where the exponent range does (the x87 keeps its 15-bit exponent in registers even at 53-bit precision: denormals and overflow), and an `fldcw` that changes the precision or rounding has to be honoured.
-- Rounding and the `fist`/`fistp` conversions follow Box86's x87 handling on this port, which the check mode compares against.
+- **Where the stack lives** (#136): compiled code works on the CPU's own x87 state, Box86's `x86emu_t` fields from `cw` to `fpu_ll` (`Cpu::x87_state()`, backend patch 0065; `AotFpu` in `src/game/aot_rt.h` mirrors them, the offsets checked on both sides). Each push and pop moves `top` at run time, as Box86 does.
+  - The depth needn't be known where the code is compiled. That matters: 75 of the 206 functions with x87 code have no fixed depth, and some of the game's own functions take or leave values on the stack (4b98f0 takes three, 4b97d0 leaves two), not only the C runtime's `_ftol`.
+  - A callout, an exit to the dispatcher or Box86 entering compiled code finds the stack as Box86 left it, with nothing to convert. The dynarec writes its cached x87 registers back before an in-line call (`BARRIER_FLOAT` at the native-call stub), at a trap and at a block's end.
+  - The cost is a load and a store through a pointer for each operand, where locals could have stayed in registers. x87 is about 1% of the hot bytes.
+- **Precision** is Box86's on this port: 64-bit doubles on VFPv2, not 80-bit. The game sets the x87 to 53-bit precision (MSVC's runtime does; #125 found it: Unicorn starts at 64), so for ordinary arithmetic doubles match a real CPU too. They differ where the exponent range does (the x87 keeps a 15-bit exponent in its registers even at 53-bit precision: denormals and overflow).
+- **Every value a double** (backend patch 0066, `box86_dynarec_x87double = 1`): before it, the dynarec could keep a value loaded from a float (`fld m32`, `fld1`, `fild m16`) in single precision through a block, by rules that depend on where the block ends. Compiled code can't follow those rules, and a real x87 at 53-bit precision computes in double.
+- **Each instruction does what the dynarec does**, not what the interpreter's helpers do (the build has no interpreter):
+  - The arithmetic runs in the FPSCR's mode on the same thread. `cw`'s rounding control counts only for `fist`/`fistp` and `frndint`, and its precision control for nothing.
+  - `fist` gives 0x80000000 (m32), 0x8000 (m16) or 0x8000000000000000 (m64) for NaN or out of range.
+  - `fild m64` builds its value from the high word times 2^32 plus the low word. A later `fistp m64` stores the original int64 if st0 is still that value. `fld m80` keeps its 10 bytes the same way for `fstp m80`, through Box86's own `LD2D`/`D2LD`.
+  - `fsin`, `fcos`, `fyl2x` (log2), `f2xm1` (expm1) and `fscale` (ldexp) call libm, the same libm Box86 calls. `f2xm1` followed by `fld1` and `faddp st(1)` is one `exp2`, as Box86 makes it. `fprem1` rounds its quotient toward +infinity, as the dynarec's does.
+  - `fnstsw` puts `top` in bits 11-13 of the value it stores and leaves `sw` as it is.
+  - The x87 decoding goes by opcode and ModR/M, not by Capstone's mnemonics. What an x87 instruction stores comes from a table of our own: Capstone 5 calls `fst`, `fstp` and `fistp` m32/m64 and `fnstcw` reads, `frstor` a write, and `fnsave` 4 bytes.
+  - Left to Box86 for now: `fld m80` followed by `fstp m80` and `fild m64` followed by `fistp m64` (Box86 copies the bytes without the value), `ficom`, the m16 integer arithmetic (which Box86 itself can't run), `fnsave`/`frstor`, `fxam`, `fptan`, `fpatan` and the `fcomi` forms. None of them was a function's first refusal on d2d's list.
+- **The check** compares the x87 state after each call too: `cw`, the condition codes, the depth and each value on the stack, from each side's own `top` (the dynarec writes `top` 0 when its cache held all eight).
 
 **Instruction kinds the note didn't cover** (the review's fourth point; counted over d2d's 13,048 functions):
 
@@ -99,11 +110,11 @@ They become C arguments and results: `esp` and the ins as arguments, one out as 
 | --- | --- | --- |
 | `fs:` accesses | 268, in 83 functions | the running thread's TEB through `aot_fs_base()` (`rt::current_teb()`); SEH frames (`fs:[0]`) are memory like any other |
 | `rep movs`, `rep stos` | 608 | the copy or fill, element by element where it overlaps forward, with the direction flag known at each instruction (clear at entry and after calls, MSVC's rule; `std`/`cld` change it; a function where it isn't known stays with Box86) |
-| `fldcw` | 40 | not in the spike (no x87 there): the function stays with Box86 |
+| `fldcw` | 40 | stores `cw` (#136); it changes only how `fist` and `frndint` round, as in Box86 |
 | `cpuid` | 6 | to answer as `RunOptions::cpuid_edx` (not in the spike) |
 | `rdtsc` | 1 | from the same source as Box86's (not in the spike) |
 
-The spike's two trees have none of these. The recompiler emits the `fs:` and `rep` forms, but they haven't run on game code yet; x87, `cpuid` and `rdtsc` leave their function to Box86.
+The spike's two trees have none of these. Since #136 x87 is compiled; `cpuid` and `rdtsc` still leave their function to Box86.
 
 **The C runtime's quirks.**
 - `_ftol2` (`0x682fd0`): the port already jumps over its SSE2 check, so the `cvttsd2si` path always runs (`install_ftol`). The recompiler turns a call to it into a truncating conversion in line.

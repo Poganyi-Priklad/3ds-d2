@@ -291,6 +291,22 @@ def flags_rw(insn):
     return d, u
 
 
+# x87 (issue #136): Capstone 5's operand access is wrong for most of it (fst,
+# fstp and fistp m32/m64 and fnstcw read, frstor written) and so is fnsave's
+# size (4), so what an x87 instruction stores is by mnemonic here.
+X87_STORES = {"fst", "fstp", "fist", "fistp", "fisttp", "fnstsw", "fnstcw", "fbstp", "fnsave", "fnstenv"}
+X87_MEM_SIZE = {"fnsave": 108, "frstor": 108, "fnstenv": 28, "fldenv": 28}
+
+
+def mem_written(i):
+    """(operand, bytes) for each memory operand the instruction writes."""
+    m = i.mnemonic
+    mems = [op for op in i.operands if op.type == X.X86_OP_MEM]
+    if m.startswith("f"):
+        return [(op, X87_MEM_SIZE.get(m, op.size)) for op in mems] if m in X87_STORES else []
+    return [(op, op.size) for op in mems if op.access & capstone.CS_AC_WRITE]
+
+
 class Func:
     """One function's code: its instructions and basic blocks, from its entry."""
 
@@ -1122,9 +1138,8 @@ class Analysis:
             a, b = reg_full(i, ops[0].reg), reg_full(i, ops[1].reg)
             if a[1] == 32 and b[1] == 32 and ESP not in (a[0], b[0]):
                 pass
-        for op in ops:
-            if op.type == X.X86_OP_MEM and (op.access & capstone.CS_AC_WRITE):
-                self._kill_mem(i, op, regs, slots)
+        for op, n in mem_written(i):
+            self._kill_mem(i, op, regs, slots, n)
 
     def _frame_helper(self, name, i, regs, slots):
         """A call to one of the CRT's frame helpers (issue #138, FRAME_HELPERS),
@@ -1250,10 +1265,10 @@ class Analysis:
         for r in w:
             regs[r] = None
 
-    def _kill_mem(self, i, op, regs, slots):
+    def _kill_mem(self, i, op, regs, slots, size=None):
         a = self._addr(i, op, regs)
         if a is not None:
-            for k in range(a - 3, a + op.size):
+            for k in range(a - 3, a + (size or op.size)):
                 slots.pop(k, None)
 
     def _callee(self, t):
@@ -1595,6 +1610,8 @@ class Emitter:
         decl.append("uint32_t F_A = 0, F_B = 0, F_R = 0, F_C = 0; int F_K = 0; (void)F_A; (void)F_B; (void)F_R; "
                     "(void)F_C; (void)F_K;")
         decl.append("uint8_t *const M = aot_mem; const uint32_t esp0 = esp, ra0 = LD32(esp);")
+        if any(self.x87_op(i) for i in f.insns.values()):
+            decl.append("AotFpu *const F = aot_fpu;")
         out.append("    " + " ".join(decl))
         out.append("    AOT_TRACE(0x%08xu, eax, ecx, edx, ebx, esp, ebp, esi, edi);" % va)
         # Unused locals in some functions: tell gcc they may be.
@@ -1860,9 +1877,163 @@ class Emitter:
             return "eax = (uint32_t)(int32_t)(int16_t)eax;"
         if m in ("cld", "std"):
             return ";"
+        if m == "wait" or self.x87_op(i):
+            return self.x87(i)
         if m.startswith("rep") or m in ("stosd", "stosb", "stosw", "movsd", "movsb", "movsw"):
             return self.string(i)
         raise Refused("%s at %08x" % (m, va))
+
+    # x87 (issue #136), by opcode and ModR/M rather than Capstone's mnemonics
+    # (its fsub/fsubr and fdiv/fdivr forms on the register stack are a known
+    # muddle): on the CPU's own state (aot_rt.h's AotFpu), as Box86's dynarec
+    # does each one.
+    X87_PREFIX = {0x26, 0x2e, 0x36, 0x3e, 0x64, 0x65}
+
+    @staticmethod
+    def x87_op(i):
+        """(opcode, modrm) of an x87 instruction, else None."""
+        b = bytes(i.bytes)
+        k = 0
+        while k < len(b) and b[k] in Emitter.X87_PREFIX:
+            k += 1
+        if k + 1 < len(b) and 0xd8 <= b[k] <= 0xdf:
+            return b[k], b[k + 1]
+        return None
+
+    def x87_next(self, i):
+        """The bytes of the instruction after i (Box86 looks at them)."""
+        n = self.p.img.insn(i.address + i.size)
+        return bytes(n.bytes) if n else b""
+
+    def x87_f2xm1_pair(self, va):
+        """f2xm1 at va, then fld1 and faddp st(1): Box86 makes the three one exp2."""
+        return all(self.f.insns.get(a) is not None and bytes(self.f.insns[a].bytes) == b
+                   for a, b in ((va, b"\xd9\xf0"), (va + 2, b"\xd9\xe8"), (va + 4, b"\xde\xc1")))
+
+    def x87(self, i):
+        va = i.address
+        if i.mnemonic == "wait":
+            return ";"
+        op = self.x87_op(i)
+        if bytes(i.bytes)[0] in (0x66, 0x67, 0xf2, 0xf3):
+            raise Refused("x87 (%s) with a prefix at %08x" % (i.mnemonic, va))
+        o, mr = op
+        reg = (mr >> 3) & 7
+        rm = mr & 7
+        G, S = "aot_fget(F, %d)", "aot_fset(F, %d, %s);"
+        ARITH = {0: "+", 1: "*", 4: "-", 5: "-r", 6: "/", 7: "/r"}
+
+        def arith(opn, a, b):   # a op b, "-r" and "/r" reversed
+            if opn.endswith("r"):
+                return "(%s) %s (%s)" % (b, opn[0], a)
+            return "(%s) %s (%s)" % (a, opn, b)
+
+        if mr < 0xc0:   # a memory operand
+            mem = [x for x in i.operands if x.type == X.X86_OP_MEM]
+            a = self.addr(i, mem[0])
+            if o in (0xd8, 0xdc, 0xda):
+                v = {0xd8: "aot_ldf32(M, %s)", 0xdc: "aot_ldf64(M, %s)",
+                     0xda: "(double)(int32_t)LD32(%s)"}[o] % a
+                if reg in ARITH:
+                    return "{ double v = %s; %s }" % (v, S % (0, arith(ARITH[reg], G % 0, "v")))
+                if reg in (2, 3):
+                    if o == 0xda:
+                        raise Refused("x87 (ficom) at %08x" % va)
+                    return "aot_fcom(F, %s, %s);%s" % (G % 0, v, " aot_fpop(F);" if reg == 3 else "")
+            if o == 0xd9:
+                if reg == 0:
+                    return "aot_fpush(F, aot_ldf32(M, %s));" % a
+                if reg in (2, 3):
+                    return "aot_stf32(M, %s, %s);%s" % (a, G % 0, " aot_fpop(F);" if reg == 3 else "")
+                if reg == 5:
+                    return "F->cw = (uint16_t)LD16(%s);" % a
+                if reg == 7:
+                    return "ST16(%s, F->cw);" % a
+            if o == 0xdd:
+                if reg == 0:
+                    return "aot_fpush(F, aot_ldf64(M, %s));" % a
+                if reg in (2, 3):
+                    return "aot_stf64(M, %s, %s);%s" % (a, G % 0, " aot_fpop(F);" if reg == 3 else "")
+                if reg == 7:
+                    return "ST16(%s, aot_fnstsw(F));" % a
+            if o == 0xdb:
+                if reg == 0:
+                    return "aot_fpush(F, (double)(int32_t)LD32(%s));" % a
+                if reg in (2, 3):
+                    return "ST32(%s, aot_fist32(F, %s));%s" % (a, G % 0, " aot_fpop(F);" if reg == 3 else "")
+                if reg == 5:
+                    n = self.x87_next(i)
+                    if len(n) > 1 and n[0] == 0xdb and (n[1] >> 3) & 7 == 7:
+                        # Box86 copies the 10 bytes to the fstp's address, nothing pushed, and goes on after it.
+                        raise Refused("x87 (fld m80 then fstp m80) at %08x" % va)
+                    return "aot_fld80(F, M, %s);" % a
+                if reg == 7:
+                    return "aot_fstp80(F, M, %s);" % a
+            if o == 0xdf:
+                if reg == 0:
+                    return "aot_fpush(F, (double)(int16_t)LD16(%s));" % a
+                if reg in (2, 3):
+                    return "ST16(%s, aot_fist16(F, %s));%s" % (a, G % 0, " aot_fpop(F);" if reg == 3 else "")
+                if reg == 5:
+                    n = self.x87_next(i)
+                    if len(n) > 1 and n[0] == 0xdf and (n[1] >> 3) & 7 == 7:
+                        raise Refused("x87 (fild m64 then fistp m64) at %08x" % va)
+                    return "aot_fild64(F, aot_ld64(M, %s));" % a
+                if reg == 7:
+                    return "aot_st64(M, %s, aot_fist64(F, %s)); aot_fpop(F);" % (a, G % 0)
+            raise Refused("x87 (%s) at %08x" % (i.mnemonic, va))
+        # The register stack.
+        if (o, mr) == (0xde, 0xc1) and self.x87_f2xm1_pair(va - 4):
+            return "; /* in the f2xm1 before it, as Box86 runs it */"
+        if o in (0xd8, 0xdc, 0xde) and reg in ARITH:
+            if o == 0xd8:   # st0 = st0 op st(i)
+                return S % (0, arith(ARITH[reg], G % 0, G % rm))
+            # dc, de: st(i) = st(i) op st0, the r forms swapped (dc e0 is fsubr st(i), st0)
+            opn = {0: "+", 1: "*", 4: "-r", 5: "-", 6: "/r", 7: "/"}[reg]
+            s = S % (rm, arith(opn, G % rm, G % 0))
+            return s + (" aot_fpop(F);" if o == 0xde else "")
+        if o == 0xd8 and reg in (2, 3):
+            return "aot_fcom(F, %s, %s);%s" % (G % 0, G % rm, " aot_fpop(F);" if reg == 3 else "")
+        if o == 0xdd and reg in (4, 5):   # fucom, fucomp
+            return "aot_fcom(F, %s, %s);%s" % (G % 0, G % rm, " aot_fpop(F);" if reg == 5 else "")
+        if (o, mr) in ((0xde, 0xd9), (0xda, 0xe9)):   # fcompp, fucompp
+            return "aot_fcom(F, %s, %s); aot_fpop(F); aot_fpop(F);" % (G % 0, G % 1)
+        if o == 0xd9 and reg == 0:   # fld st(i)
+            return "{ double v = %s; aot_fpush(F, v); }" % (G % rm)
+        if o == 0xd9 and reg == 1:   # fxch
+            return "{ double a = %s, b = %s; %s %s }" % (G % 0, G % rm, S % (0, "b"), S % (rm, "a"))
+        if o == 0xdd and reg in (2, 3):   # fst st(i), fstp st(i)
+            return (S % (rm, G % 0) if rm else ";") + (" aot_fpop(F);" if reg == 3 else "")
+        if o == 0xdf and mr == 0xe0:   # fnstsw ax
+            return "eax = (eax & 0xffff0000u) | aot_fnstsw(F);"
+        if o == 0xdb and mr == 0xe2:   # fnclex
+            return "F->sw &= (uint16_t)~0x80ffu;"
+        if o == 0xd9:
+            K = {0xe8: "1.0", 0xe9: "3.3219280948873623", 0xea: "1.4426950408889634", 0xeb: "3.14159265358979323846",
+                 0xec: "0.3010299956639812", 0xed: "0.69314718055994531", 0xee: "0.0"}
+            if mr in K:
+                return "aot_fpush(F, %s);" % K[mr]
+            one = {0xe0: "-%s", 0xe1: "__builtin_fabs(%s)", 0xfa: "__builtin_sqrt(%s)"}
+            if mr in one:
+                return S % (0, one[mr] % (G % 0))
+            if mr in (0xfe, 0xff):   # fsin, fcos: C1 C2 cleared
+                return "%s F->sw &= (uint16_t)~(C87_C1 | C87_C2);" % (
+                    S % (0, "%s(%s)" % ("__builtin_sin" if mr == 0xfe else "__builtin_cos", G % 0)))
+            if mr == 0xf1:   # fyl2x
+                return "%s aot_fpop(F);" % (S % (1, "(%s) * __builtin_log2(%s)" % (G % 1, G % 0)))
+            if mr == 0xfd:   # fscale
+                return S % (0, "__builtin_ldexp(%s, aot_cvt_s32(%s))" % (G % 0, G % 1))
+            if mr == 0xfc:   # frndint: NaN and zero as they are
+                return "{ double v = %s; if (v == v && v != 0.0) %s }" % (G % 0, S % (0, "aot_fround(F, v)"))
+            if mr == 0xf5:
+                return "aot_fprem1(F);"
+            if mr == 0xf0:   # f2xm1; with fld1, faddp st(1) after it, exp2 (Box86 runs those 4 bytes in it)
+                if self.x87_f2xm1_pair(va):
+                    return S % (0, "__builtin_exp2(%s)" % (G % 0))
+                return S % (0, "__builtin_expm1(0.69314718055994531 * %s)" % (G % 0))
+            if mr == 0xe8 and self.x87_f2xm1_pair(va - 2):
+                return "; /* in the f2xm1 before it, as Box86 runs it */"
+        raise Refused("x87 (%s) at %08x" % (i.mnemonic, va))
 
     def alu(self, i):
         va = i.address
@@ -2752,6 +2923,7 @@ def compile_set(img, starts, roots, extra, mode_list, outdir, names=None, keep=N
                 chunks.append("static const uint16_t AOT_SYM(cl_%08x)[] = {%s};" % (va, ", ".join(map(str, cl))))
         leaf = leaves(prog, compiled)
         report["leaves"] = len(leaf)
+        report["x87"] = sum(1 for va in compiled if any(Emitter.x87_op(i) for i in prog.func(va).insns.values()))
         report["exits"] = {"functions": sum(1 for va in compiled if prog.func(va).exits),
                            "sites": sum(len(prog.func(va).exits) for va in compiled),
                            "may_exit": len(prog.may_exit & compiled),
@@ -2766,14 +2938,15 @@ def compile_set(img, starts, roots, extra, mode_list, outdir, names=None, keep=N
             ncl = len({t for t in list(f.calls.values()) + list(f.tails.values())
                        if isinstance(t, int) and t in compiled})
             chunks.append("    {0x%08xu, AOT_SYM(fn_%08x), \"%s\", %d, %d, 0x%02x, 0x%02x, %d, {%s}, 0x%08xu, %d, %d, "
-                          "AOT_SYM(rg_%08x), %s, AOT_LEAF(%d), AOT_EXIT(%d, %d), AOT_EXIT(%d, %d)}," % (
+                          "AOT_SYM(rg_%08x), %s, AOT_LEAF(%d), AOT_EXIT(%d, %d), AOT_EXIT(%d, %d), %d}," % (
                               va, va, names.get(va, "%08x" % va), keep, prog.summ[va].pops or 0,
                               mask(sigs[va]["out"]), mask(sigs[va]["preserved"]), 1 if va in roots else 0,
                               ", ".join("0x%02x" % b for b in head), code_hash(img, rg), len(rg), ncl, va,
                               "AOT_SYM(cl_%08x)" % va if ncl else "0", 1 if va in leaf else 0,
                               1 if f.exits else 0, 1 if va in prog.may_exit else 0,
-                              1 if set(f.exits) - set(f.callouts) else 0, 1 if va in prog.may_hard else 0))
-        chunks.append("    {0, 0, 0, 0, 0, 0, 0, 0, {0}, 0, 0, 0, 0, 0, 0, 0, 0}")
+                              1 if set(f.exits) - set(f.callouts) else 0, 1 if va in prog.may_hard else 0,
+                              1 if any(Emitter.x87_op(i) for i in f.insns.values()) else 0))
+        chunks.append("    {0, 0, 0, 0, 0, 0, 0, 0, {0}, 0, 0, 0, 0, 0, 0, 0, 0, 0}")
         chunks.append("};")
     report["hooks"] = {"hookable": len(heads), "not": {"%08x" % k: v for k, v in sorted(why.items())}}
     chunks.append("const AotRoot AOT_SYM(roots)[] = {")
@@ -2838,6 +3011,8 @@ def refusal_kind(reason):
     """A refusal's cause without its addresses: an instruction the emitter
     has no C for by its kind (x87, a segment or system register, ...)."""
     r = HEX.sub("X", reason)
+    if r.startswith("x87 ("):
+        return r.replace(" at X", "")
     m = re.match(r"^(\S+)( \S.*)? at X$", r)
     if m and not r.startswith(("a ", "indirect", "branch", "tail", "flags", "direction", "esp", "code", "no ",
                                 "stack", "imul", "an ", "its ")):
