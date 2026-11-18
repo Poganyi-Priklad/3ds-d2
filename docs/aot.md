@@ -470,7 +470,25 @@ A refusal for esp now names its cause (the first instruction or call where esp s
 
 The 41 left for esp: 18 rets that pop another amount than the entry's (the C runtime's), 7 merges of two esps, 6 calls to other frame-moving helpers, and a few `sub`, `push`, `xchg` or `leave` on esp (`__alloca_probe` and the frame helpers themselves among them).
 
-x87 is now the largest refusal. On the coverage set (`D2_AOT_SET=coverage`) 2,325 functions compile and 90 are left to Box86 (2,188 and 227 before); the check is 0 differ on the three scripts. The generated C was one 44 MB file at that size; `make -j2` compiling two of them ran out of Docker's 8 GB, so the run used `AOT_JOBS=1`. The C is now split into parts (Building it).
+x87 was then the largest refusal (#136 compiles it: After x87, below). On the coverage set (`D2_AOT_SET=coverage`) 2,325 functions compile and 90 are left to Box86 (2,188 and 227 before); the check is 0 differ on the three scripts. The generated C was one 44 MB file at that size; `make -j2` compiling two of them ran out of Docker's 8 GB, so the run used `AOT_JOBS=1`. The C is now split into parts (Building it).
+
+### After x87 (#136)
+
+x87 is compiled, on the CPU's own x87 state ([Translation model](#translation-model), x87). Backend patch 0066 makes every x87 value a double in Box86 too, so both sides compute the same thing.
+
+**Compiled:** 12,731 functions on d2d's list (97.6%), 2,533,348 bytes (97.4%), 98.1% of the lane's hot bytes (12,565, 95.3% and 97.2% before). None is refused for x87 any more (169 before). The 317 left: 155 indirect jumps that aren't bounded switches, 28 switches the guard rule doesn't bound or whose tables overlap code, 41 for esp at a ret, and the C runtime's SSE2, `stmxcsr`, `rcr`, `shrd`, flag reads and 8- and 16-bit `imul`.
+
+**The coverage set:** 2,361 functions compile and 54 are left to Box86 (2,325 and 90 before). 36 of them have x87 code, 35 of those hookable.
+
+**The check** (`D2_AOT_SET=coverage scripts/docker.sh test aot dist/game dist/save/BeforeCh1End/save`) is 0 differ on the three scripts, the x87 state compared after each call:
+
+| Script | Calls checked | In functions with x87 code |
+| --- | --- | --- |
+| town-walk | 29.1M | 290K, 12 functions |
+| fight | 53.6M | 848K, 15 functions |
+| Act II | 77.9M | 3.7K, 10 functions |
+
+d2d's cases (`D2_AOT_BUILD=keep scripts/docker.sh test d2d dist/game`) pass: 48 natives, 18,902 cases, 0 differ. The fight in production mode (`AOT_MODE=1`) ran in 63 and 62 s, against 63–67 s before x87 and patch 0066 (wall time to the second, under the lane's virtual clock).
 
 ## Open questions
 
