@@ -171,7 +171,7 @@ AOT code has to be checked function by function, as natives are (`D2_NATIVE_CHEC
 ## Building it
 
 - **Where:** in `scripts/docker.sh package-cia <game-dir>`, in a container with networking off, as now.
-  - The recompiler (Python, Capstone, the same image as the d2d harness) reads Game.exe, mounted read-only as the art step does. It writes C into `build/aot/<key>/`.
+  - The recompiler (`tools/aot/recompile`, Rust with Capstone, built in the same image as the d2d harness; #144) reads Game.exe, mounted read-only as the art step does. It writes C into `build/aot/<key>/`.
   - devkitARM compiles that C in the toolchain image, and `tests/cpu/ctr/Makefile` links it into `3ds-d2-game-cia.elf`.
 - **The C in parts** (#135): `aot_spike.c` holds the tables and the roots; the functions go into `aot_spike_NN.c`, each at most `AOT_PART_MB` of C (8). One file for the coverage set was 44 MB and took gcc over 4 GB; d2d's whole list (12,565 compiled at #138's census) would be about five times that. The recompiler groups the functions in the order that leaves the fewest calls across files (gcc inlines a callee only within its file): by address, callees next to their callers, or clusters along the calls. The makefiles compile every `aot_spike*.c` they find, and a compiled function is no longer `static`, so a call can cross files.
 - **The cache key:** Game.exe's SHA-256, the recompiler's version, the site table, and the toolchain lock. Packaging again with the same files reuses the objects.
@@ -182,7 +182,8 @@ AOT code has to be checked function by function, as natives are (`D2_NATIVE_CHEC
 
 **Build time.** Measured by the spike (5,722 x86 instructions, one build of the C):
 - **gcc** (devkitARM, -O2, ARM mode): 0.95 s per 1,000 x86 instructions for the signatures' C, 1.28 s for the context fallback's, on one core. For all 878,540 instructions that is about 14 minutes on one core, so 2 to 4 minutes on a 4–8 core PC, as files compile in parallel.
-- **The recompiler** (Python): 0.07 s per 1,000 instructions to write the C, but 39 s of analysis, because the spike works out summaries for every function its trees reach (541) to a fixed point, again for each compiled set. Over the whole binary that analysis runs once: the survey's decoding and flags pass over d2d's 13,048 functions took 97 s. The summaries' fixed point needs a faster form (each function analysed once per round, only those whose callees changed) before #115.
+- **The recompiler, in Rust** (#144): d2d's whole list (13,048 functions, 12,784 compiled) in 36.5 s with a peak of 912 MB, and the coverage set (2,417) in 10.8 s with 384 MB. `recompile.py` took 481 s and 5,169 MB, and 152 s and 2,374 MB, for the same output byte for byte (`scripts/docker.sh test aot-compare`).
+- **The recompiler, in Python, at the spike:** 0.07 s per 1,000 instructions to write the C, but 39 s of analysis, because the spike works out summaries for every function its trees reach (541) to a fixed point, again for each compiled set. Over the whole binary that analysis runs once: the survey's decoding and flags pass over d2d's 13,048 functions took 97 s. The summaries' fixed point needs a faster form (each function analysed once per round, only those whose callees changed) before #115.
 
 **CIA size.** Measured by the spike: 2.6 (A*) and 3.1 (CofParams) ARM bytes per x86 byte with the signatures, 3.6 and 4.5 with the context fallback, against Box86's 7.8 and 10.3 for the same functions (devkitARM -O2, ARM mode; Box86's from its blocks on the lane, backend patch 0061). The review's band of 2 to 5 holds. With the signatures and x87, string and switch code still to come, *estimate* 3 to 4.5 ARM bytes per x86 byte: 8 to 12 MB more code over d2d's 2.6 MB of functions, for a CIA of about 11 to 15 MB in sdcard mode (about 3.4 MB now).
 
@@ -499,6 +500,19 @@ A thunk with no ret of its own (`004baea0`: `mov ecx, [ecx + 8]; mov eax, [ecx];
 **Compiled:** 12,784 functions on d2d's list (98.0%), 2,537,110 bytes (97.6%), 98.4% of the lane's hot bytes (12,731, 97.4% and 98.1% before). None is refused for an indirect jump (155 before). 58 tail calls through a pointer in 53 functions are callouts. Calls from compiled code to Box86 code that may block fell from 4.5% to 1.5% of the hot bytes: the thunks they went to are compiled.
 
 **The coverage set:** 2,370 functions compile and 47 are left to Box86 (2,361 and 54 before). The check is 0 differ on the three scripts (town-walk 29.2M calls, fight 53.9M, Act II 77.9M). `004bdee0`, whose `jmp eax` dispatches through a table by unit type, was entered from Box86 69,296 times in the fight. d2d's cases pass: 48 natives, 18,902 cases, 0 differ. The fight in production mode, alternated with `development` in one session, took 63 and 62 s against 63 and 63 s.
+
+### The recompiler in Rust (#144)
+
+`tools/aot/recompile` is `recompile.py` in Rust, module by module, with the same command line and the same output byte for byte: the C, `aot_spike.json`, and the census's `census.txt` and `census.json` but for their timings.
+- **Capstone** through `capstone-sys` 0.18.0 (Capstone 5.0.6), the same calls Python's binding makes (`cs_disasm`, `cs_regs_access`, the operands' access and the eflags). Our own x87 tables stay: Capstone 5's access is wrong for x87 (#136).
+- **The PE image** as pefile maps it, with pefile's names for some DLLs' imports by ordinal (its `ordlookup` tables, generated into `ordlookup.rs`), since the may-block rule and the import pops go by name.
+- **Order:** Python's dicts keep their insertion order, and some of the output depends on it (the census's examples, the refusals' order), so the port has an insertion-ordered map. Where `recompile.py`'s output depended on a set's order instead, which is CPython's hashing, `recompile.py` now sorts first. Its C didn't change on the coverage set or on d2d's whole list; 10 refusal messages name a lower address, and the census's examples are in address order.
+- **Built** in the `hosttest` image, from the crates its `Cargo.lock` pins (each checked against the lock's sha256 when the image is built), and run by `scripts/docker.sh` wherever `recompile.py` ran. The build ID's AOT hash covers its sources. `scripts/docker.sh test aot-compare dist/game <a> <b> [census]` runs two recompilers on the same Game.exe and compares what they write (`py`, `py@<rev>` or `rs`), with each one's time and peak memory.
+
+| | `recompile.py` | Rust |
+| --- | --- | --- |
+| The coverage set (2,417 functions) | 152 s, 2,374 MB | 10.8 s, 384 MB |
+| d2d's whole list (13,048 functions) | 481 s, 5,169 MB | 36.5 s, 912 MB |
 
 ## Open questions
 
