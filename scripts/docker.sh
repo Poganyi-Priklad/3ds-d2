@@ -117,6 +117,23 @@ aot_args() {
     [ -f "$(aot_args_file)" ] || die "no $(aot_args_file) (D2_AOT_SET)"
     grep -v '^[[:space:]]*#' "$(aot_args_file)"
 }
+# The AOT recompiler (tools/aot/recompile, Rust, issue #144), built in the
+# hosttest image from the crates its Cargo.lock pins, into build/aot-rs/.
+AOT_RECOMPILER=build/aot-rs/target/release/recompile
+aot_recompiler_build() {
+    ensure_image hosttest "$HOSTTEST_IMAGE"
+    run_in "$HOSTTEST_IMAGE" sh -c 'command -v cargo >/dev/null || { echo "no cargo in the image: scripts/docker.sh image" >&2; exit 1; }
+        CARGO_TARGET_DIR=/work/build/aot-rs/target cargo build -q --release --locked --offline \
+            --manifest-path tools/aot/recompile/Cargo.toml'
+}
+# The recompiler on <args>, with its time and peak memory on stderr (AOT_MEASURE=1).
+aot_recompile() {
+    if [ "${AOT_MEASURE:-}" = 1 ]; then
+        run_in "$HOSTTEST_IMAGE" python3 -I tools/aot/measure.py "$@"
+    else
+        run_in "$HOSTTEST_IMAGE" "$@"
+    fi
+}
 aot_prepare() {
     case "${D2_AOT_BUILD:-}" in
     keep) AOT_MAKE=(AOT=/work/build/aot/spike); return 0 ;;   # what the last D2_AOT_BUILD=1 wrote (lanes side by side)
@@ -127,9 +144,9 @@ aot_prepare() {
     local saved=(${RUN_EXTRA[@]+"${RUN_EXTRA[@]}"})
     # AOT_PART_MB (issue #135): the most C in one of the functions' files (8; a big one takes gcc GBs).
     RUN_EXTRA=(-v "$(host_path "$game/Game.exe"):/aot/Game.exe:ro" -e "AOT_PART_MB=${AOT_PART_MB:-8}")
+    aot_recompiler_build
     # shellcheck disable=SC2046
-    run_in "$HOSTTEST_IMAGE" python3 -I tools/aot/recompile.py /aot/Game.exe --out build/aot/spike \
-        $(aot_args)
+    aot_recompile "$AOT_RECOMPILER" /aot/Game.exe --out build/aot/spike $(aot_args)
     RUN_EXTRA=(${saved[@]+"${saved[@]}"})
     AOT_MAKE=(AOT=/work/build/aot/spike)
 }
@@ -307,13 +324,14 @@ test)
         RUN_EXTRA=(-v "$(host_path "$(cd "$2" && pwd)/Game.exe"):/aot/Game.exe:ro")
         hot=()
         for f in "$ROOT"/build/m4-prof/*.err; do [ -f "$f" ] && hot+=(--hot "build/m4-prof/$(basename "$f")"); done
-        run_in "$HOSTTEST_IMAGE" python3 -I tools/aot/recompile.py /aot/Game.exe --census --modes sig \
-            --out build/aot/census "${hot[@]}" ;;
+        aot_recompiler_build
+        aot_recompile "$AOT_RECOMPILER" /aot/Game.exe --census --modes sig --out build/aot/census "${hot[@]}" ;;
     aot-explain)  # <game-dir> <va,va,...> (issue #115): why each is left to Box86, with D2_AOT_SET's summaries
         [ -n "${2:-}" ] && [ -f "$2/Game.exe" ] && [ -n "${3:-}" ] || die "test aot-explain <game-dir> <va,...>"
         RUN_EXTRA=(-v "$(host_path "$(cd "$2" && pwd)/Game.exe"):/aot/Game.exe:ro")
+        aot_recompiler_build
         # shellcheck disable=SC2046
-        run_in "$HOSTTEST_IMAGE" python3 -I tools/aot/recompile.py /aot/Game.exe --explain "$3" $(aot_args) ;;
+        run_in "$HOSTTEST_IMAGE" "$AOT_RECOMPILER" /aot/Game.exe --explain "$3" $(aot_args) ;;
     aot-compare)  # <game-dir> <a> <b> [census] (issue #144): two recompilers on the same Game.exe, what they write
                   # compared (the C byte for byte, the reports but for their timings). Each of a and b is py (this
                   # tree's tools/aot/recompile.py), py@<rev> (that commit's) or rs (tools/aot/recompile, Rust).
@@ -337,16 +355,13 @@ test)
             out="build/aot/cmp/$label"
             rm -rf "${ROOT:?}/$out"
             case "$side" in
-            py) run_in "$HOSTTEST_IMAGE" python3 -I tools/aot/recompile.py /aot/Game.exe "${args[@]}" --out "$out" ;;
+            py) AOT_MEASURE=1 aot_recompile python3 -I tools/aot/recompile.py /aot/Game.exe "${args[@]}" --out "$out" ;;
             py@*)   # that commit's recompile.py, beside this one (it finds the shims' sources from its own path)
                 ref="tools/aot/.recompile-$label.py"
                 git -C "$ROOT" show "${side#py@}:tools/aot/recompile.py" > "$ROOT/$ref" || die "no recompile.py at ${side#py@}"
-                st=0; run_in "$HOSTTEST_IMAGE" python3 -I "$ref" /aot/Game.exe "${args[@]}" --out "$out" || st=$?
+                st=0; AOT_MEASURE=1 aot_recompile python3 -I "$ref" /aot/Game.exe "${args[@]}" --out "$out" || st=$?
                 rm -f "$ROOT/$ref"; [ "$st" = 0 ] || exit "$st" ;;
-            rs) run_in "$HOSTTEST_IMAGE" sh -c 'command -v cargo >/dev/null || { echo "no cargo in the image: scripts/docker.sh image" >&2; exit 1; }
-                    CARGO_TARGET_DIR=/work/build/aot-rs/target cargo build -q --release --locked --offline \
-                        --manifest-path tools/aot/recompile/Cargo.toml' &&
-                run_in "$HOSTTEST_IMAGE" build/aot-rs/target/release/recompile /aot/Game.exe "${args[@]}" --out "$out" ;;
+            rs) aot_recompiler_build && AOT_MEASURE=1 aot_recompile "$AOT_RECOMPILER" /aot/Game.exe "${args[@]}" --out "$out" ;;
             *)  die "aot-compare: a side is py, py@<rev> or rs, not $side" ;;
             esac || exit 1
         done
@@ -415,7 +430,7 @@ package-cia)   # [<game-dir> | --slim|--full <game-dir>]: the game app (+ the us
     bid="$(build_id)"
     # The build ID covers the AOT step: the recompiler's and its arguments'
     # hash, never Game.exe's.
-    [ ${#AOT_MAKE[@]} -gt 0 ] && bid="$bid-aot$(cat "$ROOT/tools/aot/recompile.py" "$(aot_args_file)" | sha256sum | cut -c1-6)"
+    [ ${#AOT_MAKE[@]} -gt 0 ] && bid="$bid-aot$(cat "$ROOT"/tools/aot/recompile/Cargo.lock "$ROOT"/tools/aot/recompile/src/*.rs "$(aot_args_file)" | sha256sum | cut -c1-6)"
     report_vars=(BUILD_ID="$bid" D2_VERSION="$version" ${AOT_MAKE[@]+"${AOT_MAKE[@]}"})
     [ -n "${D2_REPORT_DSN+x}" ] && report_vars+=(D2_REPORT_DSN="$D2_REPORT_DSN")
     # The AOT parts first, AOT_JOBS at a time (2; issue #135: at -j8 cc1 ran out of Docker's 8 GB).
