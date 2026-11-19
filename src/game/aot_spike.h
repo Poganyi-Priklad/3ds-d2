@@ -66,6 +66,8 @@ uint32_t aot_trap_for(uint32_t va);
 // redirect_next's target, its pop of the return address and `stack_args`
 // dwords included. False when there's no such entry: Box86 runs it.
 bool aot_resume(d2rt::Cpu &c, uint32_t va, uint32_t esp, uint32_t stack_args);
+// Whether aot_resume would run va's entry.
+bool aot_resumable(uint32_t va);
 
 // A native that does what the game's function at va does, its registers
 // included (the check lane with it: 0 differ): compiled code calls the

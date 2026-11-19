@@ -323,6 +323,7 @@ bool g_stale_calls = false;
 // Box86 runs them), by address; this window's runs and their exits.
 std::unordered_map<uint32_t, const AotResume *> g_resume_at;
 uint32_t g_resumed = 0, g_resume_exits = 0;
+std::map<uint32_t, uint32_t> g_resumed_by;
 uint32_t g_handed = 0;   // natives' hand-backs to compiled code (aot_trap_for), this window
 uint32_t g_handed_direct = 0;   // ... and those run in C (aot_direct)
 uint32_t g_callout_shims = 0, g_callout_fns = 0, g_callout_back = 0;
@@ -724,6 +725,8 @@ void unhook(Root &R, Cpu &c) { unhook_at(c, R.r->va, R.before, R.hooked); }
 
 }  // namespace
 
+bool aot_resumable(uint32_t va) { return g_mode == AotMode::Sig && g_resume_at.count(va); }
+
 bool aot_resume(Cpu &c, uint32_t va, uint32_t esp, uint32_t stack_args)
 {
     if (g_mode != AotMode::Sig)
@@ -741,6 +744,7 @@ bool aot_resume(Cpu &c, uint32_t va, uint32_t esp, uint32_t stack_args)
     const bool done = run_catching(it->second->fn, r, x);
     g_cpu = prev;
     g_resumed++;
+    g_resumed_by[va]++;
     if (!done) {   // Box86 on at the exit's target
         g_resume_exits++;
         std::memcpy(r, x.r, sizeof r);
@@ -895,10 +899,15 @@ void install_fns(Cpu &c)
     {
         const char *e = std::getenv("D2_AOT_STALE");
         g_stale_calls = e && !std::strcmp(e, "1");
+        // D2_AOT_RESUME=0: none; =<va>,<va>...: those alone.
         e = std::getenv("D2_AOT_RESUME");
         if (aot_resumes && !(e && !std::strcmp(e, "0")))
-            for (const AotResume *r = aot_resumes; r->va; r++)
-                g_resume_at[r->va] = r;
+            for (const AotResume *r = aot_resumes; r->va; r++) {
+                char hex[16];
+                std::snprintf(hex, sizeof hex, "%x", r->va);
+                if (!e || !*e || std::strstr(e, hex))
+                    g_resume_at[r->va] = r;
+            }
     }
     if (!g_resume_at.empty())
         rt::logf("aot: %u of the natives' hand-backs compiled", (unsigned)g_resume_at.size());
@@ -1322,11 +1331,15 @@ std::vector<std::string> aot_lines()
         g_stale_by.clear();
     }
     if (g_resumed) {
-        char line[128];
-        std::snprintf(line, sizeof line, "aot: the natives' hand-backs in compiled code: %u (%u exited)", g_resumed,
-                      g_resume_exits);
+        char line[256];
+        int p = std::snprintf(line, sizeof line, "aot: the natives' hand-backs in compiled code: %u (%u exited):",
+                              g_resumed, g_resume_exits);
+        for (const auto &kv : g_resumed_by)
+            if (p < (int)sizeof line)
+                p += std::snprintf(line + p, sizeof line - p, " %08x %u", kv.first, kv.second);
         out.push_back(line);
         g_resumed = g_resume_exits = 0;
+        g_resumed_by.clear();
     }
     if (g_nested) {
         char line[256];

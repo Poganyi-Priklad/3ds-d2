@@ -2267,7 +2267,10 @@ bool section_free(uint32_t cs)
 }
 
 // Resumes the original at `va` once the shim returns: the bridge then pops
-// the return address and `stack_args` dwords from the ESP set here.
+// the return address and `stack_args` dwords from the ESP set here. Every
+// register as the code at va wants it, eax included, and the native returns
+// c.reg(R_EAX) after: where the recompiler compiled an entry at va (issue
+// #138), the function has run to its return here, and eax is its result.
 void resume_original(Cpu &c, uint32_t va, uint32_t esp, uint32_t stack_args)
 {
     if (game::aot_resume(c, va, esp, stack_args))   // its compiled code (issue #138)
@@ -2676,8 +2679,9 @@ uint32_t current_unlock(Cpu &c)
     if (!cs) {
         // The original's fatal error, from 52df45 (the jmp covers its first
         // instruction, eax = the current entry).
+        c.set_reg(R_EAX, e);
         resume_original(c, 0x0052df45, c.reg(R_ESP), 0);
-        return e;
+        return c.reg(R_EAX);
     }
     wx86_crit_leave(cs, wx86_sched());
     return 0;   // LeaveCriticalSection's
@@ -2893,10 +2897,13 @@ uint32_t unit_pick_filter(Cpu &c)
         if (game::aot_direct(c, 0x00466870, r))
             return r[0];
     }
-    if (const uint32_t trap = game::aot_trap_for(0x00466870)) {
-        resume_original(c, trap, esp, 2);
-        return c.reg(R_EAX);
-    }
+    // Its compiled entry at 466876 where there's one (issue #138): in C, and
+    // a compiled caller's call doesn't exit, as it does at the trap.
+    if (!game::aot_resumable(0x00466876))
+        if (const uint32_t trap = game::aot_trap_for(0x00466870)) {
+            resume_original(c, trap, esp, 2);
+            return c.reg(R_EAX);
+        }
     put32(esp - 4, c.reg(R_EBP));
     c.set_reg(R_EBP, esp - 4);
     resume_original(c, 0x00466876, esp - 4 - 0x34, 2);
@@ -3450,7 +3457,7 @@ uint32_t path_search(Cpu &c)
     c.set_reg(R_EBP, esp - 4);
     c.set_reg(R_EAX, 0x32f4);
     resume_original(c, 0x0067b858, esp - 4, 0);
-    return 0x32f4;
+    return c.reg(R_EAX);
 }
 
 // D2_NATIVE_CHECK=1: the plan's result and points against the game's
