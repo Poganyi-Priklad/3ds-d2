@@ -78,6 +78,8 @@ typedef struct {
      * cut there. One that can't may run where there's no trap to exit to (a
      * native's guest_call), its callouts' fallbacks nested runs there. */
     uint8_t may_hard;
+    /* 1: it has x87 code (issue #136), on the CPU's own x87 state. */
+    uint8_t x87;
 } AotFunc;
 #ifdef AOT_SPLIT
 #define AOT_LEAF(x) 0
@@ -189,6 +191,216 @@ AOT_INL void aot_st32(uint8_t *m, uint32_t a, uint32_t v)
 #define ST8(a, v) aot_st8(M, (a), (v))
 #define ST16(a, v) aot_st16(M, (a), (v))
 #define ST32(a, v) aot_st32(M, (a), (v))
+
+/* x87 (issue #136): compiled code works on the CPU's own x87 state, as
+ * Box86 keeps it (Cpu::x87_state(), backend patch 0065: its x86emu_t fields
+ * from cw to fpu_ll, regs.h's packed types, so the doubles are only
+ * word-aligned). The stack's depth needn't be known where it's compiled, a
+ * callee may take or leave values on it, and a callout, an exit or Box86
+ * entering compiled code finds it as Box86 would.
+ *
+ * What each instruction does is what Box86's dynarec does on this port
+ * (patch 0066: every value a double), not the interpreter's helpers: the
+ * arithmetic in the FPSCR's mode (cw's rounding control only for fist and
+ * frndint), fist's out-of-range values, the int64 and 80-bit shadows that
+ * make fild/fistp m64 and fld/fstp m80 exact, the transcendentals from libm. */
+typedef struct {
+    uint16_t cw, sw;           /*   0 */
+    uint32_t st[8][2];         /*   4: x87[8], doubles */
+    uint32_t mmx[8][2];        /*  68 */
+    uint32_t top;              /* 132 */
+    int32_t stack;             /* 136: fpu_stack */
+    uint32_t tags;             /* 140: fpu_tags, 2 bits a register from st0, 11 empty */
+    uint8_t ld[8][18];         /* 144: fpu_ld, an 80-bit value loaded (10 bytes) and its double */
+    uint32_t ll[8][4];         /* 288: fpu_ll, a double from fild m64 and its int64 */
+} AotFpu;                      /* 416 */
+#ifdef __cplusplus
+static_assert(sizeof(AotFpu) == 416, "AotFpu: Box86's x87 fields");
+#else
+_Static_assert(sizeof(AotFpu) == 416, "AotFpu: Box86's x87 fields");
+#endif
+extern AotFpu *aot_fpu;   /* aot_spike.cpp: the running emu's */
+/* Box86's LD2D and D2LD (x87emu_private.c), 80-bit <-> double. */
+void aot_ld2d(const void *ld, double *d);
+void aot_d2ld(const double *d, void *ld);
+
+#define C87_C0 0x0100u
+#define C87_C1 0x0200u
+#define C87_C2 0x0400u
+#define C87_C3 0x4000u
+
+AOT_INL double aot_fget(const AotFpu *F, uint32_t i)
+{
+    double d;
+    memcpy(&d, F->st[(F->top + i) & 7], 8);
+    return d;
+}
+AOT_INL void aot_fset(AotFpu *F, uint32_t i, double d) { memcpy(F->st[(F->top + i) & 7], &d, 8); }
+/* A push and a pop as the dynarec's write-back of its cache does them
+ * (x87_purgecache: fpu_stack and the tags by the count, no limit). */
+AOT_INL void aot_fpush_n(AotFpu *F)
+{
+    F->stack++;
+    F->tags = (F->tags << 2) & 0xffffu;
+    F->top = (F->top - 1u) & 7u;
+}
+AOT_INL void aot_fpush(AotFpu *F, double d)
+{
+    aot_fpush_n(F);
+    aot_fset(F, 0, d);
+}
+AOT_INL void aot_fpop(AotFpu *F)
+{
+    F->stack--;
+    F->tags = ((F->tags | 0xffff0000u) >> 2) & 0xffffu;
+    F->top = (F->top + 1u) & 7u;
+}
+AOT_INL double aot_ldf32(uint8_t *m, uint32_t a)
+{
+    float f;
+    memcpy(&f, m + a, 4);
+    return (double)f;
+}
+AOT_INL double aot_ldf64(uint8_t *m, uint32_t a)
+{
+    double d;
+    memcpy(&d, m + a, 8);
+    return d;
+}
+AOT_INL void aot_stf32(uint8_t *m, uint32_t a, double d)
+{
+    float f = (float)d;
+    AOT_STORE_HOOK(a, 4);
+    memcpy(m + a, &f, 4);
+}
+AOT_INL void aot_stf64(uint8_t *m, uint32_t a, double d)
+{
+    AOT_STORE_HOOK(a, 8);
+    memcpy(m + a, &d, 8);
+}
+AOT_INL void aot_st64(uint8_t *m, uint32_t a, uint64_t v)
+{
+    AOT_STORE_HOOK(a, 8);
+    memcpy(m + a, &v, 8);
+}
+AOT_INL uint64_t aot_ld64(uint8_t *m, uint32_t a)
+{
+    uint64_t v;
+    memcpy(&v, m + a, 8);
+    return v;
+}
+/* fcom and its kin: C3 C2 C0 from the compare, C1 clear. */
+AOT_INL void aot_fcom(AotFpu *F, double a, double b)
+{
+    uint16_t c = a < b ? C87_C0 : a > b ? 0 : a == b ? C87_C3 : (C87_C3 | C87_C2 | C87_C0);
+    F->sw = (uint16_t)((F->sw & ~(C87_C0 | C87_C1 | C87_C2 | C87_C3)) | c);
+}
+/* fnstsw: sw with top in bits 11-13 (sw itself keeps its own). */
+AOT_INL uint32_t aot_fnstsw(const AotFpu *F) { return (uint32_t)((F->sw & ~0x3800u) | ((F->top & 7u) << 11)); }
+/* cw's rounding control (00 nearest, 01 down, 10 up, 11 toward zero). */
+AOT_INL double aot_fround(const AotFpu *F, double d)
+{
+    switch ((F->cw >> 10) & 3u) {
+    case 0: return __builtin_nearbyint(d);
+    case 1: return __builtin_floor(d);
+    case 2: return __builtin_ceil(d);
+    default: return __builtin_trunc(d);
+    }
+}
+/* fist m32 (VCVTR in cw's mode): NaN or out of range is 0x80000000. */
+AOT_INL uint32_t aot_fist32(const AotFpu *F, double d)
+{
+    const double r = aot_fround(F, d);
+    if (!(r >= -2147483648.0 && r <= 2147483647.0))
+        return 0x80000000u;
+    return (uint32_t)(int32_t)r;
+}
+/* fist m16: the same, then 0x8000 out of int16's range too. */
+AOT_INL uint32_t aot_fist16(const AotFpu *F, double d)
+{
+    const double r = aot_fround(F, d);
+    if (!(r >= -32768.0 && r <= 32767.0))
+        return 0x8000u;
+    return (uint32_t)(uint16_t)(int16_t)r;
+}
+/* VCVT.S32.F64 (fscale's count): toward zero, saturated, NaN 0. */
+AOT_INL int32_t aot_cvt_s32(double d)
+{
+    if (d != d)
+        return 0;
+    if (d >= 2147483648.0)
+        return 2147483647;
+    if (d <= -2147483649.0)
+        return (int32_t)0x80000000u;
+    return (int32_t)d;
+}
+/* fild m64: the value made as the dynarec makes it (|v|'s high word times
+ * 2^32 plus its low word, one rounding), and the int64 kept beside it. */
+AOT_INL void aot_fild64(AotFpu *F, uint64_t v)
+{
+    const int neg = (int)(v >> 63);
+    const uint64_t u = neg ? 0u - v : v;
+    double d = (double)(uint32_t)(u >> 32) * 4294967296.0 + (double)(uint32_t)u;
+    if (neg)
+        d = -d;
+    aot_fpush(F, d);
+    uint32_t *ll = F->ll[F->top & 7];
+    memcpy(ll, &d, 8);
+    memcpy(ll + 2, &v, 8);
+}
+/* fistp m64 (arm_fist64_*): the int64 fild loaded, if st0 is still its
+ * value; else rounded in cw's mode, 0x8000000000000000 out of range. */
+AOT_INL uint64_t aot_fist64(const AotFpu *F, double d)
+{
+    double ref;
+    memcpy(&ref, F->ll[F->top & 7], 8);
+    if (d == ref) {
+        uint64_t v;
+        memcpy(&v, F->ll[F->top & 7] + 2, 8);
+        return v;
+    }
+    if (__builtin_isgreater(d, (double)(int64_t)0x7fffffffffffffffLL) ||
+        __builtin_isless(d, -(double)(uint64_t)0x8000000000000000ULL) || !__builtin_isfinite(d))
+        return 0x8000000000000000ULL;
+    return (uint64_t)(int64_t)aot_fround(F, d);
+}
+/* fld m80: the 10 bytes kept beside their double (LD2D truncates). */
+AOT_INL void aot_fld80(AotFpu *F, uint8_t *m, uint32_t a)
+{
+    aot_fpush_n(F);
+    uint8_t *ld = F->ld[F->top & 7];
+    double d;
+    memcpy(ld, m + a, 10);
+    aot_ld2d(ld, &d);
+    memcpy(ld + 10, &d, 8);
+    aot_fset(F, 0, d);
+}
+/* fstp m80: those bytes again if st0 is still their value (compared as
+ * numbers, as on ARMv6), else D2LD. */
+AOT_INL void aot_fstp80(AotFpu *F, uint8_t *m, uint32_t a)
+{
+    const double d = aot_fget(F, 0);
+    const uint8_t *ld = F->ld[F->top & 7];
+    double ref;
+    memcpy(&ref, ld + 10, 8);
+    AOT_STORE_HOOK(a, 10);
+    if (d == ref)
+        memcpy(m + a, ld, 10);
+    else
+        aot_d2ld(&d, m + a);
+    aot_fpop(F);
+}
+/* fprem1: the quotient rounded toward +inf (the dynarec's FPSCR mode 01),
+ * saturated; st0 - q * st1; C2 0, C1 C3 C0 the quotient's low bits. */
+AOT_INL void aot_fprem1(AotFpu *F)
+{
+    const double a = aot_fget(F, 0), b = aot_fget(F, 1);
+    const int32_t q = aot_cvt_s32(__builtin_ceil(a / b));
+    aot_fset(F, 0, a - (double)q * b);
+    const uint32_t u = (uint32_t)q;
+    F->sw = (uint16_t)((F->sw & ~(C87_C0 | C87_C1 | C87_C2 | C87_C3)) | ((u & 1u) << 9) | ((u >> 1 & 1u) << 14) |
+                       ((u >> 2 & 1u) << 8));
+}
 
 /* The C runtime's memset and memcpy (MSVC's memcpy handles overlap as
  * memmove does), as the memory intrinsics do them. */

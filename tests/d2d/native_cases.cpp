@@ -129,6 +129,7 @@ uint32_t aot_case(Cpu &c)
     uint32_t r[8];
     c.regs_gp(r);
     aot_mem = g_base;
+    aot_fpu = static_cast<AotFpu *>(c.x87_state());   // issue #136: compiled x87 works on the CPU's
     g_aot_fn(r);
     for (int k = 0; k < 8; k++)
         if (k != d2rt::R_ESP)

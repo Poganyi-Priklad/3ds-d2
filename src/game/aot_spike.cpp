@@ -28,6 +28,12 @@ extern "C" {
 
 extern "C" {
 uint8_t *aot_mem = nullptr;
+AotFpu *aot_fpu = nullptr;   // aot_rt.h: the running emu's x87 state (Cpu::x87_state)
+// Box86's 80-bit conversions (x87emu_private.c), for fld/fstp m80.
+void LD2D(void *ld, void *d);
+void D2LD(void *d, void *ld);
+void aot_ld2d(const void *ld, double *d) { LD2D(const_cast<void *>(ld), d); }
+void aot_d2ld(const double *d, void *ld) { D2LD(const_cast<double *>(d), ld); }
 uint8_t aot_stale[16384];   // aot_rt.h's AOT_LIVE: by the functions' table's rows
 // From the generated file, compiled three ways (aot_rt.h): absent in a build
 // without it.
@@ -179,7 +185,8 @@ void run_to_sentinel(Cpu &c, uint32_t eip, uint32_t va)
 // The trap's general registers and eip, kept across a run of our own (a
 // nested run, a shim called in C): not the full context, whose FPU blob
 // (768 bytes each way) cost more than a short callee, and whose FPU is the
-// callee's to leave, as when Box86 calls it (compiled code has no x87).
+// callee's to leave, as when Box86 calls it (compiled x87 code works on that
+// same state, issue #136).
 struct TrapRegs {
     uint32_t r[9];
     explicit TrapRegs(Cpu &c) { c.regs_gp(r); r[8] = c.reg(d2rt::R_EIP); }
@@ -339,6 +346,41 @@ inline bool run_fn(const AotFunc *f, uint32_t *regs, ExitJump &x)
     return run_catching(f->sig, regs, x);
 }
 
+// The x87 state after a call (issue #136), the compiled code's against
+// Box86's: the control word, the status word's condition codes, the depth
+// and each value on the stack, from each one's own top (the dynarec writes
+// top 0 when its cache held all eight). False when they agree.
+bool fpu_differs(const AotFpu &a, const AotFpu &b, char *what, size_t n)
+{
+    if (a.cw != b.cw) {
+        std::snprintf(what, n, "x87 cw %04x, Box86 %04x", a.cw, b.cw);
+        return true;
+    }
+    const uint16_t cc = C87_C0 | C87_C1 | C87_C2 | C87_C3;
+    if ((a.sw ^ b.sw) & cc) {
+        std::snprintf(what, n, "x87 sw %04x, Box86 %04x", a.sw & cc, b.sw & cc);
+        return true;
+    }
+    if (a.stack != b.stack) {
+        std::snprintf(what, n, "x87 depth %d, Box86 %d", (int)a.stack, (int)b.stack);
+        return true;
+    }
+    for (int k = 0; k < a.stack && k < 8; k++) {
+        uint64_t x, y;
+        std::memcpy(&x, a.st[(a.top + k) & 7], 8);
+        std::memcpy(&y, b.st[(b.top + k) & 7], 8);
+        if (x != y) {
+            double dx, dy;
+            std::memcpy(&dx, &x, 8);
+            std::memcpy(&dy, &y, 8);
+            std::snprintf(what, n, "st(%d) %016llx (%.17g), Box86 %016llx (%.17g)", k, (unsigned long long)x, dx,
+                          (unsigned long long)y, dy);
+            return true;
+        }
+    }
+    return false;
+}
+
 // Check: false when the compiled code exited; Box86 goes on at x.target with
 // x.r (from the function's entry, x.target its trampoline, when the
 // journal put back all it wrote).
@@ -352,6 +394,8 @@ bool check_fn(Fn &F, Cpu &c, uint32_t *regs, ExitJump &x)
     uint32_t a[8], b[8];
     std::memcpy(a, regs, sizeof a);
     std::memcpy(b, regs, sizeof b);
+    AotFpu fpu_in, fpu_mine;   // issue #136: the x87 state at the entry, and the compiled code's after
+    std::memcpy(&fpu_in, aot_fpu, sizeof fpu_in);
     g_journal.clear();
     g_old.clear();
     g_impure = false;
@@ -370,6 +414,7 @@ bool check_fn(Fn &F, Cpu &c, uint32_t *regs, ExitJump &x)
                 std::memcpy(aot_mem + g_journal[k].va, &g_old[g_journal[k].at], g_journal[k].n);
             x.target = F.tramp;
             std::memcpy(x.r, b, sizeof b);
+            std::memcpy(aot_fpu, &fpu_in, sizeof fpu_in);
         }
         return false;
     }
@@ -389,6 +434,8 @@ bool check_fn(Fn &F, Cpu &c, uint32_t *regs, ExitJump &x)
         std::memcpy(&now[st.at], aot_mem + st.va, st.n);
     for (size_t k = journal.size(); k-- > 0;)
         std::memcpy(aot_mem + journal[k].va, &old[journal[k].at], journal[k].n);
+    std::memcpy(&fpu_mine, aot_fpu, sizeof fpu_mine);
+    std::memcpy(aot_fpu, &fpu_in, sizeof fpu_in);
     nested_run(c, F.tramp, b);
     const uint32_t esp = regs[4];
     int bad_reg = -1;
@@ -416,14 +463,18 @@ bool check_fn(Fn &F, Cpu &c, uint32_t *regs, ExitJump &x)
             }
         }
     }
+    char fpu_what[128];
+    const bool bad_fpu = bad_reg < 0 && !bad_mem && fpu_differs(fpu_mine, *aot_fpu, fpu_what, sizeof fpu_what);
     F.checked++;
     F.checked_all++;
-    if (bad_reg >= 0 || bad_mem) {
+    if (bad_reg >= 0 || bad_mem || bad_fpu) {
         F.differ++;
         F.differ_all++;
         if (++g_differ_logged <= 20) {
-            char what[96];
-            if (bad_reg >= 0)
+            char what[128];
+            if (bad_fpu)
+                std::snprintf(what, sizeof what, "%s", fpu_what);
+            else if (bad_reg >= 0)
                 std::snprintf(what, sizeof what, "%s %08x, Box86 %08x", reg_name(bad_reg), a[bad_reg], b[bad_reg]);
             else
                 std::snprintf(what, sizeof what, "the byte at %08x: %02x, Box86 %02x", first,
@@ -819,6 +870,11 @@ int install_aot(Cpu &c)
         return 0;
     }
     aot_mem = aot_guest_base();   // guest 0 in host memory, as the natives have it
+    aot_fpu = static_cast<AotFpu *>(c.x87_state());   // issue #136: compiled x87 works on it
+    if (!aot_fpu) {
+        rt::logf("aot: the CPU backend doesn't give its x87 state: no compiled code");
+        return 0;
+    }
     const uint32_t at = rt::va_alloc(0x1000, 0x0067b850);
     if (!at) {
         rt::logf("aot: no memory for the trampolines");
@@ -1047,8 +1103,13 @@ std::vector<std::string> aot_lines()
     }
     if (g_mode == AotMode::Check && !g_fns.empty()) {
         uint32_t calls = 0, differ = 0, unchecked = 0, fns = 0, calls_all = 0, differ_all = 0, unchecked_all = 0,
-                 fns_all = 0;
+                 fns_all = 0, x87_calls = 0, x87_fns = 0, x87_all = 0;
         for (Fn &F : g_fns) {
+            if (F.f->x87) {   // issue #136: what of it is x87 code
+                x87_all++;
+                x87_calls += F.checked_all;
+                x87_fns += (F.checked_all || F.unchecked_all) ? 1 : 0;
+            }
             calls += F.checked;
             differ += F.differ;
             unchecked += F.unchecked;
@@ -1059,12 +1120,13 @@ std::vector<std::string> aot_lines()
             fns_all += (F.checked_all || F.unchecked_all) ? 1 : 0;
             F.checked = F.differ = F.unchecked = 0;
         }
-        char line[256];
+        char line[384];
         std::snprintf(line, sizeof line,
                       "aot check: %u calls checked (%u functions), %u differ, %u unchecked (a call to Box86 inside); "
-                      "since the start %u calls of %u of %u functions, %u differ, %u unchecked",
+                      "since the start %u calls of %u of %u functions, %u differ, %u unchecked; with x87 code %u "
+                      "calls of %u of %u functions",
                       calls, fns, differ, unchecked, calls_all, fns_all, (unsigned)g_fns.size(), differ_all,
-                      unchecked_all);
+                      unchecked_all, x87_calls, x87_fns, x87_all);
         out.push_back(line);
     }
     {
@@ -1364,8 +1426,8 @@ void aot_call_out(uint32_t x, AotRegs *t, uint32_t pops)
             // after: its tail goes on from it.)
             const uint32_t popped = 4u + (sh->stdcall_cleanup ? 4u * sh->argc : 0u);
             // Only the trap's general registers and eip kept: the FPU's
-            // state is the shim's to leave (compiled code has no x87, and a
-            // float result in st0 is the caller's), flags don't outlive a
+            // state is the shim's to leave (compiled x87 code works on the
+            // CPU's own, and a float result in st0 is the caller's), flags don't outlive a
             // call (and reading them makes Box86 compute its deferred ones),
             // and the full context's 768-byte blob each way cost more than
             // the call.
