@@ -147,8 +147,10 @@ impl Func {
                             self.succ.insert(va, vec![]);
                         }
                         Some(sw) => {
+                            // Not the guard's default: the ja before goes there, and the
+                            // index here is in the table (issue #138: the jmp's pushes
+                            // reached a default that is the ret, two esps there).
                             let mut s: Vec<u32> = sw.targets.clone();
-                            s.push(sw.default);
                             s.sort();
                             s.dedup();
                             work.extend(s.iter().copied());

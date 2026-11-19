@@ -351,11 +351,20 @@ bool run_catching(AotRootFn fn, uint32_t *regs, ExitJump &x)
     return true;
 }
 
+// Whether F's compiled code may exit: by its own code, or through a function
+// a native changed that exits (g_stale_hard; issue #138: _ftol2, a leaf, once
+// its in-line patch made it Box86's).
+inline bool may_exit_now(const AotFunc *f)
+{
+    const size_t k = (size_t)(f - aot_funcs);
+    return f->may_exit || (k < g_stale_hard.size() && g_stale_hard[k]);
+}
+
 // F's compiled code on regs: true when it returned, false when it exited.
 // Only a function that may exit pays for the catch.
 inline bool run_fn(const AotFunc *f, uint32_t *regs, ExitJump &x)
 {
-    if (!f->may_exit) {
+    if (!may_exit_now(f)) {
         f->sig(regs);
         return true;
     }
@@ -417,7 +426,8 @@ bool check_fn(Fn &F, Cpu &c, uint32_t *regs, ExitJump &x)
     g_impure = false;
     g_garbage = 0;
     g_journaling++;
-    const bool done = F.fj->may_exit ? run_catching(F.fj->sig, a, x) : (F.fj->sig(a), true);
+    const bool done =
+        F.fj->may_exit || may_exit_now(F.f) ? run_catching(F.fj->sig, a, x) : (F.fj->sig(a), true);
     g_journaling = 0;
     const uint8_t garbage = g_garbage;
     if (!done) {
@@ -1012,7 +1022,32 @@ void aot_after_natives(Cpu &c)
     g_pending = AotMode::Off;
 }
 
+bool aot_compiled(uint32_t va)
+{
+    const AotMode m = g_pending != AotMode::Off ? g_pending : g_mode;
+    return (m == AotMode::Sig || m == AotMode::Check) && g_fn_at.count(va);
+}
+
 namespace {
+// The shim of the native that changed va, at its trap slot (the hook's jmp
+// from the entry), else null: a patch in line, whose call exits to Box86.
+const d2rt::Shim *stale_shim(uint32_t va)
+{
+    auto it = g_stale_slot.find(va);
+    if (it == g_stale_slot.end()) {
+        uint32_t slot = 0;
+        if (aot_mem[va] == 0xe9) {
+            int32_t rel;
+            std::memcpy(&rel, aot_mem + va + 1, 4);
+            const uint32_t to = va + 5u + (uint32_t)rel;
+            if (g_callouts && rt::bridge().slot_shim(to))
+                slot = to;
+        }
+        it = g_stale_slot.emplace(va, slot).first;
+    }
+    return it->second ? rt::bridge().slot_shim(it->second) : nullptr;
+}
+
 // FNV-1a over a compiled function's code as it is now, as the recompiler's
 // code_hash() took it from the Game.exe it compiled.
 uint32_t code_hash(Cpu &c, const AotFunc *f)
@@ -1075,7 +1110,9 @@ std::vector<uint8_t> stale_funcs(Cpu &c, uint32_t &changed, std::string &names)
     }
     g_stale_hard.assign(n, 0);
     for (size_t k = 0; k < n; k++)
-        g_stale_hard[k] = aot_stale[k] && aot_funcs[k].may_exit;
+        // ... and where no native's shim is at its entry: a patch in line,
+        // whose call exits (aot_call_stale), from a leaf too.
+        g_stale_hard[k] = aot_stale[k] && (aot_funcs[k].may_exit || !stale_shim(aot_funcs[k].va));
     for (bool more = changed != 0; more;) {
         more = false;
         for (size_t k = 0; k < n; k++)
@@ -1407,20 +1444,7 @@ void aot_call_stale(uint32_t va, AotRegs *t)
 {
     using namespace game;
     g_stale_by[va]++;
-    auto it = g_stale_slot.find(va);
-    if (it == g_stale_slot.end()) {
-        // The native's hook: a jmp from the entry to its trap slot.
-        uint32_t slot = 0;
-        if (aot_mem[va] == 0xe9) {
-            int32_t rel;
-            std::memcpy(&rel, aot_mem + va + 1, 4);
-            const uint32_t to = va + 5u + (uint32_t)rel;
-            if (g_callouts && rt::bridge().slot_shim(to))
-                slot = to;
-        }
-        it = g_stale_slot.emplace(va, slot).first;
-    }
-    const d2rt::Shim *sh = it->second ? rt::bridge().slot_shim(it->second) : nullptr;
+    const d2rt::Shim *sh = game::stale_shim(va);
     if (!sh && !g_no_exit) {
         // No shim at its entry (a patch in line): Box86 runs it from there and
         // returns through the compiled callers' return addresses (issue #138).

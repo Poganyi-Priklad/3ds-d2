@@ -656,6 +656,19 @@ impl<'p, 'a> Emitter<'p, 'a> {
         if m == "cld" || m == "std" {
             return Ok(";".to_string());
         }
+        // _ftol2's SSE2 path (issue #138): out of range, x86 gives 0x80000000.
+        if m == "cvttsd2si" && ops[0].is_reg() && ops[0].size == 4 {
+            let src = if ops[1].is_mem() {
+                format!("aot_ldf64(M, {})", self.addr(i, &ops[1])?)
+            } else {
+                return refused(format!("cvttsd2si from a register at {:08x}", va));
+            };
+            return Ok(format!(
+                "{{ double d = {}; {} }}",
+                src,
+                self.put(i, &ops[0], "(d > -2147483649.0 && d < 2147483648.0) ? (uint32_t)(int32_t)d : 0x80000000u")?
+            ));
+        }
         if m == "wait" || x87_op(i).is_some() {
             return self.x87(i);
         }

@@ -4313,6 +4313,9 @@ bool install_slot_steps(Cpu &c)
 //   682fd9  push ebp; ...; fstp qword [esp]; cvttsd2si eax, [esp]; leave; ret
 // becomes jmp 0x682fd9. With D2_NATIVE_CHECK, a stub runs both on each
 // call instead, and FtolCheck compares them.
+// Where compiled code runs _ftol2 (issue #138), not patched: the patch is for
+// the dynarec, and the compiled original's x87 path is C's own (patched, the
+// function would be Box86's, each call an exit).
 constexpr uint32_t kFtol = 0x00682fd0, kFtolSse = 0x00682fd9, kFtolX87 = 0x00683006;
 uint32_t g_ftol_calls = 0, g_ftol_bad = 0;
 
@@ -4332,6 +4335,10 @@ uint32_t ftol_check(Cpu &c)
 
 bool install_ftol(Cpu &c, bool check)
 {
+    if (game::aot_compiled(kFtol)) {
+        rt::logf("native: _ftol2_sse at %08x left as it is: compiled", kFtol);
+        return false;
+    }
     static const uint8_t kOrig[] = {0x83, 0x3d, 0x88, 0x4c, 0x99, 0x00, 0x00, 0x74, 0x2d};
     uint8_t have[sizeof kOrig];
     if (!c.read(kFtol, have, sizeof have) || std::memcmp(have, kOrig, sizeof have))

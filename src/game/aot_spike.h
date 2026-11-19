@@ -69,6 +69,11 @@ bool aot_resume(d2rt::Cpu &c, uint32_t va, uint32_t esp, uint32_t stack_args);
 // Whether aot_resume would run va's entry.
 bool aot_resumable(uint32_t va);
 
+// Whether compiled code runs the function at va (Sig or Check, the lane's
+// D2_AOT included before the natives are in): a native that only speeds up
+// Box86 there can leave it be (issue #138: _ftol2's).
+bool aot_compiled(uint32_t va);
+
 // A native that does what the game's function at va does, its registers
 // included (the check lane with it: 0 differ): compiled code calls the
 // function's compiled original, not the native.
