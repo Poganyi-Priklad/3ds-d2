@@ -289,6 +289,21 @@ constexpr uint32_t kHoverFlagVa = 0x007A6A94, kHoverTypeVa = 0x007A6A8C, kHoverI
 constexpr uint32_t kPetListVa = 0x007BB5BC;
 constexpr uint32_t kDataTablesVa = 0x00744304;   // the loaded .txt tables
 constexpr float kAimReadSubtiles = 40.0f;          // units further away are never targets
+constexpr uint32_t kItem = 4;
+// Items.txt (weapons, armour and misc in one table): the rows and their
+// count, 0x1A8 bytes a row, the four-character code at +0x80.
+constexpr uint32_t kItemRowsVa = 0x0096CA5C, kItemCountVa = 0x0096CA58;
+constexpr uint32_t kItemRowSize = 0x1A8, kItemCode = 0x80;
+// objects.txt's record (the object's data +0x14 points at a pointer to
+// it): OperateFn at +0x1B3.
+constexpr uint32_t kObjectOperateFn = 0x1B3;
+// The player's skills (unit +0xA8): the right button's at +0x0C, a node
+// whose +0x00 points at its skills.txt row; the row starts with the id, and
+// its flags at +0x04 have TargetCorpse in bit 24.
+constexpr uint32_t kSkillInfo = 0xA8, kRightSkill = 0x0C, kSkillFlags = 0x04;
+constexpr uint32_t kSkillTargetCorpse = 1u << 24;
+// One subtile on the screen: half a floor tile's diamond (32 by 16 pixels).
+constexpr int kSubtileHalfWidthPx = 16, kSubtileHalfHeightPx = 8;
 
 uint64_t (*g_aim_clock)() = rt::now_us;
 AimReadCost g_aim_cost;
@@ -358,7 +373,55 @@ public:
         out.hover_on = rd32(kHoverFlagVa) != 0;
         out.hover_type = rd32(kHoverTypeVa);
         out.hover_id = rd32(kHoverIdVa);
+        const uint32_t skills = rd32(player + kSkillInfo), right = skills ? rd32(skills + kRightSkill) : 0;
+        const uint32_t row = right ? rd32(right) : 0;
+        out.right_skill = row ? rd32(row) : 0;
+        out.right_skill_on_corpses = row && (rd32(row + kSkillFlags) & kSkillTargetCorpse);
         return true;
+    }
+
+    void ground_units(std::vector<AimUnit> &out) override
+    {
+        const uint64_t start = g_aim_clock();
+        const uint32_t player = rd32(kPlayerUnitVa);
+        if (!player || !place(player, player_x_, player_y_) || !feet(player, hero_x_, hero_y_))
+            return;
+        uint32_t read = 0;
+        for (uint32_t type : {kObject, kItem}) {
+            uint32_t heads[kBuckets] = {};
+            rt::guest_read(kUnitTablesVa + type * kBuckets * 4, heads, sizeof heads);
+            for (uint32_t b = 0; b < kBuckets; b++) {
+                uint32_t u = heads[b];
+                for (int n = 0; u && n < 64; n++) {
+                    AimUnit unit;
+                    uint32_t next = 0;
+                    read++;
+                    if (read_ground_unit(u, type, unit, next) && unit.distance <= kAimReadSubtiles)
+                        out.push_back(unit);
+                    u = next;
+                }
+            }
+        }
+        const uint64_t took = g_aim_clock() - start;
+        g_aim_cost.units += read;
+        g_aim_cost.total_us += took;
+        g_aim_cost.longest_us = took > g_aim_cost.longest_us ? took : g_aim_cost.longest_us;
+    }
+
+    bool ground_unit(uint32_t type, uint32_t id, AimUnit &out) override
+    {
+        const uint32_t player = rd32(kPlayerUnitVa);
+        if ((type != kObject && type != kItem) || !player || !place(player, player_x_, player_y_) ||
+            !feet(player, hero_x_, hero_y_))
+            return false;
+        uint32_t u = rd32(kUnitTablesVa + (type * kBuckets + (id & (kBuckets - 1))) * 4);
+        for (int n = 0; u && n < 64; n++) {
+            uint32_t next = 0;
+            if (rd32(u + 0x0C) == id)
+                return read_ground_unit(u, type, out, next);
+            u = rd32(u + kListNext);
+        }
+        return false;
     }
 
     void units(std::vector<AimUnit> &out) override
@@ -448,6 +511,46 @@ private:
         return true;
     }
 
+    // An object's or an item's fields, and the next in its bucket. Its place
+    // is a whole subtile (the static path); its feet on the screen are the
+    // hero's plus the isometric offset.
+    bool read_ground_unit(uint32_t u, uint32_t type, AimUnit &out, uint32_t &next)
+    {
+        uint32_t fields[0xE8 / 4] = {};
+        if (!rt::guest_read(u, fields, sizeof fields))
+            return false;
+        next = fields[kListNext / 4];
+        const uint32_t path = fields[kPath / 4];
+        if (fields[0] != type || !path)
+            return false;
+        out.type = type;
+        out.cls = fields[0x04 / 4];
+        out.id = fields[0x0C / 4];
+        out.mode = fields[0x10 / 4];
+        out.flags_a = fields[0xC4 / 4];
+        out.flags_b = fields[0xC8 / 4];
+        int32_t spot[2] = {};
+        if (!rt::guest_read(path + 0x0C, spot, sizeof spot))
+            return false;
+        const double dx = spot[0] - player_x_, dy = spot[1] - player_y_;
+        out.distance = (float)std::sqrt(dx * dx + dy * dy);
+        out.feet_x = hero_x_ + (int)std::lround((dx - dy) * kSubtileHalfWidthPx);
+        out.feet_y = hero_y_ + (int)std::lround((dx + dy) * kSubtileHalfHeightPx);
+        const uint32_t data = fields[0x14 / 4];
+        if (type == kObject) {
+            const uint32_t txt = data ? rd32(data) : 0;
+            uint8_t operate_fn = 0;
+            if (txt)
+                rt::guest_read(txt + kObjectOperateFn, &operate_fn, 1);
+            out.operate_fn = operate_fn;
+        } else {
+            out.quality = data ? rd32(data) : 0;
+            const uint32_t rows = rd32(kItemRowsVa);
+            out.code = rows && out.cls < rd32(kItemCountVa) ? rd32(rows + out.cls * kItemRowSize + kItemCode) : 0;
+        }
+        return true;
+    }
+
     // The client's pet list (the mercenary, summons): their unit ids. Read
     // once per poll at most.
     void read_pets()
@@ -460,6 +563,7 @@ private:
     }
 
     double player_x_ = 0, player_y_ = 0;
+    int hero_x_ = 0, hero_y_ = 0;   // the hero's feet on the screen (ground units)
     int camera_x_ = 0, camera_y_ = 0;
     std::vector<uint32_t> pets_;
     MonsterFlags flags_;

@@ -82,6 +82,14 @@ void log_units(bool all = false);
 //   unit +0x2C path: +0x08, +0x0C its feet in world pixels
 //   unit +0xC4, +0xC8         flags (auto_target.h's aim_bits)
 //   MonStats.txt row +0x0C flags; +0x18 its MonStats2 row, whose +0x04 flags
+// And the objects (type 2) and items on the ground (type 4), checked on the
+// lane:
+//   unit +0x2C static path: +0x0C x, +0x10 y in whole subtiles
+//   object: data +0x14 -> objects.txt record, OperateFn at +0x1B3
+//   item: data +0x14 +0x00 quality; items.txt rows at [0x0096CA5C] (count
+//         [0x0096CA58], 0x1A8 bytes each), the code at +0x80
+//   player +0xA8 skills: +0x0C the right button's node -> skills.txt row
+//         (+0x00 id, +0x04 flags, bit 24 TargetCorpse)
 AimWorld &game_aim_world();
 // The reads are timed (AimWorld::read_cost) with clock_us: rt::now_us by
 // default; the Linux lane's virtual clock doesn't move inside a poll, so
