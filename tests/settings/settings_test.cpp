@@ -1,0 +1,132 @@
+// src/game/settings_file.h: settings.txt rewritten by the port without
+// losing the lines it doesn't own (keys written by hand for a measurement,
+// comments), its own keys replaced where they were. Run through
+// `scripts/docker.sh test settings`.
+#include "game/settings_file.h"
+
+#include <cstdio>
+#include <string>
+#include <vector>
+
+using game::merge_settings_text;
+using game::SettingLine;
+
+static int g_fail = 0;
+
+#define CHECK(c)                                                         \
+    do {                                                                 \
+        if (!(c)) {                                                      \
+            std::printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #c);     \
+            g_fail++;                                                    \
+        }                                                                \
+    } while (0)
+
+#define CHECK_TEXT(got, want)                                                              \
+    do {                                                                                   \
+        const std::string got_text = (got), want_text = (want);                            \
+        if (got_text != want_text) {                                                       \
+            std::printf("FAIL %s:%d:\n--- got:\n%s--- want:\n%s---\n", __FILE__, __LINE__, \
+                        got_text.c_str(), want_text.c_str());                              \
+            g_fail++;                                                                      \
+        }                                                                                  \
+    } while (0)
+
+// The port's lines as ctr_game.cpp's port_settings_lines() gives them.
+static std::vector<SettingLine> port_lines()
+{
+    return {{"bottom", "map"}, {"mapscale", "2"}, {"port", "core2,limiter"}, {"callret", "1"}};
+}
+
+static void test_new_file()
+{
+    // No file yet: the port's lines alone, in order.
+    CHECK_TEXT(merge_settings_text("", port_lines()), "bottom=map\nmapscale=2\nport=core2,limiter\ncallret=1\n");
+}
+
+static void test_unknown_keys_kept()
+{
+    // The measurement keys the port reads but never writes stay, in their places.
+    const std::string old_text =
+        "bgquantum=20000\n"
+        "bottom=info\n"
+        "stormrate=512\n"
+        "mapscale=1\n"
+        "stallms=100\n"
+        "aotfns=10-20\n"
+        "port=core2\n"
+        "callret=0\n";
+    CHECK_TEXT(merge_settings_text(old_text, port_lines()),
+               "bgquantum=20000\n"
+               "bottom=map\n"
+               "stormrate=512\n"
+               "mapscale=2\n"
+               "stallms=100\n"
+               "aotfns=10-20\n"
+               "port=core2,limiter\n"
+               "callret=1\n");
+}
+
+static void test_missing_port_keys_appended()
+{
+    // A hand-written file with only some of the port's keys: the others
+    // come at its end, the hand-written lines untouched.
+    CHECK_TEXT(merge_settings_text("stormrate=512\nmapscale=4\n", port_lines()),
+               "stormrate=512\nmapscale=2\nbottom=map\nport=core2,limiter\ncallret=1\n");
+}
+
+static void test_comments_blank_lines_and_no_final_newline()
+{
+    CHECK_TEXT(merge_settings_text("# my notes\n\nbgslice=0", port_lines()),
+               "# my notes\n\nbgslice=0\nbottom=map\nmapscale=2\nport=core2,limiter\ncallret=1\n");
+}
+
+static void test_duplicates_dropped()
+{
+    // A second line of a port key would win at the next start (the file is
+    // read top to bottom): it goes, the first is replaced.
+    CHECK_TEXT(merge_settings_text("bottom=info\nstallms=9\nbottom=keys\n", port_lines()),
+               "bottom=map\nstallms=9\nmapscale=2\nport=core2,limiter\ncallret=1\n");
+}
+
+static void test_retired_key_dropped()
+{
+    // floorqueue= (port='s first form) can't stay after port=: it would
+    // override it at the next start.
+    CHECK_TEXT(merge_settings_text("port=core2\nfloorqueue=0\nstormdirect=0\n", port_lines(), {"floorqueue"}),
+               "port=core2,limiter\nstormdirect=0\nbottom=map\nmapscale=2\ncallret=1\n");
+}
+
+static void test_prefix_keys_not_confused()
+{
+    // "mapscale" isn't "map", nor is "callretx" "callret".
+    CHECK_TEXT(merge_settings_text("callretx=5\nmap=1\n", port_lines()),
+               "callretx=5\nmap=1\nbottom=map\nmapscale=2\nport=core2,limiter\ncallret=1\n");
+}
+
+static void test_crlf_lines_kept()
+{
+    // A file saved by a Windows editor: its own lines keep their "\r".
+    CHECK_TEXT(merge_settings_text("stallms=7\r\n", port_lines()),
+               "stallms=7\r\nbottom=map\nmapscale=2\nport=core2,limiter\ncallret=1\n");
+}
+
+static void test_saving_twice_changes_nothing()
+{
+    const std::string once = merge_settings_text("bgquantum=1\nbottom=info\n# x\n", port_lines());
+    CHECK_TEXT(merge_settings_text(once, port_lines()), once);
+}
+
+int main()
+{
+    test_new_file();
+    test_unknown_keys_kept();
+    test_missing_port_keys_appended();
+    test_comments_blank_lines_and_no_final_newline();
+    test_duplicates_dropped();
+    test_retired_key_dropped();
+    test_prefix_keys_not_confused();
+    test_crlf_lines_kept();
+    test_saving_twice_changes_nothing();
+    std::printf("RESULT settings %s (%d failures)\n", g_fail ? "FAIL" : "PASS", g_fail);
+    return g_fail ? 1 : 0;
+}

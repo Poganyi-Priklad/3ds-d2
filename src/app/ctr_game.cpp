@@ -47,6 +47,7 @@
 #include "game/osk.h"
 #include "game/profiler.h"
 #include "game/second_screen.h"
+#include "game/settings_file.h"
 #include "game/sprite_trace.h"
 #include "game/storm_reads.h"
 #include "runtime/ds_emul.h"
@@ -1751,13 +1752,41 @@ void load_settings()
     g_ss.take_settings_changed();
 }
 
+// settings.txt as the port sees it now: the port's own keys, in the order
+// they are written (src/game/settings_file.h keeps every other line of the
+// file as the player left it).
+std::vector<game::SettingLine> port_settings_lines()
+{
+    std::vector<game::SettingLine> lines = {
+        {"bottom", game::bottom_tab_name(g_ss.tab())},
+        {"mapscale", std::to_string(g_ss.map_scale())},
+        {"mapms", std::to_string((unsigned)g_ss.map_ms())},
+        {"maphelp", g_ss.map_help() ? "1" : "0"},
+        {"profile", game::profile_names(g_ss.profile_choice())},
+        {"tracewrites", game::trace_writes_info(g_ss.trace_writes()).name},
+        {"port", game::port_names(g_ss.port_options())},
+    };
+    return lines;
+}
+
+// Writes settings.txt. The file is read first and only the port's own lines
+// change: the keys the port reads but never writes (bgquantum=, stormrate=,
+// stallms=, aotfns=, callret=, ...), comments and anything else stay where they were.
+// floorqueue= (the first form of port='s core 2 tick, issue #80) is dropped,
+// as before, so that it can't override port= at the next start.
 void save_settings()
 {
+    std::string old_text;
+    if (FILE *f = std::fopen(kSettings, "r")) {
+        char chunk[512];
+        size_t got;
+        while ((got = std::fread(chunk, 1, sizeof chunk, f)) > 0 && old_text.size() < 64 * 1024)
+            old_text.append(chunk, got);
+        std::fclose(f);
+    }
+    const std::string new_text = game::merge_settings_text(old_text, port_settings_lines(), {"floorqueue"});
     if (FILE *f = std::fopen(kSettings, "w")) {
-        std::fprintf(f, "bottom=%s\nmapscale=%d\nmapms=%u\nmaphelp=%d\nprofile=%s\ntracewrites=%s\nport=%s\n",
-                     game::bottom_tab_name(g_ss.tab()), g_ss.map_scale(), (unsigned)g_ss.map_ms(),
-                     g_ss.map_help() ? 1 : 0, game::profile_names(g_ss.profile_choice()).c_str(),
-                     game::trace_writes_info(g_ss.trace_writes()).name, game::port_names(g_ss.port_options()).c_str());
+        std::fwrite(new_text.data(), 1, new_text.size(), f);
         std::fclose(f);
     }
 }
