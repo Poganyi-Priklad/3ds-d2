@@ -333,6 +333,18 @@ test)
         aot_recompiler_build
         # shellcheck disable=SC2046
         run_in "$HOSTTEST_IMAGE" "$AOT_RECOMPILER" /aot/Game.exe --explain "$3" $(aot_args) ;;
+    aot-left)  # <game-dir> (issue #138): what Box86 still ran in the last test aot, run as AOT_MODE=1 AOT_ENV="WX86_HOTPROF=1
+               # D2_NOLINK=1 M4_HOTPROF_TOP=20000": its block counter folded into functions, each classed by the
+               # build's aot_spike.json (hooked, not hookable, refused, not on d2d's list), against the Box86
+               # lane's profile of the same scripts (build/m4-prof/*.err) where there is one.
+        [ -n "${2:-}" ] && [ -f "$2/Game.exe" ] || die "test aot-left <game-dir>"
+        RUN_EXTRA=(-v "$(host_path "$(cd "$2" && pwd)/Game.exe"):/aot/Game.exe:ro")
+        logs=(); base=()
+        for f in "$ROOT"/build/m4-aot/{town-walk,fight,act2-east}.txt; do [ -f "$f" ] && logs+=("build/m4-aot/$(basename "$f")"); done
+        for f in "$ROOT"/build/m4-prof/*.err; do [ -f "$f" ] && base+=("build/m4-prof/$(basename "$f")"); done
+        [ "${#logs[@]}" -gt 0 ] || die "no build/m4-aot/<script>.txt: run test aot first"
+        run_in "$HOSTTEST_IMAGE" python3 -I tools/aot/box86_left.py /aot/Game.exe build/aot/spike/aot_spike.json "${logs[@]}" \
+            ${base[@]+--baseline "${base[@]}"} ;;
     aot-compare)  # <game-dir> <a> <b> [census] (issue #144): two recompilers on the same Game.exe, what they write
                   # compared (the C byte for byte, the reports but for their timings). Each of a and b is rs (this
                   # tree's tools/aot/recompile), rs@<rev> (that commit's) or py@<rev> (a commit's recompile.py,
@@ -374,7 +386,7 @@ test)
             esac || exit 1
         done
         run_in "$HOSTTEST_IMAGE" python3 -I tools/aot/compare.py "build/aot/cmp/${sides[0]}" "build/aot/cmp/${sides[1]}" ;;
-    *)    die "test host | test x86 [golden] | test cpu [armv7|armv6] | test m3 | test report | test governor | test gameexe | test frames | test pad | test pool | test d2d [<game-dir>] | test tls | test m4 <game-dir> | test aot <game-dir> [<save-dir>] | test aot-explain <game-dir> <va,...> | test aot-census <game-dir> | test aot-compare <game-dir> <a> <b> [census]" ;;
+    *)    die "test host | test x86 [golden] | test cpu [armv7|armv6] | test m3 | test report | test governor | test gameexe | test frames | test pad | test pool | test d2d [<game-dir>] | test tls | test m4 <game-dir> | test aot <game-dir> [<save-dir>] | test aot-explain <game-dir> <va,...> | test aot-census <game-dir> | test aot-left <game-dir> | test aot-compare <game-dir> <a> <b> [census]" ;;
     esac
     ;;
 package)
