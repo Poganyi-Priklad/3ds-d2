@@ -309,6 +309,9 @@ impl Func {
                 n += 1;
             } else if matches!(j.mnemonic.as_str(), "call" | "pop" | "ret" | "leave" | "pushal" | "popal")
                 || j.op_str.split(',').next().unwrap_or("").trim() == "esp"
+                // A frame's mov ebp, esp (issue #138: renderer_line's push ebp
+                // counted as an argument, 20 for 16, so its calls were exits).
+                || j.op_str.split(',').nth(1).is_some_and(|o| o.trim() == "esp")
             {
                 break;
             }

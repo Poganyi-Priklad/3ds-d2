@@ -1514,6 +1514,20 @@ void aot_exit(uint32_t target, uint32_t eax, uint32_t ecx, uint32_t edx, uint32_
         aot_unreachable(target);
     }
     x->target = target;
+    {   // D2_AOT_EXIT_LOG=<hex va> (issue #138): the first 40 exits to va, with the return address at esp
+        static const uint32_t to =
+            std::getenv("D2_AOT_EXIT_LOG") ? (uint32_t)std::strtoul(std::getenv("D2_AOT_EXIT_LOG"), nullptr, 16) : 0;
+        static long logged = 0;
+        if (to && target == to && logged < 40) {
+            logged++;
+            const auto it = game::g_fn_at.find(target);
+            const game::Fn *F = it == game::g_fn_at.end() ? nullptr : &game::g_fns[it->second];
+            rt::logf("aot: exit to %08x, [esp] %08x: %s, hooked %d, dropped %d, stale %d, mode %d, callouts %d, "
+                     "shim %d, no_exit %d", target, aot_ld32(aot_mem, esp), F ? "in the table" : "not in the table",
+                     F ? F->hooked : -1, F ? F->dropped : -1, F ? aot_stale[F->f - aot_funcs] : -1,
+                     (int)game::g_mode, game::g_callouts, rt::bridge().slot_shim(target) != nullptr, game::g_no_exit);
+        }
+    }
     const uint32_t r[8] = {eax, ecx, edx, ebx, esp, ebp, esi, edi};
     std::memcpy(x->r, r, sizeof r);
     std::longjmp(x->jb, 1);
