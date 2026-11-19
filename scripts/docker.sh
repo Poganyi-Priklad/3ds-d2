@@ -12,6 +12,7 @@
 #   scripts/docker.sh test tls           the reports' TLS module under qemu-arm: a test event to Sentry (network)
 #   scripts/docker.sh test pad           the pad's readings between two message pumps (issue #118)
 #   scripts/docker.sh test settings      settings.txt rewritten keeping the lines the port doesn't own
+#   scripts/docker.sh test aim           the auto-target on A and B: cone, rules, stickiness, timers, settings
 #   scripts/docker.sh test d2d [<game-dir>]   d2d's work tree and its harness's modules; with Game.exe, its cases vs our natives
 #   scripts/docker.sh test aot <game-dir> [<save-dir>]   every AOT-compiled function checked against Box86 on the lane's
 #                                        town walk and fight, and with an Act I save (dist/save/BeforeCh1End/save) Act II
@@ -220,6 +221,7 @@ test)
     pad)  run_in "$HOSTTEST_IMAGE" make -C tests/pad run ;;   # presses shorter than a frame kept (issue #118)
     pool) run_in "$HOSTTEST_IMAGE" make -C tests/pool run ;;   # where the pool's VirtualAlloc face fits a block without the spare
     settings) run_in "$HOSTTEST_IMAGE" make -C tests/settings run ;;   # settings.txt rewritten keeping the lines the port doesn't own
+    aim)  run_in "$HOSTTEST_IMAGE" make -C tests/aim run ;;   # the auto-target's rules against made-up units
     d2d)  # [<game-dir>]: d2d's work tree, prepared and patched (issue #106); with the game directory
           # (mounted read-only), d2d's emulator-made cases against our natives (issue #108)
         if [ -n "${2:-}" ]; then
@@ -413,7 +415,7 @@ test)
             esac || exit 1
         done
         run_in "$HOSTTEST_IMAGE" python3 -I tools/aot/compare.py "build/aot/cmp/${sides[0]}" "build/aot/cmp/${sides[1]}" ;;
-    *)    die "test host | test x86 [golden] | test cpu [armv7|armv6] | test m3 | test report | test governor | test gameexe | test frames | test pad | test pool | test d2d [<game-dir>] | test tls | test m4 <game-dir> | test aot <game-dir> [<save-dir>] | test aot-explain <game-dir> <va,...> | test aot-census <game-dir> | test aot-left <game-dir> | test aot-compare <game-dir> <a> <b> [census] | test settings" ;;
+    *)    die "test host | test x86 [golden] | test cpu [armv7|armv6] | test m3 | test report | test governor | test gameexe | test frames | test pad | test pool | test d2d [<game-dir>] | test tls | test m4 <game-dir> | test aot <game-dir> [<save-dir>] | test aot-explain <game-dir> <va,...> | test aot-census <game-dir> | test aot-left <game-dir> | test aot-compare <game-dir> <a> <b> [census] | test settings | test aim" ;;
     esac
     ;;
 package)
