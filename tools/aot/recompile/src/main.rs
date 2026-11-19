@@ -5,6 +5,7 @@
 //!     recompile Game.exe --out build/aot/spike --root 67b850:PathSearch --compile 67aed0,...
 //!     recompile Game.exe --census --modes sig --out build/aot/census [--hot log ...]
 //!     recompile Game.exe --survey
+//!     recompile Game.exe --all --modes sig --out build/aot/spike   (every function on --functions' list)
 //!
 //! The output is Game.exe in another form: it goes under build/ and into
 //! the CIA (docs/aot.md's Distribution), never into the repository.
@@ -44,6 +45,7 @@ struct Args {
     no_callouts: bool,
     survey: bool,
     census: bool,
+    all: bool,
     hot: Vec<String>,
     explain: Option<String>,
     src_root: String,
@@ -52,7 +54,7 @@ struct Args {
 fn usage() -> ! {
     eprintln!(
         "usage: recompile EXE [--out DIR] [--root VA[:NAME]] [--compile VA,...] [--tree VA:DEPTH] [--functions TSV] \
-         [--modes sig,ctx] [--callees N] [--no-callouts] [--survey] [--census] [--hot LOG] [--explain VA,...] [--src-root DIR]"
+         [--modes sig,ctx] [--callees N] [--no-callouts] [--survey] [--census] [--all] [--hot LOG] [--explain VA,...] [--src-root DIR]"
     );
     std::process::exit(2);
 }
@@ -70,6 +72,7 @@ fn parse_args() -> Args {
         no_callouts: false,
         survey: false,
         census: false,
+        all: false,
         hot: Vec::new(),
         explain: None,
         src_root: ".".to_string(),
@@ -91,11 +94,12 @@ fn parse_args() -> Args {
             Some((n, v)) => (n.to_string(), Some(v.to_string())),
             None => (s.clone(), None),
         };
-        let flag = |n: &str| ["--no-callouts", "--survey", "--census"].contains(&n);
+        let flag = |n: &str| ["--no-callouts", "--survey", "--census", "--all"].contains(&n);
         if flag(&name) {
             match name.as_str() {
                 "--no-callouts" => a.no_callouts = true,
                 "--survey" => a.survey = true,
+                "--all" => a.all = true,
                 _ => a.census = true,
             }
             continue;
@@ -176,6 +180,13 @@ fn main() {
         names.extend(n);
     }
     let (mut extra, _) = parse_vas(&a.compile.join(","));
+    if a.all {
+        // d2d's whole list, as the census compiles it (#138: the lane on all of it).
+        let mut l: Vec<u32> = census::load_list(&a.functions, None).keys().copied().collect();
+        l.sort();
+        let have: HashSet<u32> = extra.iter().chain(roots.iter()).copied().collect();
+        extra.extend(l.into_iter().filter(|v| !have.contains(v)));
+    }
     let intr = intrinsics();
     let nat = natives();
     for t in &a.tree {
