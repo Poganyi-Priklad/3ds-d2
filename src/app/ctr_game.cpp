@@ -2177,6 +2177,11 @@ void apply_pad(game::Pad pad, uint64_t now, bool last)
             g_wait_release = false;
     }
     g_ss.update(pad, gs, g_controls.cursor_x(), g_controls.cursor_y(), now);
+    if (g_ss.take_aim_changed()) {
+        // AIM > SETTINGS: the auto-target runs with the new value at once.
+        g_aim_settings = g_ss.aim_settings();
+        g_controls.set_auto_target(g_aim_settings, &game::game_aim_world());
+    }
     if (g_ss.take_settings_changed())
         g_settings_save_delay.note_change(osGetTime());   // written by apt_service once the taps stop
     g_controls.set_context(gs.in_game, gs.panel_open, gs.ui, gs.in_game && game::holding_item());
@@ -2834,6 +2839,7 @@ int main()
     if (!g_aim_in_settings || !g_aim_newest_in_settings)
         save_settings();   // once: so settings.txt shows aim= and its numbers to edit
     g_controls.set_auto_target(g_aim_settings, &game::game_aim_world());
+    g_ss.set_aim_settings(g_aim_settings);   // AIM > SETTINGS shows and changes them
     {
         char line[320];
         std::snprintf(line, sizeof line,

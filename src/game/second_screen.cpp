@@ -1,6 +1,8 @@
 // See second_screen.h.
 #include "game/second_screen.h"
 
+#include "game/aim_faq.h"
+#include "game/aim_settings.h"
 #include "game/automap.h"
 #include "game/profiler.h"
 
@@ -110,6 +112,7 @@ const char *bottom_tab_name(BottomTab t)
     case BottomTab::Keys: return "keys";
     case BottomTab::Zoom: return "zoom";
     case BottomTab::Info: return "info";
+    case BottomTab::Aim: return "aim";
     case BottomTab::Panel: return "panel";
     }
     return "map";
@@ -117,7 +120,7 @@ const char *bottom_tab_name(BottomTab t)
 
 bool bottom_tab_from_name(const char *s, BottomTab &t)
 {
-    for (BottomTab c : {BottomTab::Map, BottomTab::Keys, BottomTab::Zoom, BottomTab::Info})
+    for (BottomTab c : {BottomTab::Map, BottomTab::Keys, BottomTab::Zoom, BottomTab::Info, BottomTab::Aim})
         if (std::strcmp(s, bottom_tab_name(c)) == 0) {
             t = c;
             return true;
@@ -162,6 +165,7 @@ BottomView::Kind SecondScreen::shown_kind() const
     case BottomTab::Zoom:
     case BottomTab::Panel: return BottomView::kViewport;
     case BottomTab::Info: return BottomView::kInfo;
+    case BottomTab::Aim: return BottomView::kAim;
     }
     return BottomView::kInfo;
 }
@@ -172,7 +176,7 @@ void SecondScreen::step_tab(int dir)
 {
     if (shown_kind() == BottomView::kKeyboard)
         return;
-    const int n = panel_sides_ ? 5 : 4;
+    const int n = panel_sides_ ? 6 : 5;
     const BottomTab to = (BottomTab)(((int)shown_tab() + dir + n) % n);
     if (to == BottomTab::Panel) {
         panel_dismissed_ = false;
@@ -343,7 +347,7 @@ void SecondScreen::follow_cursor()
 
 void SecondScreen::tab_tapped(int x, Pad &pad)
 {
-    const int n = panel_sides_ ? 5 : 4;
+    const int n = panel_sides_ ? 6 : 5;
     const int i = clampi(x * n / kW, 0, n - 1);
     const BottomTab hit = (BottomTab)i;
     if (hit == shown_tab()) {
@@ -414,6 +418,21 @@ void SecondScreen::update(Pad &pad, const GameState &gs, int cursor_x, int curso
                        map_button(pad.touch_x, pad.touch_y, kind == BottomView::kMap && gs_.in_game) >= 0) {
                 grip_ = Grip::MapButton;
                 key_ = map_button(pad.touch_x, pad.touch_y, kind == BottomView::kMap && gs_.in_game);
+            } else if (kind == BottomView::kAim && pad.touch_y >= kMapBtnY) {
+                grip_ = Grip::MapButton;   // AIM's pages: SETTINGS, FAQ
+                key_ = pad.touch_x < kAimFaqBtnX ? 300 : 301;
+            } else if (kind == BottomView::kAim && aim_faq_) {
+                grip_ = Grip::Scroll;      // the FAQ follows the finger
+                aim_faq_grab_top_ = aim_faq_top_;
+            } else if (kind == BottomView::kAim) {
+                // A SETTINGS row's "-" or "+" (key 200 + row * 2, + 1 for "+").
+                const int row = (pad.touch_y - kAimRowY) / kAimRowH;
+                const bool on_row = pad.touch_y >= kAimRowY && row < kAimSettingRows;
+                grip_ = Grip::MapButton;
+                key_ = !on_row                                                   ? kKeyAimNothing
+                       : pad.touch_x >= kAimMinusX && pad.touch_x < kAimValueX ? 200 + row * 2
+                       : pad.touch_x >= kAimPlusX                               ? 201 + row * 2
+                                                                                 : kKeyAimNothing;
             } else if (kind == BottomView::kInfo && pad.touch_y >= kMapBtnY && !checklist_ && !options_) {
                 // INFO's own buttons: the profiler run, the OPTIONS page, the report.
                 grip_ = Grip::MapButton;
@@ -443,6 +462,14 @@ void SecondScreen::update(Pad &pad, const GameState &gs, int cursor_x, int curso
             const int d = std::abs(pad.touch_x - tx0_) + std::abs(pad.touch_y - ty0_);
             if (d > moved_)
                 moved_ = d;
+        }
+        if (grip_ == Grip::Scroll && pad.touching) {
+            const int top = clampi(aim_faq_grab_top_ - (pad.touch_y - ty0_) / kAimFaqRowH, 0,
+                                   std::max(0, kAimFaqLines - kAimFaqRows));
+            if (top != aim_faq_top_) {
+                aim_faq_top_ = top;
+                dirty_ = true;
+            }
         }
         if (grip_ == Grip::Point && pad.touching) {
             // Resting at the edge scrolls (the spot under the finger moves on),
@@ -483,7 +510,19 @@ void SecondScreen::update(Pad &pad, const GameState &gs, int cursor_x, int curso
             // INFO's ask for a report, or take the request back; its
             // profiler run's checklist, where the ticks change only between
             // runs, and a run starts only with something ticked.
-            if (key_ == 3 && (checklist_ || options_)) {
+            if (key_ == 300 || key_ == 301) {
+                aim_faq_ = key_ == 301;
+                dirty_ = true;
+            } else if (key_ == kKeyAimNothing) {
+                // a SETTINGS row's label or value: nothing
+            } else if (key_ >= 200) {
+                // AIM's "-" or "+": applied at once, saved like the other settings.
+                if (aim_setting_step(aim_, (key_ - 200) / 2, key_ & 1 ? 1 : -1)) {
+                    aim_changed_ = true;
+                    settings_changed_ = true;
+                    dirty_ = true;
+                }
+            } else if (key_ == 3 && (checklist_ || options_)) {
                 checklist_ = options_ = false;
                 dirty_ = true;
             } else if (key_ == kKeyOptions) {
@@ -537,7 +576,8 @@ void SecondScreen::update(Pad &pad, const GameState &gs, int cursor_x, int curso
         pad.keys[nk++] = kKeys[key_].vk;
     if (alt_latched_ && gs_.in_game && kind != BottomView::kKeyboard && kind != BottomView::kVideo)
         pad.keys[nk++] = VK_MENU;
-    if (grip_ == Grip::Bar || grip_ == Grip::Key || grip_ == Grip::Point || grip_ == Grip::MapButton)
+    if (grip_ == Grip::Bar || grip_ == Grip::Key || grip_ == Grip::Point || grip_ == Grip::MapButton ||
+        grip_ == Grip::Scroll)
         pad.touching = false;
     if (grip_ != Grip::Point)
         follow_cursor();
@@ -701,6 +741,13 @@ bool SecondScreen::stage(BottomView &v, uint64_t now_ms)
         }
         break;
     }
+    case BottomView::kAim:
+        v.aim = aim_;
+        v.aim_faq = aim_faq_;
+        v.aim_faq_top = aim_faq_top_;
+        redraw |= aim_faq_top_ != last_aim_faq_top_;
+        last_aim_faq_top_ = aim_faq_top_;
+        break;
     case BottomView::kVideo:
         // Redrawn as the time shown changes: once a second.
         v.video_title = video_title_;
@@ -762,8 +809,8 @@ const uint16_t kKeyBg = rgb(58, 52, 44), kKeyLit = rgb(199, 179, 119), kHint = r
 
 void draw_bar(const Canvas &cv, const BottomView &v)
 {
-    static const char *const kNames[] = {"MAP", "KEYS", "ZOOM", "INFO", "PANEL"};
-    const int n = v.panel_tab ? 5 : 4, w = kW / n;
+    static const char *const kNames[] = {"MAP", "KEYS", "ZOOM", "INFO", "AIM", "PANEL"};
+    const int n = v.panel_tab ? 6 : 5, w = kW / n;
     cv.fill(0, 0, kW, kBarH, kBarBg);
     for (int i = 0; i < n; i++) {
         const bool on = (int)v.tab == i;
@@ -894,6 +941,55 @@ void draw_bottom(uint16_t *fb, const BottomView &v, const uint8_t *frame, int fw
             const int h = kAreaH * kAreaH / v.scroll_h, y = kBarH + vy * kAreaH / v.scroll_h;
             cv.fill(kW - 3, kBarH, 3, kAreaH, kBarBg);
             cv.fill(kW - 3, y, 3, h, kGold);
+        }
+        break;
+    }
+    case BottomView::kAim: {
+        cv.fill(0, kBarH, kW, kAreaH, kBg);
+        const uint16_t ink = rgb(230, 220, 200);
+        if (v.aim_faq) {
+            // The FAQ: headings (no small letters) in gold; a thin bar on the
+            // right shows where the page is.
+            for (int i = 0; i < SecondScreen::kAimFaqRows && v.aim_faq_top + i < kAimFaqLines; i++) {
+                const char *line = kAimFaq[v.aim_faq_top + i];
+                bool heading = *line != 0;
+                for (const char *c = line; *c; c++)
+                    heading &= !(*c >= 'a' && *c <= 'z');
+                cv.text(4, SecondScreen::kAimFaqY + i * SecondScreen::kAimFaqRowH, line, heading ? kGold : ink);
+            }
+            if (kAimFaqLines > SecondScreen::kAimFaqRows) {
+                const int area = SecondScreen::kMapBtnY - kBarH;
+                const int h = area * SecondScreen::kAimFaqRows / kAimFaqLines;
+                const int y = kBarH + area * v.aim_faq_top / kAimFaqLines;
+                cv.fill(kW - 3, kBarH, 3, area, kBarBg);
+                cv.fill(kW - 3, y, 3, h, kGold);
+            }
+        } else {
+            // SETTINGS: a row each, "label   - value +".
+            for (int row = 0; row < kAimSettingRows; row++) {
+                const int y = SecondScreen::kAimRowY + row * SecondScreen::kAimRowH;
+                cv.text(4, y + 3, aim_setting_label(row), ink);
+                cv.fill(SecondScreen::kAimMinusX + 2, y + 1, SecondScreen::kAimButtonW - 4,
+                        SecondScreen::kAimRowH - 2, kKeyBg);
+                cv.centred(SecondScreen::kAimMinusX, y + 3, SecondScreen::kAimButtonW, "-", ink);
+                cv.centred(SecondScreen::kAimValueX, y + 3, SecondScreen::kAimPlusX - SecondScreen::kAimValueX,
+                           aim_setting_value(v.aim, row).c_str(), kGold);
+                cv.fill(SecondScreen::kAimPlusX + 2, y + 1, SecondScreen::kAimButtonW - 4,
+                        SecondScreen::kAimRowH - 2, kKeyBg);
+                cv.centred(SecondScreen::kAimPlusX, y + 3, SecondScreen::kAimButtonW, "+", ink);
+            }
+        }
+        // The pages' buttons: the one shown is lit.
+        const int y = SecondScreen::kMapBtnY, w = SecondScreen::kAimBtnW;
+        const struct { int x; const char *label; bool on; } pages[] = {
+            {SecondScreen::kAimSettingsBtnX, "SETTINGS", !v.aim_faq}, {SecondScreen::kAimFaqBtnX, "FAQ", v.aim_faq}};
+        for (const auto &page : pages) {
+            if (page.on) {
+                cv.fill(page.x + 1, y + 1, w - 2, SecondScreen::kMapBtnH - 2, kGold);
+                cv.centred(page.x, y + 4, w, page.label, kBg);
+            } else {
+                draw_map_button(cv, page.x, w, page.label);
+            }
         }
         break;
     }

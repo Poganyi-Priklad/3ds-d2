@@ -15,6 +15,10 @@
 //          game ends (issue #26: nothing is collected or sent meanwhile), and
 //          the one beside it opens the profiler run's checklist (profiler.h):
 //          what to measure, and a button that starts and stops the run
+//   AIM    the auto-target (auto_target.h): two pages picked by the
+//          buttons under them, SETTINGS (a row per setting: its value,
+//          "-" and "+" to change it at once) and FAQ (how it works, in
+//          aim_faq.h; dragged to scroll)
 //   PANEL  offered while a panel is open (inventory, stash, shop, character,
 //          skills...), and shown by itself when one opens: the panel's half
 //          of the frame at 1:1 (D2's panels are 320 pixels wide at 640x480),
@@ -30,7 +34,8 @@
 // cursor goes to the touched spot and follows the finger, a short tap is a
 // left click there, a long press (half a second, still) a right click;
 // dragging near the area's edge scrolls. On KEYS it presses the buttons. On
-// MAP and INFO the area stays the touchpad it always was (controls.h).
+// AIM it changes the settings or scrolls the FAQ. On MAP and INFO the area
+// stays the touchpad it always was (controls.h).
 //
 // Platform-neutral. The game thread runs update() each poll and stage() at
 // each present it will draw; draw_bottom() needs only the staged view and
@@ -38,6 +43,7 @@
 #ifndef D2_GAME_SECOND_SCREEN_H
 #define D2_GAME_SECOND_SCREEN_H
 
+#include "game/auto_target.h"
 #include "game/controls.h"
 #include "game/d2_state.h"
 #include "game/osk.h"
@@ -50,14 +56,14 @@
 
 namespace game {
 
-enum class BottomTab : uint8_t { Map, Keys, Zoom, Info, Panel };
+enum class BottomTab : uint8_t { Map, Keys, Zoom, Info, Aim, Panel };
 
 const char *bottom_tab_name(BottomTab t);              // "map", "keys"... (settings files)
 bool bottom_tab_from_name(const char *s, BottomTab &t);
 
 // Everything the bottom screen draws, taken on the game thread.
 struct BottomView {
-    enum Kind : uint8_t { kNone, kMap, kHelp, kKeys, kViewport, kInfo, kKeyboard, kVideo };
+    enum Kind : uint8_t { kNone, kMap, kHelp, kKeys, kViewport, kInfo, kKeyboard, kVideo, kAim };
     struct Line {
         std::string text;
         uint16_t color;   // RGB565
@@ -84,6 +90,11 @@ struct BottomView {
     TraceWrites trace_writes = TraceWrites::Buffered;   // the checklist's last row
     bool options = false;             // kInfo: the OPTIONS page instead of the lines (port_options.h)
     uint32_t port = 0;                // its ticks
+    // kAim: the settings shown, and the page: SETTINGS, or FAQ from its
+    // line aim_faq_top on.
+    AimSettings aim;
+    bool aim_faq = false;
+    int aim_faq_top = 0;
     // kKeyboard.
     std::string osk_title;
     std::vector<Osk::KeyView> osk_keys;
@@ -151,6 +162,24 @@ public:
     static constexpr int kOptRowY = kBarH + 20, kOptRowH = 26;
     static_assert(kOptRowY + kPortOptionCount * kOptRowH <= kMapBtnY,
                   "the OPTIONS page's rows run into the buttons under them");
+    // AIM: its two pages' buttons in the strip at the bottom, and the
+    // SETTINGS rows (aim_settings.h's aim_setting_*): the label, then "-",
+    // the value and "+" to tap.
+    static constexpr int kAimBtnW = 156, kAimSettingsBtnX = 2, kAimFaqBtnX = 162;
+    static constexpr int kAimRowY = kBarH + 5, kAimRowH = 14;
+    static constexpr int kAimMinusX = 150, kAimValueX = 198, kAimPlusX = 270, kAimButtonW = 48;
+    static_assert(kAimRowY + 14 * kAimRowH <= kMapBtnY, "the AIM settings run into the buttons under them");
+    // The FAQ's lines: 10 pixels each, as many as fit above the buttons.
+    static constexpr int kAimFaqY = kBarH + 3, kAimFaqRowH = 10;
+    static constexpr int kAimFaqRows = (kMapBtnY - kAimFaqY) / kAimFaqRowH;
+    // The auto-target's settings, as the platform runs them; a change on
+    // the SETTINGS page is taken by take_aim_changed (and counts as a
+    // settings change to save).
+    void set_aim_settings(const AimSettings &s) { aim_ = s; dirty_ = true; }
+    const AimSettings &aim_settings() const { return aim_; }
+    bool take_aim_changed() { bool r = aim_changed_; aim_changed_ = false; return r; }
+    bool aim_faq() const { return aim_faq_; }
+    int aim_faq_top() const { return aim_faq_top_; }
     bool profiling() const { return profiling_; }
     uint32_t profile_choice() const { return profile_; }
     void set_profile_choice(uint32_t bits);
@@ -217,6 +246,12 @@ private:
     TraceWrites trace_writes_ = TraceWrites::Buffered;
     bool options_ = false;            // INFO shows the OPTIONS page
     uint32_t port_ = kPortDefault;    // port_options.h's bits
+    // AIM.
+    AimSettings aim_;
+    bool aim_changed_ = false;
+    bool aim_faq_ = false;            // the FAQ page, not SETTINGS
+    int aim_faq_top_ = 0;             // the FAQ's first line shown
+    int aim_faq_grab_top_ = 0;        // ...when the finger went down
     const Osk *osk_ = nullptr;
 
     // The cinematic playing.
@@ -237,11 +272,14 @@ private:
     int vx_ = 0, vy_ = 0, scroll_h_ = 0;
 
     // Touch.
-    enum class Grip : uint8_t { None, Bar, Pad, Key, Point, MapButton };
+    enum class Grip : uint8_t { None, Bar, Pad, Key, Point, MapButton, Scroll };
     Grip grip_ = Grip::None;
     int key_ = -1;                    // KEYS: the button held
     static constexpr int kKeyOptions = 99;   // INFO's OPTIONS button: under the OPTIONS rows' 100, over the checklist's
     static_assert(5 + kProfileOptionCount < kKeyOptions, "a checklist row's key would be the OPTIONS button's");
+    // AIM's keys: 200 + row * 2 (+ 1 for "+") the SETTINGS rows, 300 and
+    // 301 the pages' buttons, 299 a tap on a row's label or value.
+    static constexpr int kKeyAimNothing = 299;
     int tx0_ = 0, ty0_ = 0, moved_ = 0;
     uint64_t t0_ = 0, moved_at_ = 0;
     bool long_fired_ = false, scrolled_ = false;
@@ -263,6 +301,7 @@ private:
     BottomTab last_tab_ = BottomTab::Map;
     bool last_panel_tab_ = false;
     uint32_t last_keys_ = 0, last_log_head_ = 0;
+    int last_aim_faq_top_ = -1;
     uint64_t last_map_state_ = 0;
     int last_vx_ = -1, last_vy_ = -1, last_scale_ = 0;
     uint32_t presents_ = 0;

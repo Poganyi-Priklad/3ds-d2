@@ -570,7 +570,7 @@ int main(int argc, char **argv)
             next_shot = next_shot < 15000 ? 15000 : next_shot < 30000 ? 30000 : next_shot + 30000;
         }
     };
-    // M4_BOTTOM=map|help|keys|zoom|info: the bottom screen's tab at the start.
+    // M4_BOTTOM=map|help|keys|zoom|info|aim: the bottom screen's tab at the start.
     if (const char *t = std::getenv("M4_BOTTOM")) {
         game::BottomTab tab;
         if (game::bottom_tab_from_name(t, tab))
@@ -598,6 +598,7 @@ int main(int argc, char **argv)
             }
         }
         controls.set_auto_target(aim, &game::game_aim_world());
+        second_screen.set_aim_settings(aim);   // AIM > SETTINGS, as on the console
         game::set_aim_clock([]() -> uint64_t {
             return (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
                        std::chrono::steady_clock::now().time_since_epoch())
@@ -634,6 +635,10 @@ int main(int argc, char **argv)
         if (shot)
             shot_now = true;
         second_screen.update(pad, gs, controls.cursor_x(), controls.cursor_y(), now);
+        if (second_screen.take_aim_changed()) {
+            controls.set_auto_target(second_screen.aim_settings(), &game::game_aim_world());
+            std::fprintf(stderr, "[rt] aim: changed on the bottom screen\n");
+        }
         controls.set_context(gs.in_game, gs.panel_open, gs.ui, gs.in_game && game::holding_item());
         controls.update(pad, now);
         second_screen.request(controls.take_bottom_request());
