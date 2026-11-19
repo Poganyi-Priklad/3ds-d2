@@ -48,6 +48,7 @@
 #include "game/profiler.h"
 #include "game/second_screen.h"
 #include "game/settings_file.h"
+#include "game/aim_settings.h"
 #include "game/sprite_trace.h"
 #include "game/storm_reads.h"
 #include "runtime/ds_emul.h"
@@ -1666,6 +1667,11 @@ uint32_t g_stall_ms = 150;
 // block's tail (budgettail=), how far a block may bridge forward (forward=).
 // -1: the backend's default. A measurement's, from settings.txt.
 int g_dyn_callret = -1, g_dyn_nopend = -1, g_dyn_budgettail = -1, g_dyn_forward = -1;
+// The auto-target on A and B (game/auto_target.h): on by default, every
+// number in settings.txt as aim=, aim_a_mode=... (game/aim_settings.h lists
+// them), read at the start and written back so they can be edited.
+game::AimSettings g_aim_settings;
+bool g_aim_in_settings = false;   // settings.txt already has aim= (else it's written once at start)
 
 void load_settings()
 {
@@ -1746,6 +1752,8 @@ void load_settings()
             g_lock_test = std::atoi(line + 9) != 0;
         else if (std::strncmp(line, "drawphases=", 11) == 0)   // the draw natives timed (issue #80)
             game::draw_phases_set(std::atoi(line + 11) != 0);
+        else if (std::strncmp(line, "aim", 3) == 0 && game::parse_aim_setting(line, g_aim_settings))
+            g_aim_in_settings |= std::strncmp(line, "aim=", 4) == 0;
 
     }
     std::fclose(f);
@@ -1766,6 +1774,7 @@ std::vector<game::SettingLine> port_settings_lines()
         {"tracewrites", game::trace_writes_info(g_ss.trace_writes()).name},
         {"port", game::port_names(g_ss.port_options())},
     };
+    game::aim_settings_lines(g_aim_settings, lines);
     return lines;
 }
 
@@ -2816,6 +2825,22 @@ int main()
     g_bench_path = game_dir + "/d2data.mpq";
 
     load_settings();
+    if (!g_aim_in_settings)
+        save_settings();   // once: so settings.txt shows aim= and its numbers to edit
+    g_controls.set_auto_target(g_aim_settings, &game::game_aim_world());
+    {
+        char line[240];
+        std::snprintf(line, sizeof line,
+                      "aim: %s; A %s %d degrees %d subtiles, B %s %d degrees %d subtiles; near %d subtiles %d "
+                      "degrees, turn %d degrees, lost %d ms, forget %d ms, height %d px, confirm %d frames",
+                      g_aim_settings.enabled ? "on" : "off", game::aim_mode_name(g_aim_settings.a.mode),
+                      g_aim_settings.a.cone_degrees, g_aim_settings.a.range_subtiles,
+                      game::aim_mode_name(g_aim_settings.b.mode), g_aim_settings.b.cone_degrees,
+                      g_aim_settings.b.range_subtiles, g_aim_settings.near_subtiles, g_aim_settings.near_cone_degrees,
+                      g_aim_settings.turn_degrees, g_aim_settings.lost_ms, g_aim_settings.forget_ms,
+                      g_aim_settings.height_px, g_aim_settings.confirm_polls);
+        logline(line);   // game.log: what the auto-target runs with (settings.txt)
+    }
     {
         std::vector<uint8_t> script;
         if (read_file(std::string(kRoot) + "/autoplay.txt", script)) {

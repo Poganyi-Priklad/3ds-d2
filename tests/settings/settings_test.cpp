@@ -3,6 +3,7 @@
 // comments), its own keys replaced where they were; and SettingsSaveDelay,
 // one SD card write for a run of taps. Run through
 // `scripts/docker.sh test settings`.
+#include "game/aim_settings.h"
 #include "game/settings_file.h"
 
 #include <cstdio>
@@ -164,6 +165,29 @@ static void test_save_delay_pending_for_a_flush()
     CHECK(!delay.due(100000));
 }
 
+static void test_aim_lines_written_and_read_back()
+{
+    // An old settings.txt without the auto-target: its keys are appended
+    // (aim=1 first), and what the player edits by hand is read back.
+    game::AimSettings aim;
+    std::vector<SettingLine> lines = port_lines();
+    game::aim_settings_lines(aim, lines);
+    const std::string text = merge_settings_text("bottom=info\nmapscale=1\n", lines);
+    CHECK(text.find("aim=1\naim_a_mode=enemies\n") != std::string::npos);
+    CHECK(text.find("aim_b_range=20\n") != std::string::npos);
+    game::AimSettings edited;
+    CHECK(game::parse_aim_setting("aim=0", edited) && !edited.enabled);
+    CHECK(game::parse_aim_setting("aim_b_mode=corpses", edited) && edited.b.mode == game::AimMode::kCorpses);
+    CHECK(game::parse_aim_setting("aim_a_range=999", edited) && edited.a.range_subtiles < 999);   // clamped
+    CHECK(!game::parse_aim_setting("aimless=1", edited));
+    // Saved again: the edited values, in the same places.
+    std::vector<SettingLine> again = port_lines();
+    game::aim_settings_lines(edited, again);
+    const std::string text2 = merge_settings_text(text, again);
+    CHECK(text2.find("aim=0\n") != std::string::npos && text2.find("aim_b_mode=corpses\n") != std::string::npos);
+    CHECK(merge_settings_text(text2, again) == text2);
+}
+
 int main()
 {
     test_new_file();
@@ -178,6 +202,7 @@ int main()
     test_save_delay_one_write_for_a_run_of_taps();
     test_save_delay_longest_wait();
     test_save_delay_pending_for_a_flush();
+    test_aim_lines_written_and_read_back();
     std::printf("RESULT settings %s (%d failures)\n", g_fail ? "FAIL" : "PASS", g_fail);
     return g_fail ? 1 : 0;
 }
