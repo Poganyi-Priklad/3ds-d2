@@ -1671,7 +1671,9 @@ int g_dyn_callret = -1, g_dyn_nopend = -1, g_dyn_budgettail = -1, g_dyn_forward 
 // number in settings.txt as aim=, aim_a_mode=... (game/aim_settings.h lists
 // them), read at the start and written back so they can be edited.
 game::AimSettings g_aim_settings;
-bool g_aim_in_settings = false;   // settings.txt already has aim= (else it's written once at start)
+// settings.txt already has aim= and the newest aim key (else it's written
+// once at start, so that the new keys show up to edit).
+bool g_aim_in_settings = false, g_aim_newest_in_settings = false;
 
 void load_settings()
 {
@@ -1752,8 +1754,10 @@ void load_settings()
             g_lock_test = std::atoi(line + 9) != 0;
         else if (std::strncmp(line, "drawphases=", 11) == 0)   // the draw natives timed (issue #80)
             game::draw_phases_set(std::atoi(line + 11) != 0);
-        else if (std::strncmp(line, "aim", 3) == 0 && game::parse_aim_setting(line, g_aim_settings))
+        else if (std::strncmp(line, "aim", 3) == 0 && game::parse_aim_setting(line, g_aim_settings)) {
             g_aim_in_settings |= std::strncmp(line, "aim=", 4) == 0;
+            g_aim_newest_in_settings |= std::strncmp(line, "aim_gold_first=", 15) == 0;
+        }
 
     }
     std::fclose(f);
@@ -1782,7 +1786,9 @@ std::vector<game::SettingLine> port_settings_lines()
 // change: the keys the port reads but never writes (bgquantum=, stormrate=,
 // stallms=, aotfns=, callret=, ...), comments and anything else stay where they were.
 // floorqueue= (the first form of port='s core 2 tick, issue #80) is dropped,
-// as before, so that it can't override port= at the next start.
+// as before, so that it can't override port= at the next start; so is
+// aim_turn= (the auto-target's first form: the stick turned away dropped
+// the target; flicks switch now).
 void save_settings()
 {
     std::string old_text;
@@ -1793,7 +1799,7 @@ void save_settings()
             old_text.append(chunk, got);
         std::fclose(f);
     }
-    const std::string new_text = game::merge_settings_text(old_text, port_settings_lines(), {"floorqueue"});
+    const std::string new_text = game::merge_settings_text(old_text, port_settings_lines(), {"floorqueue", "aim_turn"});
     if (FILE *f = std::fopen(kSettings, "w")) {
         std::fwrite(new_text.data(), 1, new_text.size(), f);
         std::fclose(f);
@@ -2825,20 +2831,24 @@ int main()
     g_bench_path = game_dir + "/d2data.mpq";
 
     load_settings();
-    if (!g_aim_in_settings)
+    if (!g_aim_in_settings || !g_aim_newest_in_settings)
         save_settings();   // once: so settings.txt shows aim= and its numbers to edit
     g_controls.set_auto_target(g_aim_settings, &game::game_aim_world());
     {
-        char line[240];
+        char line[320];
         std::snprintf(line, sizeof line,
                       "aim: %s; A %s %d degrees %d subtiles, B %s %d degrees %d subtiles; near %d subtiles %d "
-                      "degrees, turn %d degrees, lost %d ms, forget %d ms, height %d px, confirm %d frames",
+                      "degrees; flick %d degrees, %d ms, light %d%%, strong %d%%; objects %s, loot %s, gold first "
+                      "%s; lost %d ms, forget %d ms, height %d px, confirm %d frames",
                       g_aim_settings.enabled ? "on" : "off", game::aim_mode_name(g_aim_settings.a.mode),
                       g_aim_settings.a.cone_degrees, g_aim_settings.a.range_subtiles,
                       game::aim_mode_name(g_aim_settings.b.mode), g_aim_settings.b.cone_degrees,
                       g_aim_settings.b.range_subtiles, g_aim_settings.near_subtiles, g_aim_settings.near_cone_degrees,
-                      g_aim_settings.turn_degrees, g_aim_settings.lost_ms, g_aim_settings.forget_ms,
-                      g_aim_settings.height_px, g_aim_settings.confirm_polls);
+                      g_aim_settings.flick_cone_degrees, g_aim_settings.flick_ms, g_aim_settings.flick_light_percent,
+                      g_aim_settings.flick_strong_percent, g_aim_settings.objects ? "on" : "off",
+                      g_aim_settings.loot ? "on" : "off", g_aim_settings.gold_first ? "on" : "off",
+                      g_aim_settings.lost_ms, g_aim_settings.forget_ms, g_aim_settings.height_px,
+                      g_aim_settings.confirm_polls);
         logline(line);   // game.log: what the auto-target runs with (settings.txt)
     }
     {

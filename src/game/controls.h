@@ -23,7 +23,9 @@
 //   L+R+Select   screenshot into the Camera album
 //   D-pad        belt potions 1-4
 //   ZL           weapon swap (W)                            (New 3DS)
-//   ZR           layer: ZR+A/B/Y/X skill hotkeys F1-F4 (New 3DS)
+//   ZR           layer: ZR+A/B/Y/X skill hotkeys F1-F4 (New 3DS); ZR+D-pad
+//                held, with the auto-target: pick up items (Up valuables,
+//                Right gold, Down everything)
 //   Start        Escape (game menu)
 //   Select       top screen: whole frame <-> 1:1 zoom around the cursor
 #ifndef D2_GAME_CONTROLS_H
@@ -150,6 +152,8 @@ private:
     bool aiming_ = false;         // the auto-target had the cursor at the last poll
     int aim_saved_x_ = 0, aim_saved_y_ = 0;   // where the cursor was before; it goes back there
     uint32_t aim_pump_seen_ = 0;
+    uint32_t loot_button_ = 0;    // ZR + this D-pad button: a loot command held (0: none)
+    bool loot_pressed_ = false;   // ...pressed this poll
     uint64_t aim_stats_ms_ = 0;
     uint32_t aim_stats_presses_ = 0;
     uint8_t keys_[256] = {};      // which virtual keys this layer holds down

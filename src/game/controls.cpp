@@ -28,8 +28,9 @@ struct Binding {
 
 // Buttons that act on press and release. Select and Start are handled apart.
 // R and ZR are modifiers (issue #95): ZR alone does nothing; ZR + A/B/Y/X are
-// the skill hotkeys F1-F4 (R + D-pad still are too); ZR + D-pad is left
-// free for later shortcuts; L and ZL do as they always do.
+// the skill hotkeys F1-F4 (R + D-pad still are too); ZR + D-pad, held, picks
+// up items with the auto-target (Up valuables, Right gold, Down everything,
+// Left kept free); L and ZL do as they always do.
 const Binding kBindings[] = {
     {kA, kMouseLeft, 'C', VK_F1},
     {kB, kMouseRight, 'T', VK_F1 + 1},
@@ -229,6 +230,10 @@ void Controls::update(const Pad &pad, uint64_t now_ms)
                    ((ui_ & kUiShop) || ((ui_ & kUiInventory) && !(ui_ & kUiLeftPanels)))) {
             bound_[i] = 0;   // Y with the inventory open: sell or drop, not Alt (issue #99)
             item_move_start((ui_ & kUiShop) != 0, now_ms);
+        } else if ((pressed & b.button) && zr_layer && (b.button & (kUp | kDown | kRight))) {
+            bound_[i] = 0;   // ZR + D-pad: a loot command for the auto-target (below)
+            loot_button_ = b.button;
+            loot_pressed_ = true;
         } else if (pressed & b.button) {
             bound_[i] = zr_layer ? (b.with_zr == kAsNormal ? b.normal : b.with_zr) : r_layer ? b.with_r : b.normal;
             if (bound_[i] != kMouseLeft && bound_[i] != kMouseRight)
@@ -323,6 +328,17 @@ void Controls::update(const Pad &pad, uint64_t now_ms)
         poll.stick_engaged = stick_engaged;
         poll.dir_x = walk_dir_x_;
         poll.dir_y = walk_dir_y_;
+        poll.stick_x = vx;
+        poll.stick_y = -vy;
+        // ZR + D-pad: held until the D-pad button is let go.
+        if (loot_button_ && !(held & loot_button_))
+            loot_button_ = 0;
+        poll.loot = loot_button_ == kUp      ? AimLootCommand::kValuables
+                    : loot_button_ == kRight ? AimLootCommand::kGold
+                    : loot_button_ == kDown  ? AimLootCommand::kEverything
+                                             : AimLootCommand::kNone;
+        poll.loot_pressed = loot_pressed_ && poll.loot != AimLootCommand::kNone;
+        loot_pressed_ = false;
         poll.new_frame = !pumps_ || pump_ != aim_pump_seen_;
         aim_pump_seen_ = pump_;
         aim = aim_.update(poll, *aim_world_);
@@ -330,7 +346,8 @@ void Controls::update(const Pad &pad, uint64_t now_ms)
             aim_saved_x_ = cx_;
             aim_saved_y_ = cy_;
         }
-        if (!aim.aiming && aiming_ && !poll.a_held && !poll.b_held && !stick_engaged)
+        if (!aim.aiming && aiming_ && !poll.a_held && !poll.b_held && poll.loot == AimLootCommand::kNone &&
+            !stick_engaged)
             move_cursor(aim_saved_x_, aim_saved_y_);   // let go: the cursor back where it was
         aiming_ = aim.aiming;
         const AimStats &st = aim_.stats();
@@ -338,11 +355,13 @@ void Controls::update(const Pad &pad, uint64_t now_ms)
             const AimReadCost cost = aim_world_->read_cost();
             rt::logf("aim: stats: %u presses, %u targets (%u next to the hero), %u confirmed, %u taken from the "
                      "hover, %u plain clicks at a target, %u with nothing in the cone; held %u frames, %u on the "
-                     "target; dropped %u dead, %u gone, %u turned, %u unreachable, %u off the screen, %u forgotten; "
+                     "target; dropped %u dead, %u gone, %u unreachable, %u off the screen, %u forgotten; %u flicks "
+                     "(%u switched); %u objects, %u items (%u with no room); "
                      "%u scans of %u units, %llu us on average, %llu at most",
                      st.presses, st.targets, st.near_rule, st.confirmed, st.adopted, st.fallbacks, st.no_target,
-                     st.held_polls, st.held_on_target, st.dropped_dead, st.dropped_gone, st.dropped_turn,
-                     st.dropped_lost, st.dropped_screen, st.forgotten, cost.scans, cost.units,
+                     st.held_polls, st.held_on_target, st.dropped_dead, st.dropped_gone, st.dropped_lost,
+                     st.dropped_screen, st.forgotten, st.flicks, st.flick_switches, st.objects, st.items, st.no_room,
+                     cost.scans, cost.units,
                      (unsigned long long)(cost.scans ? cost.total_us / cost.scans : 0),
                      (unsigned long long)cost.longest_us);
             aim_stats_ms_ = now_ms;
