@@ -314,7 +314,44 @@ test)
         RUN_EXTRA=(-v "$(host_path "$(cd "$2" && pwd)/Game.exe"):/aot/Game.exe:ro")
         # shellcheck disable=SC2046
         run_in "$HOSTTEST_IMAGE" python3 -I tools/aot/recompile.py /aot/Game.exe --explain "$3" $(aot_args) ;;
-    *)    die "test host | test x86 [golden] | test cpu [armv7|armv6] | test m3 | test report | test governor | test gameexe | test frames | test pad | test pool | test d2d [<game-dir>] | test tls | test m4 <game-dir> | test aot <game-dir> [<save-dir>] | test aot-explain <game-dir> <va,...> | test aot-census <game-dir>" ;;
+    aot-compare)  # <game-dir> <a> <b> [census] (issue #144): two recompilers on the same Game.exe, what they write
+                  # compared (the C byte for byte, the reports but for their timings). Each of a and b is py (this
+                  # tree's tools/aot/recompile.py), py@<rev> (that commit's) or rs (tools/aot/recompile, Rust).
+                  # D2_AOT_SET's functions (coverage by default), or with census d2d's whole list as aot-census.
+                  # Output in build/aot/cmp/<side>/.
+        [ -n "${2:-}" ] && [ -f "$2/Game.exe" ] && [ -n "${3:-}" ] && [ -n "${4:-}" ] ||
+            die "test aot-compare <game-dir> <py|py@rev|rs> <py|py@rev|rs> [census]"
+        RUN_EXTRA=(-v "$(host_path "$(cd "$2" && pwd)/Game.exe"):/aot/Game.exe:ro" -e "AOT_PART_MB=${AOT_PART_MB:-8}"
+                   -e "AOT_PROGRESS=${AOT_PROGRESS:-30}")
+        if [ "${5:-}" = census ]; then
+            args=(--census --modes sig)
+            for f in "$ROOT"/build/m4-prof/*.err; do [ -f "$f" ] && args+=(--hot "build/m4-prof/$(basename "$f")"); done
+        else
+            # shellcheck disable=SC2207
+            D2_AOT_SET="${D2_AOT_SET:-coverage}"; args=($(aot_args))
+        fi
+        sides=()
+        for side in "$3" "$4"; do
+            label="${side//[^A-Za-z0-9._-]/_}"
+            sides+=("$label")
+            out="build/aot/cmp/$label"
+            rm -rf "${ROOT:?}/$out"
+            case "$side" in
+            py) run_in "$HOSTTEST_IMAGE" python3 -I tools/aot/recompile.py /aot/Game.exe "${args[@]}" --out "$out" ;;
+            py@*)   # that commit's recompile.py, beside this one (it finds the shims' sources from its own path)
+                ref="tools/aot/.recompile-$label.py"
+                git -C "$ROOT" show "${side#py@}:tools/aot/recompile.py" > "$ROOT/$ref" || die "no recompile.py at ${side#py@}"
+                st=0; run_in "$HOSTTEST_IMAGE" python3 -I "$ref" /aot/Game.exe "${args[@]}" --out "$out" || st=$?
+                rm -f "$ROOT/$ref"; [ "$st" = 0 ] || exit "$st" ;;
+            rs) run_in "$HOSTTEST_IMAGE" sh -c 'command -v cargo >/dev/null || { echo "no cargo in the image: scripts/docker.sh image" >&2; exit 1; }
+                    CARGO_TARGET_DIR=/work/build/aot-rs/target cargo build -q --release --locked --offline \
+                        --manifest-path tools/aot/recompile/Cargo.toml' &&
+                run_in "$HOSTTEST_IMAGE" build/aot-rs/target/release/recompile /aot/Game.exe "${args[@]}" --out "$out" ;;
+            *)  die "aot-compare: a side is py, py@<rev> or rs, not $side" ;;
+            esac || exit 1
+        done
+        run_in "$HOSTTEST_IMAGE" python3 -I tools/aot/compare.py "build/aot/cmp/${sides[0]}" "build/aot/cmp/${sides[1]}" ;;
+    *)    die "test host | test x86 [golden] | test cpu [armv7|armv6] | test m3 | test report | test governor | test gameexe | test frames | test pad | test pool | test d2d [<game-dir>] | test tls | test m4 <game-dir> | test aot <game-dir> [<save-dir>] | test aot-explain <game-dir> <va,...> | test aot-census <game-dir> | test aot-compare <game-dir> <a> <b> [census]" ;;
     esac
     ;;
 package)
