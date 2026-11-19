@@ -145,7 +145,12 @@ impl Image {
                         break;
                     }
                     let name = if v & 0x8000_0000 != 0 {
-                        format!("#{}", v & 0xffff)
+                        // pefile names some DLLs' ordinals from its own tables (ord<n> where it has none).
+                        let ord = v & 0xffff;
+                        match crate::ordlookup::table(&dll.to_lowercase()) {
+                            Some(t) => t.iter().find(|(o, _)| *o == ord).map(|(_, n)| n.to_string()).unwrap_or(format!("ord{}", ord)),
+                            None => format!("#{}", ord),
+                        }
                     } else {
                         String::from_utf8_lossy(&cstr(&mem, v as usize + 2)).into_owned()
                     };

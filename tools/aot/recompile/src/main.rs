@@ -19,6 +19,7 @@ mod func;
 mod image;
 mod json;
 mod omap;
+mod ordlookup;
 mod program;
 mod x86;
 
