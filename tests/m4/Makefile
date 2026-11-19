@@ -37,7 +37,7 @@ LIB   := $(W)/build-arm/libwinx86$(LIBTAG).a
 # generated there from the user's Game.exe (issue #113, tools/aot/), compiled
 # three ways (src/game/aot_rt.h) and linked into a binary of its own.
 # AOT_SPLIT=1 (issue #115): compiled functions call each other through Box86
-# (the #ifdef at each call recompile.py writes), in objects and a binary of
+# (the #ifdef at each call the recompiler writes), in objects and a binary of
 # their own.
 AOT   ?=
 AOT_SPLIT ?=

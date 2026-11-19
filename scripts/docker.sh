@@ -120,11 +120,12 @@ aot_args() {
 # The AOT recompiler (tools/aot/recompile, Rust, issue #144), built in the
 # hosttest image from the crates its Cargo.lock pins, into build/aot-rs/.
 AOT_RECOMPILER=build/aot-rs/target/release/recompile
+# The recompiler built: this tree's, or with <crate-dir> <target-dir> (under build/) another copy of it.
 aot_recompiler_build() {
     ensure_image hosttest "$HOSTTEST_IMAGE"
     run_in "$HOSTTEST_IMAGE" sh -c 'command -v cargo >/dev/null || { echo "no cargo in the image: scripts/docker.sh image" >&2; exit 1; }
-        CARGO_TARGET_DIR=/work/build/aot-rs/target cargo build -q --release --locked --offline \
-            --manifest-path tools/aot/recompile/Cargo.toml'
+        CARGO_TARGET_DIR="/work/$2" cargo build -q --release --locked --offline --manifest-path "$1/Cargo.toml"' \
+        sh "${1:-tools/aot/recompile}" "${2:-build/aot-rs/target}"
 }
 # The recompiler on <args>, with its time and peak memory on stderr (AOT_MEASURE=1).
 aot_recompile() {
@@ -333,12 +334,13 @@ test)
         # shellcheck disable=SC2046
         run_in "$HOSTTEST_IMAGE" "$AOT_RECOMPILER" /aot/Game.exe --explain "$3" $(aot_args) ;;
     aot-compare)  # <game-dir> <a> <b> [census] (issue #144): two recompilers on the same Game.exe, what they write
-                  # compared (the C byte for byte, the reports but for their timings). Each of a and b is py (this
-                  # tree's tools/aot/recompile.py), py@<rev> (that commit's) or rs (tools/aot/recompile, Rust).
+                  # compared (the C byte for byte, the reports but for their timings). Each of a and b is rs (this
+                  # tree's tools/aot/recompile), rs@<rev> (that commit's) or py@<rev> (a commit's recompile.py,
+                  # which this tree no longer has).
                   # D2_AOT_SET's functions (coverage by default), or with census d2d's whole list as aot-census.
                   # Output in build/aot/cmp/<side>/.
         [ -n "${2:-}" ] && [ -f "$2/Game.exe" ] && [ -n "${3:-}" ] && [ -n "${4:-}" ] ||
-            die "test aot-compare <game-dir> <py|py@rev|rs> <py|py@rev|rs> [census]"
+            die "test aot-compare <game-dir> <rs|rs@rev|py@rev> <rs|rs@rev|py@rev> [census]"
         RUN_EXTRA=(-v "$(host_path "$(cd "$2" && pwd)/Game.exe"):/aot/Game.exe:ro" -e "AOT_PART_MB=${AOT_PART_MB:-8}"
                    -e "AOT_PROGRESS=${AOT_PROGRESS:-30}")
         if [ "${5:-}" = census ]; then
@@ -355,14 +357,20 @@ test)
             out="build/aot/cmp/$label"
             rm -rf "${ROOT:?}/$out"
             case "$side" in
-            py) AOT_MEASURE=1 aot_recompile python3 -I tools/aot/recompile.py /aot/Game.exe "${args[@]}" --out "$out" ;;
             py@*)   # that commit's recompile.py, beside this one (it finds the shims' sources from its own path)
                 ref="tools/aot/.recompile-$label.py"
                 git -C "$ROOT" show "${side#py@}:tools/aot/recompile.py" > "$ROOT/$ref" || die "no recompile.py at ${side#py@}"
                 st=0; AOT_MEASURE=1 aot_recompile python3 -I "$ref" /aot/Game.exe "${args[@]}" --out "$out" || st=$?
                 rm -f "$ROOT/$ref"; [ "$st" = 0 ] || exit "$st" ;;
             rs) aot_recompiler_build && AOT_MEASURE=1 aot_recompile "$AOT_RECOMPILER" /aot/Game.exe "${args[@]}" --out "$out" ;;
-            *)  die "aot-compare: a side is py, py@<rev> or rs, not $side" ;;
+            rs@*)   # that commit's crate, built beside this one's (the shims' sources are this tree's)
+                src="build/aot/cmp-src/$label"
+                rm -rf "${ROOT:?}/$src"; mkdir -p "$ROOT/$src"
+                git -C "$ROOT" archive "${side#rs@}" tools/aot/recompile | tar -x -C "$ROOT/$src" ||
+                    die "no tools/aot/recompile at ${side#rs@}"
+                aot_recompiler_build "$src/tools/aot/recompile" "build/aot-rs/target-$label" &&
+                    AOT_MEASURE=1 aot_recompile "build/aot-rs/target-$label/release/recompile" /aot/Game.exe "${args[@]}" --out "$out" ;;
+            *)  die "aot-compare: a side is rs, rs@<rev> or py@<rev>, not $side" ;;
             esac || exit 1
         done
         run_in "$HOSTTEST_IMAGE" python3 -I tools/aot/compare.py "build/aot/cmp/${sides[0]}" "build/aot/cmp/${sides[1]}" ;;

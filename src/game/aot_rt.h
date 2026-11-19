@@ -1,4 +1,4 @@
-/* What the AOT spike's generated C (issue #113, tools/aot/recompile.py)
+/* What the AOT spike's generated C (issue #113, tools/aot/recompile)
  * calls and includes. The generated file is made from the user's own
  * Game.exe under build/aot/ and is never committed; this header and
  * aot_spike.cpp are ours.
@@ -45,7 +45,7 @@ typedef struct {
 } AotRoot;
 /* The functions' table (issues #114, #115; AOT_SYM(funcs) in each build):
  * every compiled function, entered with all eight registers as a root is.
- * keep 0: its entry can't be hooked (recompile.py's hookable(): a branch in
+ * keep 0: its entry can't be hooked (the recompiler's hookable(): a branch in
  * its first bytes or into them, or pops not known). */
 typedef struct {
     uint32_t va;
@@ -92,7 +92,7 @@ typedef struct {
 extern uint8_t *aot_mem;   /* host address of guest 0 */
 /* By the functions' table's rows (issue #115): 1 when the app found that
  * function changed since compiled (a native's hook or patch). A compiled
- * call to it (call_, recompile.py) then calls the native (aot_call_stale,
+ * call to it (call_, the recompiler) then calls the native (aot_call_stale,
  * from stale_, out of the way), and its callers stay compiled. */
 extern uint8_t aot_stale[];
 #define AOT_STALE(k) __builtin_expect(aot_stale[(k)], 0)
@@ -445,7 +445,7 @@ AOT_INL void aot_stos(uint32_t di, uint32_t v, uint32_t n, int size, int down)
     }
 }
 
-/* Flag kinds (recompile.py's KIND) and condition codes (CC_NUM). */
+/* Flag kinds (the recompiler's KIND) and condition codes (CC_NUM). */
 enum { AOT_ADD, AOT_SUB, AOT_LOGIC, AOT_INC, AOT_DEC, AOT_NEG, AOT_SHL, AOT_SHR, AOT_SAR, AOT_MUL, AOT_ADC, AOT_SBB };
 enum { CC_O, CC_NO, CC_B, CC_AE, CC_E, CC_NE, CC_BE, CC_A, CC_S, CC_NS, CC_P, CC_NP, CC_L, CC_GE, CC_LE, CC_G };
 
@@ -465,7 +465,7 @@ AOT_INL int aot_cf(int k, int w, uint32_t a, uint32_t b, uint32_t r, uint32_t c)
     case AOT_MUL: return c != 0;
     case AOT_ADC: return (uint64_t)a + b + c > aot_mask(w);
     case AOT_SBB: return (uint64_t)a < (uint64_t)b + c;
-    default: return 0;   /* logic; inc/dec leave CF (never asked: recompile.py refuses) */
+    default: return 0;   /* logic; inc/dec leave CF (never asked: the recompiler refuses) */
     }
 }
 AOT_INL int aot_of(int k, int w, uint32_t a, uint32_t b, uint32_t r, uint32_t c)

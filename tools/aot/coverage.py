@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """The AOT coverage list (issue #115): the functions the lane's scripts ran,
-from its block counter, as recompile.py arguments.
+from its block counter, as the recompiler's arguments.
 
 The lane prints its busiest blocks when the game ends (WX86_HOTPROF=1
 D2_NOLINK=1, M4_HOTPROF_TOP=<n> for more than 600). Each block folds into
@@ -34,7 +34,7 @@ def main():
     ap.add_argument("exe", help="the game's Game.exe, for the function starts")
     ap.add_argument("logs", nargs="+", help="the lane's stderr with [hotprof] lines, one per script")
     ap.add_argument("--share", type=float, default=0.999, help="of the executed bytes to cover (default 0.999)")
-    ap.add_argument("--out", help="write the recompile.py arguments here (default: print them)")
+    ap.add_argument("--out", help="write the recompiler's arguments here (default: print them)")
     a = ap.parse_args()
 
     names = game_names.Names()

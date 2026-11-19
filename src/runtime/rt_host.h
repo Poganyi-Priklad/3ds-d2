@@ -463,7 +463,7 @@ uint32_t native_entry(const char *name, uint32_t stack_args, std::function<uint3
 // to Box86, issue #115): the scheduler can't switch away there, so the wait
 // is done in place, the host polling its object (the I/O worker's read), and
 // EAX set as a wake sets it. A wait only another guest thread could end never
-// ends here: recompile.py compiles nothing that calls, under Box86, code that
+// ends here: the recompiler compiles nothing that calls, under Box86, code that
 // can reach a shim. Returns the microseconds waited (at least 1), or 0 when
 // the thread wasn't blocked (an advisory yield).
 uint32_t finish_nested_block(d2rt::Cpu &c);
