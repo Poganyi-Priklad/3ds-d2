@@ -90,6 +90,9 @@ private:
     uint64_t seek_since_ = 0;
     bool seek_near() const;          // seek: the object loaded and within 8 subtiles
     void seek_step(uint64_t now_ms, Controls &controls);
+    // step's script, without the auto-target flag (step sets Pad::aim_off
+    // while a tap's click is on its way: a tap clicks where it put the cursor).
+    const Pad &script_step(uint64_t now_ms, Controls &controls, bool &shot, const GameState &state);
     uint32_t menu_unit_ = 0;         // the last tapunit's class: whose menu tapmenu taps
     int retry_line_ = 0;             // tapmenu: the line
     uint64_t click_at_ = 0;          // a tap's click, after the cursor is in place

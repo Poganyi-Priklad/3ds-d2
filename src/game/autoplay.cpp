@@ -115,6 +115,16 @@ void Autoplay::load(const std::string &script)
 
 const Pad &Autoplay::step(uint64_t now_ms, Controls &controls, bool &shot, const GameState &state)
 {
+    script_step(now_ms, controls, shot, state);
+    // A tap (tap, tapunit, tapmenu...) and a video's skip press A where the
+    // script put the cursor: the auto-target must not move it onto a unit.
+    // A plain "press A" in a script is aimed, as the player's would be.
+    pad_.aim_off = click_at_ || click_until_ || skip_release_ms_;
+    return pad_;
+}
+
+const Pad &Autoplay::script_step(uint64_t now_ms, Controls &controls, bool &shot, const GameState &state)
+{
     static const struct { const char *name; uint32_t bit; } kNames[] = {
         {"A", kA}, {"B", kB}, {"X", kX}, {"Y", kY}, {"L", kL}, {"R", kR}, {"ZL", kZL}, {"ZR", kZR},
         {"START", kStart}, {"SELECT", kSelect}, {"UP", kUp}, {"DOWN", kDown}, {"LEFT", kLeft}, {"RIGHT", kRight},
