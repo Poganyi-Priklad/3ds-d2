@@ -741,16 +741,24 @@ static void test_settings()
                   "aim_flick_ms=150\naim_flick_light=40\naim_flick_strong=80\naim_lost_ms=1500\n"
                   "aim_forget_ms=2500\naim_height=30\naim_confirm=4\naim_objects=1\naim_loot=1\n"
                   "aim_gold_first=0\n");
-    // An older file (Stage 2: aim_turn, a range of 10): read as it is, and
-    // its aim_turn line dropped when the file is written again.
+    // An older file (Stage 2: aim_turn, A's range of 10, its default then):
+    // read, its A range moved to the new default 20, and its aim_turn line
+    // dropped when the file is written again.
     AimSettings old;
     CHECK(parse_aim_setting("aim_turn=60", old) && parse_aim_setting("aim_a_range=10", old));
     CHECK(old.a.range_subtiles == 10 && old.flick_cone_degrees == 30 && old.loot && !old.gold_first);
+    migrate_older_aim_settings(old);
+    CHECK(old.a.range_subtiles == 20 && old.b.range_subtiles == 20);
     lines.clear();
     aim_settings_lines(old, lines);
     text = merge_settings_text("aim=1\naim_turn=60\naim_a_range=10\nbottom=map\n", lines, {"aim_turn"});
-    CHECK(text.find("aim_turn") == std::string::npos && text.find("aim_a_range=10\n") != std::string::npos &&
+    CHECK(text.find("aim_turn") == std::string::npos && text.find("aim_a_range=20\n") != std::string::npos &&
           text.find("aim_flick_cone=30\n") != std::string::npos && text.find("bottom=map\n") != std::string::npos);
+    // Another A range in an older file is kept.
+    AimSettings other;
+    CHECK(parse_aim_setting("aim_a_range=14", other));
+    migrate_older_aim_settings(other);
+    CHECK(other.a.range_subtiles == 14);
     // The new keys.
     AimSettings n;
     CHECK(parse_aim_setting("aim_flick_cone=200", n) && n.flick_cone_degrees == 90);

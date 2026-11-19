@@ -25,7 +25,7 @@
 //
 // Out-of-range numbers are clamped to sensible limits. aim_turn (an older
 // file's: the stick turned away from the target dropped it) is read and
-// ignored. Header only, no
+// ignored; an older file's aim_a_range=10 (its default then) becomes 20. Header only, no
 // platform: the app and the host test use it alike.
 #ifndef D2_GAME_AIM_SETTINGS_H
 #define D2_GAME_AIM_SETTINGS_H
@@ -167,6 +167,18 @@ inline bool parse_aim_setting(const char *line, AimSettings &s)
 }
 
 // The settings' lines, in the order the file lists them.
+// An older file's A range: before the flicks (a file without aim_gold_first),
+// A's default range was 10 and B's 20. Such a file's aim_a_range=10 becomes
+// the new default, 20, once: the file is written again with the new keys,
+// so a 10 chosen later is kept.
+constexpr int kOldDefaultARange = 10;
+
+inline void migrate_older_aim_settings(AimSettings &s)
+{
+    if (s.a.range_subtiles == kOldDefaultARange)
+        s.a.range_subtiles = AimSettings().a.range_subtiles;
+}
+
 inline void aim_settings_lines(const AimSettings &s, std::vector<SettingLine> &out)
 {
     using namespace aim_settings_detail;

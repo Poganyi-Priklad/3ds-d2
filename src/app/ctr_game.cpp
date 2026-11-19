@@ -1761,6 +1761,9 @@ void load_settings()
 
     }
     std::fclose(f);
+    // A file from before the flicks: its A range of 10 (the default then) becomes 20.
+    if (g_aim_in_settings && !g_aim_newest_in_settings)
+        game::migrate_older_aim_settings(g_aim_settings);
     g_ss.take_settings_changed();
 }
 

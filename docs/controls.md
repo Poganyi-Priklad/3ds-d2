@@ -104,7 +104,7 @@ Each button has its own mode: `enemies`, `corpses` (for corpse skills such as Ra
 | `aim_height` | `30` | pixels above the target's feet for the cursor |
 | `aim_confirm` | `4` | frames to wait for the game to show the target under the cursor |
 
-An older file's `aim_turn` line is ignored and dropped when the file is written again; its other values stay (an `aim_a_range=10` from before stays 10).
+An older file's `aim_turn` line is ignored and dropped when the file is written again; its other values stay, except an `aim_a_range=10` (the default then), which becomes the new default 20.
 
 game.log's `aim:` lines say what it chose and why it let go, and every 30 s of use a `aim: stats:` line counts it all.
 
