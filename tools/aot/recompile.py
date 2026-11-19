@@ -316,7 +316,7 @@ class Func:
         self.insns = {}          # va -> insn
         self.succ = {}           # va -> [va] (inside the function)
         self.calls = {}          # va -> target (direct), or None (indirect)
-        self.tails = {}          # va -> target: a jmp to another function's entry
+        self.tails = {}          # va -> target: a jmp to another function's entry; None through a pointer, ("import", slot)
         self.switches = {}       # va -> (index reg, [targets], (byte table va or None))
         self.rets = {}           # va -> bytes popped
         self.noreturn = set()    # call sites not coming back
@@ -365,6 +365,16 @@ class Func:
                             work.append(t)
                         break
                     sw = self._switch(va, i)
+                    if sw is None:
+                        # Not through a table: a tail call through a pointer
+                        # (issue #138: a vtable's method, a callback, an
+                        # import's thunk), esp checked at run time.
+                        op = ops[0]
+                        imp = op.type == X.X86_OP_MEM and op.mem.base == 0 and op.mem.index == 0 and \
+                            op.mem.disp in img.imports
+                        self.tails[va] = ("import", op.mem.disp) if imp else None
+                        self.succ[va] = []
+                        break
                     self.switches[va] = sw
                     self.succ[va] = sorted(set(sw[1] + [sw[3]]))
                     work.extend(self.succ[va])
@@ -422,7 +432,7 @@ class Func:
             return False
         return self.cut(hit)
 
-    def set_exits(self, sites, callouts=True):
+    def set_exits(self, sites, callouts=True, tail_pops=None):
         """Compiled, the call sites (and tail jumps) whose callee Box86 runs
         from the site on (issue #115): its compiled code ends there, so their
         paths end too, as at a call that never returns. An indirect or import
@@ -435,6 +445,14 @@ class Func:
             self.callouts = {va: self.callout_pops(va) for va in sites
                              if va in self.calls and va not in self.noreturn and
                              (self.calls[va] is None or isinstance(self.calls[va], tuple))}
+            # A tail call through a pointer (issue #138): a callout from esp
+            # as at our entry, the target taken to pop what our rets do, or
+            # a thunk's what Program.thunk_pops says; else it stays an exit.
+            pops = next(iter(self.ret_pops)) if len(self.ret_pops) == 1 else \
+                tail_pops if not self.ret_pops else None
+            if pops is not None:
+                self.callouts.update({va: pops for va in sites if va in self.tails and
+                                      (self.tails[va] is None or isinstance(self.tails[va], tuple))})
         self.cut([va for va in sites if va in self.calls and va not in self.noreturn and va not in self.callouts])
 
     def callout_pops(self, va):
@@ -496,11 +514,12 @@ class Func:
 
     def _switch(self, va, i):
         """jmp [reg*4 + table], bounded by the cmp/ja that guards the index;
-        or through a byte index table first (movzx reg, byte [reg + bytes])."""
+        or through a byte index table first (movzx reg, byte [reg + bytes]).
+        None when it isn't through a table (a tail call through a pointer)."""
         img = self.img
         op = i.operands[0]
         if op.type != X.X86_OP_MEM or op.mem.base != 0 or op.mem.scale != 4 or op.mem.index == 0:
-            raise Refused("indirect jump at %08x" % va)
+            return None
         idx = reg_full(i, op.mem.index)[0]
         table = op.mem.disp & 0xffffffff
         # Walk back over the instructions just before, in address order.
@@ -576,6 +595,7 @@ class Program:
                 self.intrinsics[va] = name
                 self.frame_consts[name] = got
         self.garbage = {}               # va -> ecx/edx it leaves as a library call's garbage (Analysis.garbage)
+        self.thunk_pops = None          # va -> what a thunk through a pointer pops (issue #138, _thunk_pops)
         self.funcs = {}
         self.summ = {}
         self.compiled = set()   # what compile_set compiles: their summaries are proven, not assumed
@@ -658,6 +678,40 @@ class Program:
                 out.add(site)
         return out
 
+    def _thunk_pops(self):
+        """What each thunk through a pointer pops (issue #138): a function
+        with no ret of its own whose every tail call is through a pointer
+        (004baea0: mov ecx, [ecx + 8]; mov eax, [ecx]; mov edx, [eax + 4];
+        jmp edx). Its imports' pops where it jumps through the IAT; else
+        what its callers push for it (Func.callout_pops), where every call
+        site agrees. A guess: the callout checks esp at the return and Box86
+        goes on from there where it's wrong. From the functions as decoded,
+        before exits cut any call site."""
+        img = self.img
+        thunks = {}
+        for va, f in self.funcs.items():
+            if f.refused or f.ret_pops or not f.tail_targets or \
+                    not all(t is None or isinstance(t, tuple) for t in f.tail_targets):
+                continue
+            imp = {img.import_pops.get(t[1]) if isinstance(t, tuple) else -1 for t in f.tail_targets}
+            thunks[va] = set() if imp == {-1} else imp
+        guess = collections.defaultdict(set)
+        for va, f in self.funcs.items():
+            if f.refused:
+                continue
+            for site, t in f.calls.items():
+                if isinstance(t, int) and t in thunks and not thunks[t]:
+                    guess[t].add(f.callout_pops(site))
+            for t in f.tails.values():
+                if isinstance(t, int) and t in thunks:
+                    guess[t].add(None)   # ours to know from our caller's: not tried
+        out = {}
+        for va, ps in thunks.items():
+            ps = ps or guess.get(va, set())
+            if len(ps) == 1 and None not in ps and -1 not in ps:
+                out[va] = ps.pop()
+        return out
+
     def make_plain(self, va):
         """A function whose callouts' pops threw its stack off: its indirect
         and import calls plain exits instead. False if they were already."""
@@ -666,13 +720,15 @@ class Program:
             return False
         self.plain.add(va)
         g = self.funcs[va] = Func(self.img, va, self.starts)
-        g.set_exits(f.exits, callouts=False)
+        g.set_exits(f.exits, callouts=False, tail_pops=self.thunk_pops.get(va))
         return True
 
     def apply_exits(self, blocks):
         """Each compiled function's exits for the compiled set as it is now;
         a function left to Box86 decoded again without them. The number whose
         exits changed (their summaries are then to do again)."""
+        if self.thunk_pops is None:   # compile_set sets it first
+            self.thunk_pops = self._thunk_pops()
         n = 0
         for va in list(self.funcs):
             f = self.funcs[va]
@@ -684,7 +740,7 @@ class Program:
                 continue
             g = self.funcs[va] = Func(self.img, va, self.starts)
             if want:
-                g.set_exits(want, callouts=va not in self.plain)
+                g.set_exits(want, callouts=va not in self.plain, tail_pops=self.thunk_pops.get(va))
             n += 1
         # Who may exit: an exit of its own, or a compiled callee (in C) that may.
         me = {va for va in self.compiled if self.func(va).exits}
@@ -749,6 +805,8 @@ class Program:
             pops = set(f.rets.values()) if not f.refused else set()
             if not pops and f.exits and not f.refused:   # every ret behind an exit (issue #138)
                 pops = set(f.ret_pops)
+            if not pops and not f.refused and va in (self.thunk_pops or {}):   # a thunk through a pointer (#138)
+                pops = {self.thunk_pops[va]}
             self.cfg_pops[va] = pops.pop() if len(pops) == 1 else None
             self.summ[va] = Summary(reads=(), preserved=ALL, pops=self.cfg_pops[va],
                                     known=not f.refused and len(pops) <= 1)
@@ -884,7 +942,7 @@ class Analysis:
                     self.esp_lost.setdefault(va, self._esp_cause(i, before))
                 if va in f.rets:
                     ret_states.append((va, dict(regs)))
-                if va in f.tails and va not in f.exits:
+                if va in f.tails and (va not in f.exits or va in f.callouts):   # a callout comes back (#138)
                     tail_states.append((va, dict(regs)))
                 succ = f.succ[va]
                 nxt = va + i.size
@@ -1687,14 +1745,7 @@ class Emitter:
         if self.mode == "ctx":
             sets = " ".join("R->r[%d] = %s;" % (r, REGS[r]) for r in range(8) if r != ESP)
             return "%s%s R->r[4] = esp + %du; return;" % (chk, sets, 4 + pops)
-        outs = self.sig["out"]
-        if not outs:
-            return chk + "return;"
-        if len(outs) == 1:
-            return chk + "return %s;" % REGS[outs[0]]
-        if len(outs) == 2:
-            return chk + "return (uint64_t)%s | (uint64_t)%s << 32;" % (REGS[outs[0]], REGS[outs[1]])
-        return chk + " ".join("o[%d] = %s;" % (k, REGS[r]) for k, r in enumerate(outs)) + " return;"
+        return chk + self.ret_outs()
 
     def call_compiled(self, t, ra, after=True):
         """A call to a compiled function; the return address is pushed.
@@ -2159,7 +2210,12 @@ class Emitter:
         compiled caller's esp += 4 + pops stays right."""
         va = i.address
         f, p = self.f, self.p
+        if va in f.callouts:
+            return self.tail_call_out(i)
         if va in f.exits:
+            # The target first: an operand may read esp.
+            if t is None or isinstance(t, tuple):
+                return "{ uint32_t x = %s; %s }" % (self.get(i, i.operands[0]), self.exit("x"))
             return self.exit("0x%08xu" % t)
         if t in p.intrinsics or p.natives.get(t) or isinstance(t, tuple) or t is None:
             raise Refused("tail call at %08x to an import, a native or an intrinsic" % va)
@@ -2179,16 +2235,38 @@ class Emitter:
             # esp after the target's ret, from its context (call_compiled's and call_guest's).
             sets = " ".join("R->r[%d] = %s;" % (r, REGS[r]) for r in range(8) if r != ESP)
             return chk + inner + " %s R->r[4] = esp; return;" % sets
+        return chk + inner + " " + self.ret_outs()
+
+    def ret_outs(self):
+        """A sig function's return of its outputs."""
         outs = self.sig["out"]
         if not outs:
-            ret = "return;"
-        elif len(outs) == 1:
-            ret = "return %s;" % REGS[outs[0]]
-        elif len(outs) == 2:
-            ret = "return (uint64_t)%s | (uint64_t)%s << 32;" % (REGS[outs[0]], REGS[outs[1]])
-        else:
-            ret = " ".join("o[%d] = %s;" % (k, REGS[r]) for k, r in enumerate(outs)) + " return;"
-        return chk + inner + " " + ret
+            return "return;"
+        if len(outs) == 1:
+            return "return %s;" % REGS[outs[0]]
+        if len(outs) == 2:
+            return "return (uint64_t)%s | (uint64_t)%s << 32;" % (REGS[outs[0]], REGS[outs[1]])
+        return " ".join("o[%d] = %s;" % (k, REGS[r]) for k, r in enumerate(outs)) + " return;"
+
+    def tail_call_out(self, i):
+        """A tail call through a pointer (issue #138: jmp eax, jmp [vtable +
+        n], an import's thunk) as a callout with our caller's return address:
+        what our rets pop is what it's taken to pop (checked by aot_call_out,
+        which exits to that return address where it isn't). Where esp isn't
+        our entry's, it isn't a tail call: Box86 goes on at the target."""
+        va = i.address
+        f, p = self.f, self.p
+        pops = p.summ[f.entry].pops
+        if pops is None or pops != f.callouts[va]:
+            raise Refused("tail call through a pointer at %08x: pops %s, the rets' %s" % (va, pops, f.callouts[va]))
+        s = ("{ uint32_t x = %s; if (esp != esp0 || LD32(esp) != ra0) { %s } "
+             "AotRegs t = {{eax, ecx, edx, ebx, esp, ebp, esi, edi}}; aot_call_out(x, &t, %du); "
+             "eax = t.r[0]; ecx = t.r[1]; edx = t.r[2]; esp = t.r[4]; } "
+             % (self.get(i, i.operands[0]), self.exit("x"), pops))
+        if self.mode == "ctx":
+            sets = " ".join("R->r[%d] = %s;" % (r, REGS[r]) for r in range(8) if r != ESP)
+            return s + "%s R->r[4] = esp; return;" % sets
+        return s + self.ret_outs()
 
     def frame_helper(self, name, ra):
         """The CRT's frame helpers in line (issue #138, FRAME_HELPERS): the
@@ -2575,6 +2653,18 @@ def compile_set(img, starts, roots, extra, mode_list, outdir, names=None, keep=N
           file=sys.stderr, flush=True)
     compiled = prog.compiled
     refused = {}
+    # A thunk through a pointer whose pops nothing tells (issue #138: no ret
+    # of its own, a tail call through a pointer among its ends): its
+    # jmp would always be a plain exit, and its callers would lose esp after
+    # calling it in C (no ret of its own); left to Box86, a call to it is an
+    # exit, as before. Refused as its decoding would be, so its summary is
+    # not known either (else a known one with no pops cost its callers esp).
+    prog.thunk_pops = prog._thunk_pops()
+    for va in reach:
+        f = prog.func(va)
+        ptr = sorted(k for k, t in f.tails.items() if t is None or isinstance(t, tuple))
+        if not f.refused and not f.ret_pops and ptr and va not in prog.thunk_pops:
+            f.refused = "a thunk through a pointer at %08x whose pops aren't known" % ptr[0]
     for va in want:
         f = prog.func(va)
         if f.refused:
@@ -3030,6 +3120,8 @@ def refusal_kind(reason):
     r = re.sub(r"^flags of \S+ read", "flags of an instruction read", r)
     r = re.sub(r"^\S+ reads flags", "an instruction reads flags", r)
     r = re.sub(r"tail call at X: pops .*", "tail call at X: pops differ from the target's", r)
+    r = re.sub(r"tail call through a pointer at X: pops .*", "tail call through a pointer: pops not known", r)
+    r = re.sub(r"^a thunk through a pointer at X .*", "a thunk through a pointer whose pops aren't known", r)
     r = re.sub(r"^its flags are read after the call at X", "its flags are read after a call to it", r)
     r = re.sub(r"is the entry's [+-]\d+$", "is the entry's +n", r)
     return r.replace(" at X", "").replace(" (X)", "")
@@ -3119,8 +3211,11 @@ def census(img, starts, tsv, outdir, hot_logs, mode_list):
         f = prog.func(va)
         for site in f.exits:
             t = f.calls.get(site, f.tails.get(site))
-            if t is None:
-                k = "indirect call (callout)" if site in f.callouts else "indirect call (plain exit)"
+            how = "callout" if site in f.callouts else "plain exit"
+            if site in f.tails and (t is None or isinstance(t, tuple)):
+                k = "tail call through a pointer (%s)" % how
+            elif t is None:
+                k = "indirect call (%s)" % how
             elif isinstance(t, tuple):
                 dll, name = img.imports[t[1]]
                 imports["%s!%s" % (dll, name)] += 1

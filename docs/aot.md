@@ -365,7 +365,7 @@ Stage 1 dropped to 12.4–13 fps here. With exits, the code no longer costs fram
 
 ### Callouts
 
-- **Where:** a compiled function's indirect and import calls (549 of the 1,707 exit sites). Instead of an exit, `aot_call_out` looks at the target first:
+- **Where:** a compiled function's indirect and import calls (549 of the 1,707 exit sites). Since #138, its tail calls through a pointer too (Tail calls through a pointer, below). Instead of an exit, `aot_call_out` looks at the target first:
   - **One of our shims** (an import, or a pointer to one): its `Shim::fn` runs in C, with the CPU's registers set as at the call. Box86 takes over at the return only when the shim redirected, a yield is pending, or esp or a callee-saved register isn't what the call's pops guess says.
   - **A compiled function:** its signature function, the journaled one under the check.
   - **Anything else:** an exit, as before.
@@ -489,6 +489,16 @@ x87 is compiled, on the CPU's own x87 state ([Translation model](#translation-mo
 | Act II | 77.9M | 3.7K, 10 functions |
 
 d2d's cases (`D2_AOT_BUILD=keep scripts/docker.sh test d2d dist/game`) pass: 48 natives, 18,902 cases, 0 differ. The fight in production mode (`AOT_MODE=1`) ran in 63 and 62 s, against 63–67 s before x87 and patch 0066 (wall time to the second, under the lane's virtual clock).
+
+### Tail calls through a pointer (#138)
+
+An indirect `jmp` that isn't through a switch table (`jmp eax`, `jmp [ecx + n]` into a vtable, `jmp [IAT]` in an import's thunk) was a refusal. With esp as at the function's entry it is a tail call: the target returns to our caller. It now compiles as a callout (`aot_call_out`) with that caller's return address on the stack. The target is taken to pop what the function's own rets pop, which the callout checks at the return, as for an indirect call: where it differs, Box86 goes on at that return address. Where esp at the `jmp` isn't the entry's, it wasn't a tail call, and Box86 goes on at the target.
+
+A thunk with no ret of its own (`004baea0`: `mov ecx, [ecx + 8]; mov eax, [ecx]; mov edx, [eax + 4]; jmp edx`) has nothing to say what it pops. It takes its import's pops where it jumps through the IAT, or what every one of its callers pushes where they all agree, checked the same way. Where neither is known (102 functions, reached only through vtables), it stays refused: compiled, its `jmp` would always hand over to Box86, and its callers would lose esp after calling it.
+
+**Compiled:** 12,784 functions on d2d's list (98.0%), 2,537,110 bytes (97.6%), 98.4% of the lane's hot bytes (12,731, 97.4% and 98.1% before). None is refused for an indirect jump (155 before). 58 tail calls through a pointer in 53 functions are callouts. Calls from compiled code to Box86 code that may block fell from 4.5% to 1.5% of the hot bytes: the thunks they went to are compiled.
+
+**The coverage set:** 2,370 functions compile and 47 are left to Box86 (2,361 and 54 before). The check is 0 differ on the three scripts (town-walk 29.2M calls, fight 53.9M, Act II 77.9M). `004bdee0`, whose `jmp eax` dispatches through a table by unit type, was entered from Box86 69,296 times in the fight. d2d's cases pass: 48 natives, 18,902 cases, 0 differ. The fight in production mode, alternated with `development` in one session, took 63 and 62 s against 63 and 63 s.
 
 ## Open questions
 
