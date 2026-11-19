@@ -22,7 +22,11 @@ pub struct Summary {
 pub const UNKNOWN: Summary = Summary { reads: ALL, preserved: 0, pops: None, known: false };
 pub const CALLEE_SAVED: Regs = (1 << EBX) | (1 << EBP) | (1 << ESI) | (1 << EDI);
 
-pub const NORETURN_FUNCS: [u32; 1] = [0x00681e09];
+/// Functions that never return: exit(-1) (0x681e09, the game's internal
+/// errors), and __report_gsfailure (0x6889d6, issue #138), which ends in
+/// TerminateProcess(GetCurrentProcess(), 0xc0000409) before a ret the
+/// decoding sees.
+pub const NORETURN_FUNCS: [u32; 2] = [0x00681e09, 0x006889d6];
 pub const ERROR_PATH_FUNCS: [u32; 2] = [0x00408090, 0x00408a60];
 
 #[derive(Clone, Debug)]

@@ -254,6 +254,11 @@ struct Fn {
     uint32_t checked_all = 0, differ_all = 0, unchecked_all = 0;
 };
 std::vector<Fn> g_fns;           // sized once at install: entries keep their address
+// By the functions' table's rows (issue #138): 1 where it reaches, in C, a
+// function a native changed that may exit. Its call to the native exits to
+// Box86 where the native hands back, so a native's direct call (no trap to
+// exit to) leaves it to Box86.
+std::vector<uint8_t> g_stale_hard;
 std::unordered_map<uint32_t, uint32_t> g_fn_at;   // va -> index in g_fns
 
 const char *tramp_name(uint32_t va)
@@ -596,6 +601,8 @@ bool direct_fn(Cpu &c, uint32_t va, uint32_t *regs)
         return false;
     Fn &F = g_fns[it->second];
     if ((!F.hooked && !F.dropped) || F.f->may_hard)   // a hard exit needs a trap to go back to
+        return false;
+    if ((size_t)(F.f - aot_funcs) < g_stale_hard.size() && g_stale_hard[F.f - aot_funcs])   // so does a native's hand-back
         return false;
     g_cpu = &c;
     F.direct++;
@@ -989,21 +996,26 @@ std::vector<uint8_t> stale_funcs(Cpu &c, uint32_t &changed, std::string &names)
             continue;
         bad[k] = 1;
         changed++;
-        if (names.size() < 240)
-            names += std::string(names.empty() ? "" : " ") + aot_funcs[k].name;
+        // The whole list (issue #138): every one named, * where it may exit
+        // (its callers stay with Box86 then, D2_AOT_STALE or not).
+        names += std::string(names.empty() ? "" : " ") + aot_funcs[k].name + (aot_funcs[k].may_exit ? "*" : "");
         // Else its compiled callers call the native (aot_stale): they stay
-        // hooked, but not in line, a nested run can't start there. Not one
-        // that may exit, though: what it hands Box86 may wait on another
-        // guest thread, which a nested run can't (0040a960's
-        // WaitForSingleObject, from the fight): every compiled caller that
-        // reaches it stays with Box86, as before.
+        // hooked, but not in line, a nested run can't start there. Where the
+        // native hands back or waits, the call exits to Box86 (issue #138):
+        // a nested run can't wait on another guest thread (0040a960's
+        // WaitForSingleObject hung the fight when it was one).
         // A native that does what its function does, by the check's lane
         // (set_aot_equivalent): compiled callers call the original's C.
         if (g_equivalent.count(aot_funcs[k].va))
             continue;
         aot_stale[k] = 1;
-        block[k] = aot_funcs[k].may_exit || !g_stale_calls;
+        // A native that hands back, or waits, exits (aot_call_stale, issue
+        // #138): what it hands Box86 runs there, not nested.
+        block[k] = !g_stale_calls;
     }
+    g_stale_hard.assign(n, 0);
+    for (size_t k = 0; k < n; k++)
+        g_stale_hard[k] = aot_stale[k] && aot_funcs[k].may_exit;
     for (bool more = changed != 0; more;) {
         more = false;
         for (size_t k = 0; k < n; k++)
@@ -1012,6 +1024,10 @@ std::vector<uint8_t> stale_funcs(Cpu &c, uint32_t &changed, std::string &names)
                 if (block[t] && !block[k]) {
                     block[k] = 1;
                     bad[k] = 1;
+                    more = true;
+                }
+                if (g_stale_hard[t] && !g_stale_hard[k]) {
+                    g_stale_hard[k] = 1;
                     more = true;
                 }
                 if ((aot_stale[t] || bad[t] == 2) && !bad[k]) {
@@ -1071,8 +1087,14 @@ void set_aot_mode(Cpu &c, AotMode mode)
     rt::logf("aot: %u functions hooked; %u changed since compiled (natives%s%s): %u left to Box86 with them "
              "(those and what reaches one that may exit); %u hooked that reach one that can't, which compiled code "
              "calls through Box86, so not in line",
-             (unsigned)hooked, (unsigned)changed, names.empty() ? "" : ": ", names.c_str(), (unsigned)left,
-             (unsigned)reaching);
+             (unsigned)hooked, (unsigned)changed, "", "", (unsigned)left, (unsigned)reaching);
+    for (size_t p = 0; p < names.size();) {   // the changed ones, * where they may exit, in lines logf's buffer holds
+        size_t q = std::min(names.size(), p + 400);
+        if (q < names.size())
+            q = names.rfind(' ', q) > p ? names.rfind(' ', q) : q;
+        rt::logf("aot: changed since compiled: %s", names.substr(p, q - p).c_str());
+        p = q + (q < names.size());
+    }
 }
 
 std::vector<std::string> aot_lines()
@@ -1294,6 +1316,8 @@ void aot_guest_call(uint32_t va, AotRegs *r)
     game::g_nested_n++;
 }
 
+[[noreturn]] static void call_out_back(uint32_t x, uint32_t to, const uint32_t *r);
+
 // A register the original keeps that its native didn't (named once each):
 // compiled callers above take it as kept.
 static void stale_kept(uint32_t va, const uint32_t *in, const uint32_t *r)
@@ -1326,7 +1350,14 @@ void aot_call_stale(uint32_t va, AotRegs *t)
         it = g_stale_slot.emplace(va, slot).first;
     }
     const d2rt::Shim *sh = it->second ? rt::bridge().slot_shim(it->second) : nullptr;
-    if (!sh) {
+    if (!sh && !g_no_exit) {
+        // No shim at its entry (a patch in line): Box86 runs it from there and
+        // returns through the compiled callers' return addresses (issue #138).
+        g_stale_guest++;
+        uint32_t *r = t->r;
+        aot_exit(va, r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7]);
+    }
+    if (!sh) {   // nothing to exit to: Box86's call, nested
         g_stale_guest++;
         uint32_t in[8];
         std::memcpy(in, t->r, sizeof in);
@@ -1351,6 +1382,17 @@ void aot_call_stale(uint32_t va, AotRegs *t)
     const uint32_t rd = rt::bridge().take_redirect();
     c.trap_epilogue(eax, esp_add, rd ? rd : ra);
     g_stale_shims++;
+    if ((rd || rt::bridge().yield_requested()) && !g_no_exit) {
+        // Handed back to the game's code, or a wait (issue #138): as a
+        // callout's, an exit, Box86 on at that code or at the return (the
+        // trap's tail yields), not a nested run, which can't wait on another
+        // guest thread. So a caller that reaches a native's function stays
+        // compiled even where the function may exit.
+        c.regs_gp(r);
+        saved.put(c);
+        g_stale_handed += rd != 0;
+        call_out_back(va, rd ? rd : ra, r);
+    }
     if (rt::bridge().take_yield_request()) {   // a wait: done here, as in a nested run
         rt::finish_nested_block(c);
         g_stale_waits++;
