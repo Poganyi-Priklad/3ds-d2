@@ -15,6 +15,8 @@
 #ifndef D2_GAME_D2_UNITS_H
 #define D2_GAME_D2_UNITS_H
 
+#include "game/auto_target.h"
+
 #include <cstdint>
 #include <vector>
 
@@ -66,6 +68,25 @@ bool find_preset(uint32_t cls, uint32_t type, double &dx, double &dy, double &di
 // tables), to the runtime log: class, id, mode, an object's name, place and
 // its spot on the screen ("units:" lines; autoplay's "units [all]").
 void log_units(bool all = false);
+
+// The auto-target's view of the game (auto_target.h): the hero, the camera
+// (a unit's place on the screen is its feet's world pixel minus the
+// camera's, at any resolution), the unit under the cursor, and the monsters
+// and NPCs near the hero with the flags that tell an enemy from an NPC, a
+// pet or a corpse. Facts for 1.14d, checked on the Linux lane:
+//   0x007A520C - 0x007A5214   the camera's x;  0x007A5208 - 8: its y
+//   0x0071146C, 0x00711470    the game's frame width and height
+//   0x007A6A94                1 while a unit is under the cursor
+//   0x007A6A8C, 0x007A6A78    that unit's type and id
+//   0x007BB5BC                the client's pet list (+0x08 unit id, +0x30 next)
+//   unit +0x2C path: +0x08, +0x0C its feet in world pixels
+//   unit +0xC4, +0xC8         flags (auto_target.h's aim_bits)
+//   MonStats.txt row +0x0C flags; +0x18 its MonStats2 row, whose +0x04 flags
+AimWorld &game_aim_world();
+// The reads are timed (AimWorld::read_cost) with clock_us: rt::now_us by
+// default; the Linux lane's virtual clock doesn't move inside a poll, so
+// the lane may pass a host clock.
+void set_aim_clock(uint64_t (*clock_us)());
 
 }  // namespace game
 

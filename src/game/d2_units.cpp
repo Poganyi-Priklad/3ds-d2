@@ -279,4 +279,200 @@ void log_units(bool all)
     rt::logf(ok ? "units: %d near the player" : "units: not in a game", n);
 }
 
+// ---- the auto-target's reads (d2_units.h, auto_target.h) ----
+
+namespace {
+
+constexpr uint32_t kCameraXVa = 0x007A520C, kCameraXShiftVa = 0x007A5214, kCameraYVa = 0x007A5208;
+constexpr uint32_t kFrameWidthVa = 0x0071146C, kFrameHeightVa = 0x00711470;
+constexpr uint32_t kHoverFlagVa = 0x007A6A94, kHoverTypeVa = 0x007A6A8C, kHoverIdVa = 0x007A6A78;
+constexpr uint32_t kPetListVa = 0x007BB5BC;
+constexpr uint32_t kDataTablesVa = 0x00744304;   // the loaded .txt tables
+constexpr float kAimReadSubtiles = 40.0f;          // units further away are never targets
+
+uint64_t (*g_aim_clock)() = rt::now_us;
+AimReadCost g_aim_cost;
+
+int camera_x() { return (int)(rd32(kCameraXVa) - rd32(kCameraXShiftVa)); }
+int camera_y() { return (int)rd32(kCameraYVa) - 8; }
+
+bool is_town(int level) { return level == 1 || level == 40 || level == 75 || level == 103 || level == 109; }
+
+// A monster's flags from MonStats.txt and MonStats2.txt, by its class,
+// read once per class (the tables don't change during a game).
+class MonsterFlags {
+public:
+    void get(uint32_t cls, uint32_t &monstats, uint32_t &monstats2)
+    {
+        const uint32_t tables = rd32(kDataTablesVa);
+        if (tables != tables_) {
+            tables_ = tables;
+            known_.clear();
+        }
+        monstats = monstats2 = 0;
+        if (!tables || cls >= 4096)
+            return;
+        if (known_.size() <= cls)
+            known_.resize(cls + 1, Flags{});
+        Flags &f = known_[cls];
+        if (!f.read) {
+            f.read = true;
+            if (cls < rd32(tables + 0xA80)) {
+                const uint32_t row = rd32(tables + 0xA78) + cls * 0x1A8;
+                f.monstats = rd32(row + 0x0C);
+                uint16_t row2 = 0;
+                rt::guest_read(row + 0x18, &row2, 2);
+                if ((int16_t)row2 >= 0 && row2 < rd32(tables + 0xA98))
+                    f.monstats2 = rd32(rd32(tables + 0xA90) + row2 * 0x134u + 4);
+            }
+        }
+        monstats = f.monstats;
+        monstats2 = f.monstats2;
+    }
+
+private:
+    struct Flags {
+        bool read = false;
+        uint32_t monstats = 0, monstats2 = 0;
+    };
+    uint32_t tables_ = 0;
+    std::vector<Flags> known_;
+};
+
+class GameAimWorld : public AimWorld {
+public:
+    AimReadCost read_cost() const override { return g_aim_cost; }
+    bool view(AimView &out) override
+    {
+        const uint32_t player = rd32(kPlayerUnitVa);
+        int feet_x, feet_y;
+        if (!player || !feet(player, feet_x, feet_y) || !place(player, player_x_, player_y_))
+            return false;
+        out.hero_x = feet_x;
+        out.hero_y = feet_y;
+        const int width = (int)rd32(kFrameWidthVa), height = (int)rd32(kFrameHeightVa);
+        out.width = width >= 320 && width <= 2048 ? width : 640;
+        out.height = height >= 240 && height <= 2048 ? height : 480;
+        out.in_town = is_town(player_level());
+        out.hero_mode = rd32(player + 0x10);
+        out.hover_on = rd32(kHoverFlagVa) != 0;
+        out.hover_type = rd32(kHoverTypeVa);
+        out.hover_id = rd32(kHoverIdVa);
+        return true;
+    }
+
+    void units(std::vector<AimUnit> &out) override
+    {
+        const uint64_t start = g_aim_clock();
+        const uint32_t player = rd32(kPlayerUnitVa);
+        if (!player || !place(player, player_x_, player_y_))
+            return;
+        read_pets();
+        uint32_t heads[kBuckets] = {};
+        rt::guest_read(kUnitTablesVa + kMonster * kBuckets * 4, heads, sizeof heads);
+        uint32_t read = 0;
+        for (uint32_t b = 0; b < kBuckets; b++) {
+            uint32_t u = heads[b];
+            for (int n = 0; u && n < 64; n++) {
+                AimUnit unit;
+                uint32_t next = 0;
+                read++;
+                if (read_unit(u, unit, next) && unit.distance <= kAimReadSubtiles)
+                    out.push_back(unit);
+                u = next;
+            }
+        }
+        const uint64_t took = g_aim_clock() - start;
+        g_aim_cost.scans++;
+        g_aim_cost.units += read;
+        g_aim_cost.total_us += took;
+        g_aim_cost.longest_us = took > g_aim_cost.longest_us ? took : g_aim_cost.longest_us;
+    }
+
+    bool unit(uint32_t id, AimUnit &out) override
+    {
+        const uint32_t player = rd32(kPlayerUnitVa);
+        if (!player || !place(player, player_x_, player_y_))
+            return false;
+        uint32_t u = rd32(kUnitTablesVa + (kMonster * kBuckets + (id & (kBuckets - 1))) * 4);
+        for (int n = 0; u && n < 64; n++) {
+            uint32_t next = 0;
+            if (rd32(u + 0x0C) == id) {
+                read_pets();
+                return read_unit(u, out, next);
+            }
+            u = rd32(u + kListNext);
+        }
+        return false;
+    }
+
+private:
+    // A unit's feet on the screen: its world pixel (path +0x08, +0x0C) minus the camera.
+    bool feet(uint32_t unit, int &x, int &y)
+    {
+        const uint32_t path = rd32(unit + kPath);
+        int32_t pixel[2] = {};
+        if (!path || !rt::guest_read(path + 0x08, pixel, sizeof pixel))
+            return false;
+        x = pixel[0] - camera_x();
+        y = pixel[1] - camera_y();
+        return true;
+    }
+
+    // One unit's fields in one read (its first 0xE8 bytes), and the next in its bucket.
+    bool read_unit(uint32_t u, AimUnit &out, uint32_t &next)
+    {
+        uint32_t fields[0xE8 / 4] = {};
+        if (!rt::guest_read(u, fields, sizeof fields))
+            return false;
+        next = fields[kListNext / 4];
+        if (fields[0] != kMonster)
+            return false;
+        out.cls = fields[0x04 / 4];
+        out.id = fields[0x0C / 4];
+        out.mode = fields[0x10 / 4];
+        out.flags_a = fields[0xC4 / 4];
+        out.flags_b = fields[0xC8 / 4];
+        const uint32_t path = fields[kPath / 4];
+        uint16_t place16[4] = {};
+        int32_t pixel[2] = {};
+        if (!path || !rt::guest_read(path, place16, sizeof place16) || !rt::guest_read(path + 0x08, pixel, sizeof pixel))
+            return false;
+        const double dx = place16[1] + place16[0] / 65536.0 - player_x_;
+        const double dy = place16[3] + place16[2] / 65536.0 - player_y_;
+        out.distance = (float)std::sqrt(dx * dx + dy * dy);
+        out.feet_x = pixel[0] - camera_x_;
+        out.feet_y = pixel[1] - camera_y_;
+        flags_.get(out.cls, out.monstats_flags, out.monstats2_flags);
+        out.owned = std::find(pets_.begin(), pets_.end(), out.id) != pets_.end();
+        return true;
+    }
+
+    // The client's pet list (the mercenary, summons): their unit ids. Read
+    // once per poll at most.
+    void read_pets()
+    {
+        camera_x_ = camera_x();
+        camera_y_ = camera_y();
+        pets_.clear();
+        for (uint32_t node = rd32(kPetListVa), n = 0; node && n < 256; node = rd32(node + 0x30), n++)
+            pets_.push_back(rd32(node + 0x08));
+    }
+
+    double player_x_ = 0, player_y_ = 0;
+    int camera_x_ = 0, camera_y_ = 0;
+    std::vector<uint32_t> pets_;
+    MonsterFlags flags_;
+};
+
+}  // namespace
+
+AimWorld &game_aim_world()
+{
+    static GameAimWorld world;
+    return world;
+}
+
+void set_aim_clock(uint64_t (*clock_us)()) { g_aim_clock = clock_us ? clock_us : rt::now_us; }
+
 }  // namespace game
