@@ -419,7 +419,7 @@ class Func:
             for t in self.succ[va]:
                 if t not in self.insns:
                     raise Refused("branch into the middle of an instruction at %08x" % t)
-        for d in self.data:
+        for d in sorted(self.data):
             if d in self.insns:
                 raise Refused("a switch table overlaps code at %08x" % d)
         self._blocks()
@@ -442,7 +442,7 @@ class Func:
         self.exits = frozenset(sites)
         self.plain = not callouts
         if CALLOUTS and callouts:
-            self.callouts = {va: self.callout_pops(va) for va in sites
+            self.callouts = {va: self.callout_pops(va) for va in sorted(sites)
                              if va in self.calls and va not in self.noreturn and
                              (self.calls[va] is None or isinstance(self.calls[va], tuple))}
             # A tail call through a pointer (issue #138): a callout from esp
@@ -451,7 +451,7 @@ class Func:
             pops = next(iter(self.ret_pops)) if len(self.ret_pops) == 1 else \
                 tail_pops if not self.ret_pops else None
             if pops is not None:
-                self.callouts.update({va: pops for va in sites if va in self.tails and
+                self.callouts.update({va: pops for va in sorted(sites) if va in self.tails and
                                       (self.tails[va] is None or isinstance(self.tails[va], tuple))})
         self.cut([va for va in sites if va in self.calls and va not in self.noreturn and va not in self.callouts])
 
@@ -861,7 +861,7 @@ class Program:
                     s = Summary(ALL, (), self.cfg_pops[va], True) if va in self.noreturn_funcs else UNKNOWN
             if s != self.summ[va]:
                 self.summ[va] = s
-                for c in callers[va]:
+                for c in sorted(callers[va]):
                     if c not in queued:
                         queued.add(c)
                         work.append(c)
@@ -1490,7 +1490,7 @@ class Flags:
                 self.dynamic |= src
             self.readers[va] = (sorted(src), kinds.pop() if len(kinds) == 1 else None)
             self.live_defs |= src
-        for d in self.live_defs:
+        for d in sorted(self.live_defs):
             if self.kind_of(d) is None:
                 raise Refused("flags of %s read at %08x" % (f.insns[d].mnemonic, d))
         # The shared operand slots: no other storing definer between a definer and its reader.
@@ -2608,7 +2608,7 @@ def hookable(img, prog, compiled, sweep):
         heads[va] = (keep, head)
     inner = {va + k: va for va, (keep, _) in heads.items() for k in range(1, keep)}
     region = {**inner, **{va: va for va in heads}}   # the entry too: its own fall-through is no branch
-    for f in prog.funcs.values():
+    for f in (prog.funcs[v] for v in sorted(prog.funcs)):
         for src, succ in f.succ.items():
             i = f.insns.get(src)
             for t in succ:
@@ -2617,7 +2617,7 @@ def hookable(img, prog, compiled, sweep):
         for src, t in list(f.calls.items()) + list(f.tails.items()):
             if isinstance(t, int) and t in inner:
                 why[inner[t]] = "a call or jump from %08x into its first bytes (%08x)" % (src, t)
-    for t in sweep(set(inner)):
+    for t in sorted(sweep(set(inner))):
         why.setdefault(inner[t], "a 32-bit branch somewhere in .text could reach its first bytes (%08x)" % t)
     return {va: h for va, h in heads.items() if va not in why}, why
 
@@ -2783,7 +2783,7 @@ def compile_set(img, starts, roots, extra, mode_list, outdir, names=None, keep=N
                     s = prog.summ[va]
                     if frozenset(a.live_in) != s.reads:
                         prog.summ[va] = Summary(a.live_in, s.preserved, s.pops, True)
-                        for c in callers[va]:
+                        for c in sorted(callers[va]):
                             if c not in queued:
                                 queued.add(c)
                                 work.append(c)
@@ -3203,13 +3203,13 @@ def census(img, starts, tsv, outdir, hot_logs, mode_list):
                 seen.add("instruction %s" % m)
             if " fs:" in " " + i.op_str or "fs:" in i.op_str:
                 seen.add("fs: (thread block)")
-        for k in seen:
+        for k in sorted(seen):
             add(kinds, k, va)
     # What compiled code hands to Box86.
     exits, nested, imports = {}, {}, collections.Counter()
-    for va in compiled:
+    for va in sorted(compiled):
         f = prog.func(va)
-        for site in f.exits:
+        for site in sorted(f.exits):
             t = f.calls.get(site, f.tails.get(site))
             how = "callout" if site in f.callouts else "plain exit"
             if site in f.tails and (t is None or isinstance(t, tuple)):
