@@ -81,6 +81,15 @@ typedef struct {
     /* 1: it has x87 code (issue #136), on the CPU's own x87 state. */
     uint8_t x87;
 } AotFunc;
+/* The natives' hand-backs compiled (issue #138; AOT_SYM(resumes)): `func`'s
+ * code entered at `va`, where a native that did its first instructions hands
+ * the call back (resume_original), with all eight registers as there; r[4]
+ * comes back past the function's ret. */
+typedef struct {
+    uint32_t va, func;
+    uint32_t sp;          /* esp at va less the entry's: the return address at esp - sp */
+    AotRootFn fn;
+} AotResume;
 #ifdef AOT_SPLIT
 #define AOT_LEAF(x) 0
 #define AOT_EXIT(own, tree) (own)

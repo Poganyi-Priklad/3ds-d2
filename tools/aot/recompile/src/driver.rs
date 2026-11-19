@@ -3,7 +3,7 @@
 
 use crate::analysis::Analysis;
 use crate::cs::{OpKind, GRP_JUMP, REG_EIP};
-use crate::emit::{x87_op, Emitter, Sig};
+use crate::emit::{resume_name, x87_op, Emitter, Sig};
 use crate::flags::Flags;
 use crate::func::{Func, Tgt};
 use crate::image::Image;
@@ -710,6 +710,57 @@ fn write_out<'a>(
         em.ana = None;
         ems.push(em);
     }
+    // The natives' hand-backs (issue #138): each compiled as an entry into
+    // the function that holds it, sig mode only.
+    let mut resume_texts: HashMap<u32, Vec<String>> = HashMap::new();
+    let mut resumed: Vec<(u32, u32, i64)> = Vec::new();
+    let mut resume_why: Vec<(u32, String)> = Vec::new();
+    if let Some(mi) = mode_list.iter().position(|&m| m == "sig") {
+        let em = &mut ems[mi];
+        for &x in &img.resumes {
+            let at = compiled.iter().copied().filter(|&va| va <= x && prog.func(va).insns.contains_key(&x)).max();
+            let Some(va) = at else {
+                resume_why.push((x, "in no compiled function".to_string()));
+                continue;
+            };
+            let f = prog.func(va);
+            if x == f.entry {
+                resume_why.push((x, "a compiled function's entry".to_string()));
+                continue;
+            }
+            if let Some(r) = Flags::read_before_set(&f, x) {
+                resume_why.push((x, format!("flags read at {:08x} before anything sets them", r)));
+                continue;
+            }
+            let out = set_of(&sigs[&va].outs);
+            let ana = match Analysis::new(&prog, f.clone(), Some(out), false) {
+                Ok(a) => a,
+                Err(Refused(e)) => {
+                    resume_why.push((x, e));
+                    continue;
+                }
+            };
+            let Some(Some(sp)) = ana.sp_at.get(&x).copied() else {
+                resume_why.push((x, "the stack offset there not known".to_string()));
+                continue;
+            };
+            em.ana = Some(ana);
+            match em.resume_fn(va, x, sp) {
+                Ok(t) => {
+                    resume_texts.entry(va).or_default().push(t);
+                    resumed.push((x, va, sp));
+                }
+                Err(Refused(e)) => resume_why.push((x, e)),
+            }
+            em.ana = None;
+        }
+    }
+    let mut rj = J::obj();
+    for &(x, va, _) in &resumed {
+        rj.set(&format!("{:08x}", x), J::Str(format!("{:08x}", va)));
+    }
+    report.set("resumes", rj);
+    report.set("resumes_refused", J::Obj(resume_why.iter().map(|(x, e)| (format!("{:08x}", x), J::Str(e.clone()))).collect()));
     let part_max: usize = (std::env::var("AOT_PART_MB").ok().and_then(|s| s.parse::<f64>().ok()).unwrap_or(8.0) * 1e6) as usize;
     let cset: HashSet<u32> = compiled.iter().copied().collect();
     let callees_of: HashMap<u32, BTreeSet<u32>> = compiled
@@ -871,6 +922,12 @@ fn write_out<'a>(
             for &va in part {
                 out.push(texts[&va].iter().find(|(m, _)| *m == mode).unwrap().1.clone());
                 out.push(String::new());
+                if mode == "sig" {
+                    for t in resume_texts.get(&va).into_iter().flatten() {
+                        out.push(t.clone());
+                        out.push(String::new());
+                    }
+                }
             }
         }
         part_texts.push(out);
@@ -1003,6 +1060,22 @@ fn write_out<'a>(
         chunks.push("    {0, 0, 0, 0, 0, 0, 0, 0, {0}, 0, 0, 0, 0, 0, 0, 0, 0, 0}".to_string());
         chunks.push("};".to_string());
     }
+    // The resume entries' table: all eight registers in and out, esp after
+    // the function's ret.
+    for &(x, _, _) in &resumed {
+        chunks.push(format!("AOT_FN void {}(AotRegs *R);", resume_name(x)));
+        chunks.push(format!(
+            "static uint32_t AOT_SYM(rs_{:08x})(uint32_t *r) {{ AotRegs t; for (int k = 0; k < 8; k++) t.r[k] = r[k]; {}(&t); for (int k = 0; k < 8; k++) r[k] = t.r[k]; return r[0]; }}",
+            x,
+            resume_name(x)
+        ));
+    }
+    chunks.push("const AotResume AOT_SYM(resumes)[] = {".to_string());
+    for &(x, va, sp) in &resumed {
+        chunks.push(format!("    {{0x{:08x}u, 0x{:08x}u, 0x{:x}u, AOT_SYM(rs_{:08x})}},", x, va, sp as i32 as u32, x));
+    }
+    chunks.push("    {0, 0, 0, 0}".to_string());
+    chunks.push("};".to_string());
     let mut hk = J::obj();
     hk.set("hookable", J::Int(heads.len() as i64));
     hk.set("not", J::Obj(why.iter().map(|(k, v)| (format!("{:08x}", k), J::Str(v.clone()))).collect()));

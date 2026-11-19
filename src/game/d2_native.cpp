@@ -2270,6 +2270,8 @@ bool section_free(uint32_t cs)
 // the return address and `stack_args` dwords from the ESP set here.
 void resume_original(Cpu &c, uint32_t va, uint32_t esp, uint32_t stack_args)
 {
+    if (game::aot_resume(c, va, esp, stack_args))   // its compiled code (issue #138)
+        return;
     c.set_reg(R_ESP, esp - 4 - 4 * stack_args);
     rt::bridge().redirect_next(va);
 }
@@ -4282,6 +4284,9 @@ bool install_slot_steps(Cpu &c)
         std::memcpy(p + 1, &rel, 4);
         c.write(st.va, p, st.n);
         c.invalidate_code(st.va, st.n);
+        // Each step does the loop it replaced (issue #138): the compiled
+        // function runs the original loop.
+        game::set_aot_inline_equivalent(st.va, st.orig, st.n);
         rt::logf("native %s at %08x (in line)", st.name, st.va);
     }
     return true;

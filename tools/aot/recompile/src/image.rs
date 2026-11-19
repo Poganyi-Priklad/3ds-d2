@@ -17,6 +17,9 @@ pub struct Image {
     /// IAT slot -> (dll, name or #ordinal), in pefile's order.
     pub imports: OMap<u32, (String, String)>,
     pub import_pops: HashMap<u32, Option<i64>>,
+    /// Where our natives hand a call back to the game's code (issue #138):
+    /// d2_native.cpp's resume_original(c, 0x..., ...), in order.
+    pub resumes: Vec<u32>,
     cs: Cs,
     cache: RefCell<HashMap<u32, Rc<Insn>>>,
 }
@@ -161,6 +164,7 @@ impl Image {
             }
         }
         let import_pops = import_pops(&imports, src_root);
+        let resumes = resumes(&src_root.join("src/game/d2_native.cpp"));
         Ok(Image {
             base,
             mem,
@@ -168,6 +172,7 @@ impl Image {
             text_hi,
             imports,
             import_pops,
+            resumes,
             cs: Cs::new(),
             cache: RefCell::new(HashMap::new()),
         })
@@ -341,6 +346,25 @@ fn import_pops(imports: &OMap<u32, (String, String)>, root: &Path) -> HashMap<u3
             None
         };
         out.insert(*slot, v);
+    }
+    out
+}
+
+/// The constant addresses d2_native.cpp resumes the game's code at
+/// (`resume_original(c, 0x<hex>`), each once, in order.
+fn resumes(path: &Path) -> Vec<u32> {
+    let text = String::from_utf8_lossy(&std::fs::read(path).unwrap_or_default()).into_owned();
+    let mut out = Vec::new();
+    let key = "resume_original(c, 0x";
+    let mut rest = text.as_str();
+    while let Some(k) = rest.find(key) {
+        rest = &rest[k + key.len()..];
+        let hex: String = rest.chars().take_while(|c| c.is_ascii_hexdigit()).collect();
+        if let Ok(v) = u32::from_str_radix(&hex, 16) {
+            if !hex.is_empty() && !out.contains(&v) {
+                out.push(v);
+            }
+        }
     }
     out
 }

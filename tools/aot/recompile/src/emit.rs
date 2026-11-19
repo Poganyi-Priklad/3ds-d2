@@ -90,6 +90,11 @@ fn arith_op(reg: u8) -> Option<&'static str> {
     })
 }
 
+/// A resume entry's C name (issue #138).
+pub fn resume_name(x: u32) -> String {
+    format!("AOT_SYM(resume_{:08x})", x)
+}
+
 pub struct Emitter<'p, 'a> {
     p: &'p Program<'a>,
     pub mode: &'static str,
@@ -101,6 +106,9 @@ pub struct Emitter<'p, 'a> {
     df: HashMap<u32, Option<u8>>,
     pub ana: Option<Analysis<'p, 'a>>,
     trace_all: Option<u32>,
+    /// A resume entry being written (issue #138): where a native hands the
+    /// call back, and the stack offset there from the entry's esp.
+    resume: Option<(u32, i64)>,
 }
 
 impl<'p, 'a> Emitter<'p, 'a> {
@@ -119,11 +127,30 @@ impl<'p, 'a> Emitter<'p, 'a> {
             df: HashMap::new(),
             ana: None,
             trace_all,
+            resume: None,
         }
     }
 
     pub fn name(&self, va: u32) -> String {
         format!("AOT_SYM({}_{:08x})", self.mode, va)
+    }
+
+    /// All eight registers in and out through AotRegs: ctx mode, or a
+    /// resume entry (whose calls stay sig mode's).
+    fn regs_ctx(&self) -> bool {
+        self.mode == "ctx" || self.resume.is_some()
+    }
+
+    /// resume_<x> (issue #138): `va`'s code entered at x, where a native that
+    /// did the function's first instructions hands the call back
+    /// (resume_original), with all eight registers as there; its ret returns
+    /// them as ctx mode's does (esp after the ret). Sig mode only; the
+    /// analysis must be one without skipped saves (the native stored them).
+    pub fn resume_fn(&mut self, va: u32, x: u32, sp: i64) -> R<String> {
+        self.resume = Some((x, sp));
+        let r = self.function(va);
+        self.resume = None;
+        r
     }
 
     fn f(&self) -> &Func {
@@ -255,10 +282,13 @@ impl<'p, 'a> Emitter<'p, 'a> {
         self.sig = Some(sig.clone());
         self.df = direction(&f);
         let mut out: Vec<String> = Vec::new();
-        out.push(self.proto(va) + "\n{");
+        out.push(match self.resume {
+            Some((x, _)) => format!("AOT_FN void {}(AotRegs *R)\n{{", resume_name(x)),
+            None => self.proto(va) + "\n{",
+        });
         let mut decl: Vec<String> = Vec::new();
         for r in 0..8u8 {
-            if self.mode == "ctx" {
+            if self.regs_ctx() {
                 decl.push(format!("uint32_t {} = R->r[{}];", REGS[r as usize], r));
             } else if r == ESP || sig.ins.contains(&r) {
                 continue;
@@ -270,17 +300,22 @@ impl<'p, 'a> Emitter<'p, 'a> {
             "uint32_t F_A = 0, F_B = 0, F_R = 0, F_C = 0; int F_K = 0; (void)F_A; (void)F_B; (void)F_R; (void)F_C; (void)F_K;"
                 .to_string(),
         );
-        decl.push("uint8_t *const M = aot_mem; const uint32_t esp0 = esp, ra0 = LD32(esp);".to_string());
+        decl.push(match self.resume {
+            // The entry's esp, from the stack offset at x.
+            Some((_, sp)) => format!("uint8_t *const M = aot_mem; const uint32_t esp0 = esp + 0x{:x}u, ra0 = LD32(esp0);", (sp as i32).wrapping_neg() as u32),
+            None => "uint8_t *const M = aot_mem; const uint32_t esp0 = esp, ra0 = LD32(esp);".to_string(),
+        });
         if f.insns.values().any(|i| x87_op(i).is_some()) {
             decl.push("AotFpu *const F = aot_fpu;".to_string());
         }
         out.push(format!("    {}", decl.join(" ")));
         out.push(format!("    AOT_TRACE(0x{:08x}u, eax, ecx, edx, ebx, esp, ebp, esi, edi);", va));
         out.push(format!("    {}", (0..8).map(|r| format!("(void){};", REGS[r])).collect::<Vec<_>>().join(" ")));
-        out.push(format!("    goto L_{:08x};", f.entry));
+        let start = self.resume.map_or(f.entry, |(x, _)| x);
+        out.push(format!("    goto L_{:08x};", start));
         for &a in &f.order {
             let i = f.insns[&a].clone();
-            if f.leaders.contains(&a) {
+            if f.leaders.contains(&a) || a == start {
                 out.push(format!("L_{:08x}:", a));
             }
             out.push(format!("    /* {:08x} {} {} */", a, i.mnemonic, i.op_str));
@@ -337,7 +372,7 @@ impl<'p, 'a> Emitter<'p, 'a> {
 
     fn ret_stmt(&self, pops: i64) -> String {
         let chk = format!("if (esp != esp0 || LD32(esp) != ra0) aot_bad_ret(0x{:08x}u, esp0, esp); ", self.f().entry);
-        if self.mode == "ctx" {
+        if self.regs_ctx() {
             return format!("{}{} R->r[4] = esp + {}u; return;", chk, self.ctx_sets(), 4 + pops);
         }
         chk + &self.ret_outs()
@@ -990,14 +1025,14 @@ impl<'p, 'a> Emitter<'p, 'a> {
         }
         let chk = format!("if (esp != esp0 || LD32(esp) != ra0) aot_bad_ret(0x{:08x}u, esp0, esp); ", f.entry);
         let inner = if p.compiled.contains(&td) {
-            format!("\n#ifdef AOT_SPLIT\n    {}\n#else\n    {}\n#endif\n    ", self.call_guest(td), self.call_compiled(td, false))
+            format!("\n#ifdef AOT_SPLIT\n    {}\n#else\n    {}\n#endif\n    ", self.call_guest(td), self.call_compiled(td, self.resume.is_some()))
         } else {
             self.call_guest(td)
         };
         if f.noreturn.contains(&va) {
             return Ok(format!("{}{} aot_unreachable(0x{:08x}u);", chk, inner, va));
         }
-        if self.mode == "ctx" {
+        if self.regs_ctx() {
             return Ok(format!("{}{} {} R->r[4] = esp; return;", chk, inner, self.ctx_sets()));
         }
         Ok(format!("{}{} {}", chk, inner, self.ret_outs()))
@@ -1017,7 +1052,7 @@ impl<'p, 'a> Emitter<'p, 'a> {
             self.exit("x"),
             co
         );
-        if self.mode == "ctx" {
+        if self.regs_ctx() {
             return Ok(format!("{}{} R->r[4] = esp; return;", s, self.ctx_sets()));
         }
         Ok(s + &self.ret_outs())

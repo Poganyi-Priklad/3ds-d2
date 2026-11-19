@@ -41,6 +41,7 @@ extern const AotRoot aot_roots[] __attribute__((weak));
 extern const AotRoot aotn_roots[] __attribute__((weak));
 extern const AotFunc aot_funcs[] __attribute__((weak));
 extern const AotFunc aotj_funcs[] __attribute__((weak));
+extern const AotResume aot_resumes[] __attribute__((weak));
 }
 
 using d2rt::Cpu;
@@ -307,12 +308,21 @@ bool g_callouts = true;   // D2_AOT_NOCALLOUT (the lane): every callout an exit
 __thread int g_no_exit = 0;
 constexpr size_t kMaxStale = sizeof aot_stale;
 std::set<uint32_t> g_equivalent;   // set_aot_equivalent: natives compiled code may call the originals of
+struct InlinePatch {
+    uint32_t va, n;
+    const uint8_t *orig;
+};
+std::vector<InlinePatch> g_inline_equivalent;   // set_aot_inline_equivalent: read as the game's bytes
 // D2_AOT_STALE=1: compiled callers of a changed function call its native
 // (aot_call_stale) and stay hooked. Off by default: on the lane, every
 // caller that reaches one with Box86 did better (Act II 63.7 s against
 // 67.2, fight 54.5 against 58.4): the natives' calls from C cost more than
 // the callers gain.
 bool g_stale_calls = false;
+// The natives' hand-backs compiled (aot_resume; D2_AOT_RESUME=0, the lane:
+// Box86 runs them), by address; this window's runs and their exits.
+std::unordered_map<uint32_t, const AotResume *> g_resume_at;
+uint32_t g_resumed = 0, g_resume_exits = 0;
 uint32_t g_handed = 0;   // natives' hand-backs to compiled code (aot_trap_for), this window
 uint32_t g_handed_direct = 0;   // ... and those run in C (aot_direct)
 uint32_t g_callout_shims = 0, g_callout_fns = 0, g_callout_back = 0;
@@ -714,6 +724,34 @@ void unhook(Root &R, Cpu &c) { unhook_at(c, R.r->va, R.before, R.hooked); }
 
 }  // namespace
 
+bool aot_resume(Cpu &c, uint32_t va, uint32_t esp, uint32_t stack_args)
+{
+    if (g_mode != AotMode::Sig)
+        return false;
+    const auto it = g_resume_at.find(va);
+    if (it == g_resume_at.end())
+        return false;
+    uint32_t r[8];
+    c.regs_gp(r);
+    r[4] = esp;
+    const uint32_t ra = c.read_u32(esp - it->second->sp);
+    Cpu *const prev = g_cpu;
+    g_cpu = &c;
+    ExitJump x;
+    const bool done = run_catching(it->second->fn, r, x);
+    g_cpu = prev;
+    g_resumed++;
+    if (!done) {   // Box86 on at the exit's target
+        g_resume_exits++;
+        std::memcpy(r, x.r, sizeof r);
+    }
+    for (int k = 0; k < 8; k++)
+        c.set_reg(k, r[k]);
+    c.set_reg(4, r[4] - 4u - 4u * stack_args);   // the bridge's epilogue adds that back
+    rt::bridge().redirect_next(done ? ra : x.target);
+    return true;
+}
+
 bool aot_linked() { return (aot_roots && aot_roots[0].va) || (aot_funcs && aot_funcs[0].va); }
 AotMode aot_mode() { return g_mode; }
 
@@ -728,6 +766,10 @@ void aot_set_native(uint32_t va, AotNativeFn fn)
 
 void set_aot_wanted(AotMode mode) { g_wanted = mode; }
 void set_aot_equivalent(uint32_t va) { g_equivalent.insert(va); }
+void set_aot_inline_equivalent(uint32_t va, const uint8_t *orig, uint32_t n)
+{
+    g_inline_equivalent.push_back({va, n, orig});
+}
 void set_aot_min_us(double us) { g_min_us = us; }
 
 uint32_t aot_trap_for(uint32_t va)
@@ -853,7 +895,13 @@ void install_fns(Cpu &c)
     {
         const char *e = std::getenv("D2_AOT_STALE");
         g_stale_calls = e && !std::strcmp(e, "1");
+        e = std::getenv("D2_AOT_RESUME");
+        if (aot_resumes && !(e && !std::strcmp(e, "0")))
+            for (const AotResume *r = aot_resumes; r->va; r++)
+                g_resume_at[r->va] = r;
     }
+    if (!g_resume_at.empty())
+        rt::logf("aot: %u of the natives' hand-backs compiled", (unsigned)g_resume_at.size());
     rt::logf("aot: %u of %u compiled functions can be hooked (%u entered in line)%s%s%s", (unsigned)g_fns.size(),
              (unsigned)all, (unsigned)in_line, moved ? " (some had other bytes at their entry)" : "", skipped.empty() ? "" : "; not: ",
              skipped.c_str());
@@ -966,6 +1014,9 @@ uint32_t code_hash(Cpu &c, const AotFunc *f)
         for (uint32_t va = f->ranges[2 * k], hi = f->ranges[2 * k + 1]; va < hi;) {
             const uint32_t n = std::min<uint32_t>(hi - va, sizeof buf);
             c.read(va, buf, n);
+            for (const InlinePatch &p : g_inline_equivalent)   // its original bytes, as compiled
+                for (uint32_t j = std::max(p.va, va); j < std::min(p.va + p.n, va + n); j++)
+                    buf[j - va] = p.orig[j - p.va];
             for (uint32_t j = 0; j < n; j++)
                 h = (h ^ buf[j]) * 0x01000193u;
             va += n;
@@ -1270,6 +1321,13 @@ std::vector<std::string> aot_lines()
         g_stale_shims = g_stale_handed = g_stale_waits = g_stale_guest = 0;
         g_stale_by.clear();
     }
+    if (g_resumed) {
+        char line[128];
+        std::snprintf(line, sizeof line, "aot: the natives' hand-backs in compiled code: %u (%u exited)", g_resumed,
+                      g_resume_exits);
+        out.push_back(line);
+        g_resumed = g_resume_exits = 0;
+    }
     if (g_nested) {
         char line[256];
         int p = std::snprintf(line, sizeof line, "aot: %u nested runs of callees not compiled:", g_nested);
@@ -1379,8 +1437,10 @@ void aot_call_stale(uint32_t va, AotRegs *t)
     for (int k = 0; k < 8; k++)
         c.set_reg(k, r[k]);
     const uint32_t eax = sh->fn(c);
-    const uint32_t rd = rt::bridge().take_redirect();
+    uint32_t rd = rt::bridge().take_redirect();
     c.trap_epilogue(eax, esp_add, rd ? rd : ra);
+    if (rd == ra)   // its hand-back's compiled code ran to the return (aot_resume)
+        rd = 0;
     g_stale_shims++;
     if ((rd || rt::bridge().yield_requested()) && !g_no_exit) {
         // Handed back to the game's code, or a wait (issue #138): as a
