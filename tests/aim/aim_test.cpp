@@ -1360,6 +1360,14 @@ static void test_controls_loot()
     step(p, 300);
     step(p, 340);
     CHECK(!g_left && c.cursor_x() == 100);
+    step(Pad(), 400);
+    // ZR + Up with only gold about: nothing to pick up, so no click and
+    // the cursor stays.
+    p.held = kZR | kUp;
+    for (uint64_t t = 500; t <= 900; t += 40) {
+        step(p, t);
+        CHECK(!g_left && !g_right && c.cursor_x() == 100 && c.cursor_y() == 100);
+    }
 }
 
 int main()

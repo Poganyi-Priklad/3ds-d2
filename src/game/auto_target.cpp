@@ -727,10 +727,14 @@ AimResult AutoTarget::update(const AimPoll &poll, AimWorld &world)
             look_up(world, target_type_, target_id_, current);
     }
     if (!target_id_) {
+        // A or B: a plain click where the cursor is. ZR + D-pad: nothing at
+        // all (it has no mouse button of its own).
         if (pressed) {
             stats_.no_target++;
-            say(now, "%s: nothing to aim at, a plain click",
-                active_profile_ == 2 ? "loot" : active_profile_ ? "B" : "A");
+            if (active_profile_ == 2)
+                say(now, "loot: nothing to pick up, nothing done");
+            else
+                say(now, "%s: nothing to aim at, a plain click", active_profile_ ? "B" : "A");
         }
         result.hold_plain_buttons = paused_;
         return result;
