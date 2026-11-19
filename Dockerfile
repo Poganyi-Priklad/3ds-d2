@@ -57,6 +57,7 @@ RUN rm -f /etc/apt/sources.list.d/* \
       gcc-arm-linux-gnueabi libc6-dev-armel-cross qemu-user make ca-certificates \
       gcc-i686-linux-gnu libc6-dev-i386-cross binutils-i686-linux-gnu \
       g++-arm-linux-gnueabi g++-arm-linux-gnueabihf git patch python3 python3-pip \
+      rustc cargo gcc libc6-dev curl \
       gcc-mingw-w64-i686 binutils-mingw-w64-i686 \
  && rm -rf /var/lib/apt/lists/*
 # d2d's Game.exe harness (third_party/d2d/tools/emu; issues #105, #108): the
@@ -72,6 +73,28 @@ RUN printf '%s\n' \
       --require-hashes -r /tmp/emu-requirements.txt \
  && rm /tmp/emu-requirements.txt \
  && python3 -c "import unicorn, capstone, pefile"
+# The AOT recompiler in Rust (tools/aot/recompile, issue #144): the crates in
+# its Cargo.lock, each checked against the lock's sha256, as a directory
+# source; test containers run with no network, so cargo builds --offline from
+# these. A change to the lock changes this list (scripts/docker.sh image).
+ENV CARGO_HOME=/opt/cargo
+RUN mkdir -p /opt/cargo /opt/cargo-vendor \
+ && printf '%s\n' \
+      'capstone-sys 0.18.0 a4e8087cab6731295f5a2a2bd82989ba4f41d3a428aab2e7c98d8f4db38aac05' \
+      'cc 1.11.2 33ef9e3e8154a45c7a95cff4c1299702106ad94062d7bb85fdc5d3a5afd91d45' \
+      'find-msvc-tools 0.1.15 1c66915cc5391097de7a2b0b972e8505aa33c0df401fd3a6811dbdb32881ba48' \
+      'shlex 2.0.1 f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba' \
+    | while read -r name ver sum; do \
+        curl -fsSL -o /tmp/c.crate "https://static.crates.io/crates/$name/$name-$ver.crate" \
+        && echo "$sum  /tmp/c.crate" | sha256sum -c - \
+        && tar xzf /tmp/c.crate -C /opt/cargo-vendor \
+        && printf '{"files":{},"package":"%s"}' "$sum" > "/opt/cargo-vendor/$name-$ver/.cargo-checksum.json" \
+        || exit 1; \
+      done \
+ && rm -f /tmp/c.crate \
+ && printf '%s\n' '[source.crates-io]' 'replace-with = "vendored"' '[source.vendored]' 'directory = "/opt/cargo-vendor"' \
+      > /opt/cargo/config.toml \
+ && chmod -R a+rwX /opt/cargo
 WORKDIR /work
 
 # --- HOME-menu banner lane ------------------------------------------------------

@@ -1,5 +1,5 @@
 // The AOT spike (issue #113, docs/aot.md): Game.exe functions compiled to C
-// by tools/aot/recompile.py from the user's own Game.exe, linked in when the
+// by tools/aot/recompile from the user's own Game.exe, linked in when the
 // build is given them (build/aot/, never committed), and hooked at their
 // entries as natives that aren't served in line.
 #ifndef D2_GAME_AOT_SPIKE_H

@@ -1,5 +1,5 @@
 // The AOT spike's runtime side (issue #113, aot_spike.h, aot_rt.h). The
-// compiled functions come from build/aot/ (tools/aot/recompile.py, the
+// compiled functions come from build/aot/ (tools/aot/recompile, the
 // user's Game.exe), linked only when the build is given them: their tables
 // are weak here.
 #include "game/aot_spike.h"
@@ -138,7 +138,7 @@ std::map<uint32_t, uint32_t> g_stale_by;
 // resumed; a wait that blocked the thread is done in place (rt::
 // finish_nested_block), else it would go on with the wait's placeholder for a
 // result. A wait on another guest thread can't end there: the recompiler
-// leaves to Box86 what could reach one (recompile.py's may_block).
+// leaves to Box86 what could reach one (the recompiler's may_block).
 // Box86 from eip until it returns to the sentinel (in place of the return
 // address at the caller's esp), every stop resumed as above; va names it.
 const char *tramp_name(uint32_t va);   // the function whose trampoline va is, if any
@@ -949,7 +949,7 @@ void aot_after_natives(Cpu &c)
 }
 
 namespace {
-// FNV-1a over a compiled function's code as it is now, as recompile.py's
+// FNV-1a over a compiled function's code as it is now, as the recompiler's
 // code_hash() took it from the Game.exe it compiled.
 uint32_t code_hash(Cpu &c, const AotFunc *f)
 {

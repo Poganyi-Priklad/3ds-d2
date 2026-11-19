@@ -1,0 +1,285 @@
+//! The AOT recompiler (issue #144: tools/aot/recompile.py in Rust, its
+//! output byte for byte): x86 functions of the user's Game.exe written out
+//! as C for devkitARM's gcc (or the host test's).
+//!
+//!     recompile Game.exe --out build/aot/spike --root 67b850:PathSearch --compile 67aed0,...
+//!     recompile Game.exe --census --modes sig --out build/aot/census [--hot log ...]
+//!     recompile Game.exe --survey
+//!
+//! The output is Game.exe in another form: it goes under build/ and into
+//! the CIA (docs/aot.md's Distribution), never into the repository.
+
+mod analysis;
+mod census;
+mod cs;
+mod driver;
+mod emit;
+mod flags;
+mod func;
+mod image;
+mod json;
+mod omap;
+mod ordlookup;
+mod program;
+mod x86;
+
+use driver::parse_hex;
+use func::Tgt;
+use program::{intrinsics, natives, Program};
+use std::collections::{BTreeSet, HashMap, HashSet};
+
+/// A function the compiler leaves to Box86, and why.
+#[derive(Debug, Clone)]
+pub struct Refused(pub String);
+
+struct Args {
+    exe: String,
+    out: String,
+    root: Vec<String>,
+    compile: Vec<String>,
+    tree: Vec<String>,
+    functions: String,
+    modes: String,
+    callees: usize,
+    no_callouts: bool,
+    survey: bool,
+    census: bool,
+    hot: Vec<String>,
+    explain: Option<String>,
+    src_root: String,
+}
+
+fn usage() -> ! {
+    eprintln!(
+        "usage: recompile EXE [--out DIR] [--root VA[:NAME]] [--compile VA,...] [--tree VA:DEPTH] [--functions TSV] \
+         [--modes sig,ctx] [--callees N] [--no-callouts] [--survey] [--census] [--hot LOG] [--explain VA,...] [--src-root DIR]"
+    );
+    std::process::exit(2);
+}
+
+fn parse_args() -> Args {
+    let mut a = Args {
+        exe: String::new(),
+        out: "build/aot/spike".to_string(),
+        root: Vec::new(),
+        compile: Vec::new(),
+        tree: Vec::new(),
+        functions: "third_party/d2d/docs/research/re/game-functions.tsv".to_string(),
+        modes: "sig,ctx".to_string(),
+        callees: 0,
+        no_callouts: false,
+        survey: false,
+        census: false,
+        hot: Vec::new(),
+        explain: None,
+        src_root: ".".to_string(),
+    };
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    let mut k = 0;
+    let mut exe = None;
+    while k < argv.len() {
+        let s = &argv[k];
+        k += 1;
+        if !s.starts_with("--") {
+            if exe.is_some() {
+                usage();
+            }
+            exe = Some(s.clone());
+            continue;
+        }
+        let (name, inline) = match s.split_once('=') {
+            Some((n, v)) => (n.to_string(), Some(v.to_string())),
+            None => (s.clone(), None),
+        };
+        let flag = |n: &str| ["--no-callouts", "--survey", "--census"].contains(&n);
+        if flag(&name) {
+            match name.as_str() {
+                "--no-callouts" => a.no_callouts = true,
+                "--survey" => a.survey = true,
+                _ => a.census = true,
+            }
+            continue;
+        }
+        let v = match inline {
+            Some(v) => v,
+            None => {
+                if k >= argv.len() {
+                    usage();
+                }
+                k += 1;
+                argv[k - 1].clone()
+            }
+        };
+        match name.as_str() {
+            "--out" => a.out = v,
+            "--root" => a.root.push(v),
+            "--compile" => a.compile.push(v),
+            "--tree" => a.tree.push(v),
+            "--functions" => a.functions = v,
+            "--modes" => a.modes = v,
+            "--callees" => a.callees = v.trim().parse().unwrap_or_else(|_| usage()),
+            "--hot" => a.hot.push(v),
+            "--explain" => a.explain = Some(v),
+            "--src-root" => a.src_root = v,
+            _ => usage(),
+        }
+    }
+    a.exe = exe.unwrap_or_else(|| usage());
+    a
+}
+
+fn parse_vas(s: &str) -> (Vec<u32>, HashMap<u32, String>) {
+    let mut out = Vec::new();
+    let mut names = HashMap::new();
+    for part in s.split(',').filter(|p| !p.is_empty()) {
+        let (a, n) = part.split_once(':').unwrap_or((part, ""));
+        let v = parse_hex(a).unwrap_or_else(|_| panic!("not an address: {}", a));
+        out.push(v);
+        if !n.is_empty() {
+            names.insert(v, n.to_string());
+        }
+    }
+    (out, names)
+}
+
+fn modes(s: &str) -> Vec<&'static str> {
+    s.split(',')
+        .map(|m| match m {
+            "sig" => "sig",
+            "ctx" => "ctx",
+            _ => panic!("no mode {}", m),
+        })
+        .collect()
+}
+
+fn main() {
+    let a = parse_args();
+    let callouts = !a.no_callouts;
+    let img = image::Image::load(std::path::Path::new(&a.exe), std::path::Path::new(&a.src_root)).unwrap_or_else(|e| {
+        eprintln!("recompile: {}", e);
+        std::process::exit(1);
+    });
+    let starts = driver::load_starts(&a.functions);
+    if a.census {
+        census::census(&img, &starts, &a.functions, &a.out, &a.hot, &modes(&a.modes), callouts);
+        return;
+    }
+    if a.survey {
+        census::survey(&img, &starts, &a.functions, callouts);
+        return;
+    }
+    let mut roots: Vec<u32> = Vec::new();
+    let mut names: HashMap<u32, String> = HashMap::new();
+    for r in &a.root {
+        let (v, n) = parse_vas(r);
+        roots.extend(v);
+        names.extend(n);
+    }
+    let (mut extra, _) = parse_vas(&a.compile.join(","));
+    let intr = intrinsics();
+    let nat = natives();
+    for t in &a.tree {
+        let (va, d) = t.split_once(':').unwrap_or((t, ""));
+        let prog = Program::new(&img, starts.clone(), natives(), callouts);
+        let v0 = parse_hex(va).expect("--tree address");
+        let mut lvl: HashSet<u32> = [v0].into_iter().collect();
+        let mut seen: HashSet<u32> = lvl.clone();
+        let depth: usize = if d.is_empty() { 2 } else { d.parse().expect("--tree depth") };
+        for _ in 0..depth {
+            let mut nxt = HashSet::new();
+            for &g in &lvl {
+                let f = prog.func(g);
+                if f.refused.is_some() {
+                    continue;
+                }
+                for c in f.calls.values() {
+                    if let Tgt::Direct(c) = c {
+                        if !seen.contains(c) && !intr.contains_key(c) && !nat.contains_key(c) {
+                            nxt.insert(*c);
+                        }
+                    }
+                }
+            }
+            seen.extend(nxt.iter().copied());
+            lvl = nxt;
+        }
+        let have: HashSet<u32> = extra.iter().copied().collect();
+        let add: BTreeSet<u32> = seen.into_iter().filter(|v| !have.contains(v)).collect();
+        extra.extend(add);
+    }
+    if a.callees > 0 {
+        let prog = Program::new(&img, starts.clone(), natives(), callouts);
+        let mut seen: HashSet<u32> = extra.iter().chain(roots.iter()).copied().collect();
+        let mut lvl = seen.clone();
+        for _ in 0..a.callees {
+            let mut nxt = HashSet::new();
+            let mut l: Vec<u32> = lvl.iter().copied().collect();
+            l.sort();
+            for g in l {
+                let f = prog.func(g);
+                if f.refused.is_some() {
+                    continue;
+                }
+                for c in f.calls.values().chain(f.tails.values()) {
+                    if let Tgt::Direct(c) = c {
+                        if !seen.contains(c) && !intr.contains_key(c) && !nat.contains_key(c) {
+                            nxt.insert(*c);
+                        }
+                    }
+                }
+            }
+            seen.extend(nxt.iter().copied());
+            lvl = nxt;
+        }
+        let have: HashSet<u32> = extra.iter().chain(roots.iter()).copied().collect();
+        let add: BTreeSet<u32> = seen.into_iter().filter(|v| !have.contains(v)).collect();
+        println!("aot: {} callees added (--callees {})", add.len(), a.callees);
+        extra.extend(add);
+    }
+    if let Some(ex) = &a.explain {
+        let mut want = roots.clone();
+        want.extend(extra.iter().copied().filter(|v| !roots.contains(v)));
+        census::explain(&img, &starts, &want, &parse_vas(ex).0, callouts);
+        return;
+    }
+    let rep = driver::compile_set(&img, &starts, &roots, &extra, &modes(&a.modes), &a.out, &names, callouts);
+    let get = |k: &str| -> i64 {
+        match rep.report.get("exits").and_then(|e| e.get(k)) {
+            Some(json::J::Int(n)) => *n,
+            _ => 0,
+        }
+    };
+    println!(
+        "aot: {} functions compiled ({} x86 instructions, {} bytes; {} never call Box86; {} hand Box86 the rest of a call at {} sites, {} with their callers; {} of the sites callouts, plain exits in {} functions), {} left to Box86, in {}",
+        rep.prog.compiled.len(),
+        rep.x86_insns,
+        rep.x86_bytes,
+        rep.leaves,
+        get("functions"),
+        get("sites"),
+        get("may_exit"),
+        get("callouts"),
+        get("plain"),
+        rep.refused.len(),
+        a.out
+    );
+    if let Some(pt) = rep.report.get("parts") {
+        let n = |k: &str| match pt.get(k) {
+            Some(json::J::Int(n)) => n.to_string(),
+            Some(json::J::Str(s)) => s.clone(),
+            _ => "?".to_string(),
+        };
+        println!(
+            "aot: the C in {} parts (AOT_PART_MB, by {}); calls between compiled functions: {} in their part, {} across",
+            n("files"),
+            n("order"),
+            n("calls_local"),
+            n("calls_across")
+        );
+    }
+    let mut left: Vec<(&u32, &String)> = rep.refused.iter().collect();
+    left.sort();
+    for (k, v) in left {
+        println!("  left to Box86: {:08x}: {}", k, v);
+    }
+}

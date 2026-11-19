@@ -54,6 +54,11 @@ The repository holds the code that extracts them, never the artwork. Without a g
   - This project's patch series on top of it (`tests/d2d/patches/`, empty for now) changes GPL-3.0 files, so the patches are GPL-3.0-or-later.
   - If d2d code is ever linked into the app, the CIA as a whole is distributed under the GPL-3.0, while this project's own files stay BSD-2. Such a build will keep a switch for a CIA without d2d code.
   - The `hosttest` image installs its harness's Python modules at the versions in its `tools/emu/uv.lock`: Unicorn 2.1.4 (the engine is GPL-2.0; the Python package's metadata says BSD and the wheel carries no licence file), Capstone 5.0.9 (BSD-3-Clause, `LICENSE.TXT` in the wheel) and pefile 2024.8.26 (MIT). The image is local and never distributed.
+- The AOT recompiler `tools/aot/recompile` (Rust, issue #144) is built in the `hosttest` image from the crates its `Cargo.lock` pins, each checked against the lock's sha256 when the image is built:
+  - capstone-sys 0.18.0 (MIT), which bundles Capstone 5.0.6 (BSD-3-Clause, `capstone/LICENSE.TXT` in the crate);
+  - for building it only: cc 1.11.2, find-msvc-tools 0.1.15 and shlex 2.0.1 (MIT OR Apache-2.0).
+  - `tools/aot/recompile/src/ordlookup.rs` is generated from pefile 2024.8.26's `ordlookup` tables (MIT, Copyright (c) 2004-2024 Ero Carrera): the names pefile gives imports by ordinal of `ws2_32.dll`, `wsock32.dll` and `oleaut32.dll`, so that the Rust recompiler names Game.exe's imports as `recompile.py` did.
+  - The recompiler runs at build time, on the user's Game.exe. None of its code is in the CIA, which carries only the C it writes and that C compiled.
 
 ## Used only for measurement
 
