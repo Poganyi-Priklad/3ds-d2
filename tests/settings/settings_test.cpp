@@ -1,6 +1,7 @@
 // src/game/settings_file.h: settings.txt rewritten by the port without
 // losing the lines it doesn't own (keys written by hand for a measurement,
-// comments), its own keys replaced where they were. Run through
+// comments), its own keys replaced where they were; and SettingsSaveDelay,
+// one SD card write for a run of taps. Run through
 // `scripts/docker.sh test settings`.
 #include "game/settings_file.h"
 
@@ -116,6 +117,53 @@ static void test_saving_twice_changes_nothing()
     CHECK_TEXT(merge_settings_text(once, port_lines()), once);
 }
 
+static void test_save_delay_one_write_for_a_run_of_taps()
+{
+    // Taps every 300 ms for 2 s: nothing is due while they go on, one save
+    // a second after the last.
+    game::SettingsSaveDelay delay(1000, 5000);
+    CHECK(!delay.pending());
+    CHECK(!delay.due(0));
+    int writes = 0;
+    for (uint64_t now = 10000; now <= 20000; now += 50) {
+        if (now <= 12000 && (now - 10000) % 300 == 0)
+            delay.note_change(now);
+        if (delay.due(now)) {
+            writes++;
+            CHECK(now == 12800);   // the last tap at 11800: due a second later
+            delay.saved();
+        }
+    }
+    CHECK(writes == 1);
+    CHECK(!delay.pending());
+}
+
+static void test_save_delay_longest_wait()
+{
+    // Taps that never stop for a second: saved anyway 5 s after the first.
+    game::SettingsSaveDelay delay(1000, 5000);
+    uint64_t first_save = 0;
+    for (uint64_t now = 0; now <= 8000 && !first_save; now += 100) {
+        delay.note_change(now);   // a change every 100 ms
+        if (delay.due(now))
+            first_save = now;
+    }
+    CHECK(first_save == 5000);
+}
+
+static void test_save_delay_pending_for_a_flush()
+{
+    // A change not yet due is still pending: the app writes it before the
+    // HOME menu or the end.
+    game::SettingsSaveDelay delay;
+    delay.note_change(100);
+    CHECK(delay.pending());
+    CHECK(!delay.due(500));
+    delay.saved();
+    CHECK(!delay.pending());
+    CHECK(!delay.due(100000));
+}
+
 int main()
 {
     test_new_file();
@@ -127,6 +175,9 @@ int main()
     test_prefix_keys_not_confused();
     test_crlf_lines_kept();
     test_saving_twice_changes_nothing();
+    test_save_delay_one_write_for_a_run_of_taps();
+    test_save_delay_longest_wait();
+    test_save_delay_pending_for_a_flush();
     std::printf("RESULT settings %s (%d failures)\n", g_fail ? "FAIL" : "PASS", g_fail);
     return g_fail ? 1 : 0;
 }

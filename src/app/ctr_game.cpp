@@ -1791,13 +1791,39 @@ void save_settings()
     }
 }
 
+// A change on the bottom screen is saved about a second after the last one
+// (settings_file.h), not at once: a run of taps costs one SD card write on
+// the game's core instead of one each. Host clock (osGetTime), ms.
+game::SettingsSaveDelay g_settings_save_delay;
+
+// Called from apt_service (every 50 ms, also while a level loads): writes
+// settings.txt once the changes have stopped. Never while the HOME menu has
+// the SD card (the storage is closed then; close_storage saved first).
+bool g_storage_closed = false;
+void save_settings_when_due()
+{
+    if (!g_storage_closed && g_settings_save_delay.due(osGetTime())) {
+        save_settings();
+        g_settings_save_delay.saved();
+    }
+}
+
+// Writes a change still waiting, now: before the HOME menu takes the SD
+// card, and when the game ends, so nothing tapped just before is lost.
+void save_settings_now_if_pending()
+{
+    if (!g_storage_closed && g_settings_save_delay.pending()) {
+        save_settings();
+        g_settings_save_delay.saved();
+    }
+}
+
 // HOME button and sleep (issue #6): libctru acts on them inside aptMainLoop,
 // on this thread. RunOptions::service calls this every 50 ms even while the
 // game pumps no messages (loading a level), not only from the pump (poll);
 // before, a press during a load waited for the load to end. False: the HOME
 // menu's "close", or the system shutting down.
 u32 g_apt_thread = 0;   // the thread in aptMainLoop (the game's)
-bool g_storage_closed = false;
 void open_storage();
 void trace_writes_service();
 
@@ -1875,6 +1901,7 @@ bool apt_service()
 {
     svcGetThreadId(&g_apt_thread, CUR_THREAD_HANDLE);
     trace_writes_service();
+    save_settings_when_due();
     // libctru takes the system's signals (the HOME press among them) on its
     // APT thread, priority 0x31 on core 0, below this thread (0x30), which
     // runs the game there and seldom blocks: a press waited seconds for it
@@ -1896,6 +1923,7 @@ bool apt_service()
     }
     if (g_storage_closed)
         open_storage();   // closed from the HOME menu: the game may still write on its way out
+    save_settings_now_if_pending();   // closing: a change tapped just before still saved
     rt::request_exit(0);
     return false;
 }
@@ -1937,6 +1965,7 @@ void close_storage()
 {
     // What is queued goes out now, and nothing more while the archive is
     // closed: the traces keep queueing, game.log is closed below.
+    save_settings_now_if_pending();   // the SD card is about to close: a change still waiting goes now
     app::writer_pause(true);
     rt::suspend_files();
     if (FILE *f = g_log) {
@@ -2134,7 +2163,7 @@ void apply_pad(game::Pad pad, uint64_t now, bool last)
     }
     g_ss.update(pad, gs, g_controls.cursor_x(), g_controls.cursor_y(), now);
     if (g_ss.take_settings_changed())
-        save_settings();
+        g_settings_save_delay.note_change(osGetTime());   // written by apt_service once the taps stop
     g_controls.set_context(gs.in_game, gs.panel_open, gs.ui, gs.in_game && game::holding_item());
     g_lock_in_game.store(gs.in_game, std::memory_order_relaxed);
     g_controls.update(pad, now);
@@ -3055,6 +3084,7 @@ int main()
     if (g_prof_on)
         profiler_switch(0);   // a run still on: its traces closed, in time for the report
     aptUnhook(&g_apt_cookie);
+    save_settings_now_if_pending();   // the game ended: a change tapped in its last second still saved
     stop_render_thread();
     screen_hz_set(false);   // the console's own rate, whatever the game's end
     console_again();   // the game's end shows on the console, as before the second screen

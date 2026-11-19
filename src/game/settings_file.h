@@ -8,11 +8,16 @@
 // rewrote the file from scratch, so a single tap on the bottom screen threw
 // those hand-written lines away. merge_settings_text() keeps them.
 //
+// And a save used to happen on every tap, on the game's core. SettingsSaveDelay
+// waits until the taps stop (one write a second after the last change), but
+// never longer than a few seconds after the first unsaved one.
+//
 // Header only, no platform: the app (src/app/ctr_game.cpp) and the host test
 // (tests/settings) use it alike.
 #ifndef D2_GAME_SETTINGS_FILE_H
 #define D2_GAME_SETTINGS_FILE_H
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -85,6 +90,45 @@ inline std::string merge_settings_text(const std::string &old_text, const std::v
             merged += port_lines[i].key + "=" + port_lines[i].value + "\n";
     return merged;
 }
+
+// When to write settings.txt after the bottom screen changed a setting:
+// once the changes have stopped for quiet_ms (1 s), or at the latest
+// longest_wait_ms (5 s) after the first change not yet saved, so that a run
+// of "+"/"-" taps costs one SD card write instead of one per tap. Times in
+// milliseconds on any steady clock.
+class SettingsSaveDelay {
+public:
+    explicit SettingsSaveDelay(uint64_t quiet_ms = 1000, uint64_t longest_wait_ms = 5000)
+        : quiet_ms_(quiet_ms), longest_wait_ms_(longest_wait_ms) {}
+
+    // A setting changed at now_ms.
+    void note_change(uint64_t now_ms)
+    {
+        if (!pending_)
+            first_change_ms_ = now_ms;
+        pending_ = true;
+        last_change_ms_ = now_ms;
+    }
+
+    // Something changed that isn't saved yet.
+    bool pending() const { return pending_; }
+
+    // It is time to save: quiet long enough, or waited the longest.
+    bool due(uint64_t now_ms) const
+    {
+        if (!pending_)
+            return false;
+        return now_ms - last_change_ms_ >= quiet_ms_ || now_ms - first_change_ms_ >= longest_wait_ms_;
+    }
+
+    // The file was written: nothing pending.
+    void saved() { pending_ = false; }
+
+private:
+    uint64_t quiet_ms_, longest_wait_ms_;
+    uint64_t first_change_ms_ = 0, last_change_ms_ = 0;
+    bool pending_ = false;
+};
 
 }  // namespace game
 
