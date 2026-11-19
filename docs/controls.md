@@ -10,7 +10,7 @@ The mapping lives in `src/game/controls.cpp`. It follows the ideas D2Vita proved
 | Screen | Shows |
 | --- | --- |
 | Top | The whole 800×600 frame stretched over all 400×240 (2:1 across, 2.5:1 down), each pixel averaging a 2×2 block. **Select** switches to a 1:1 400×240 window that follows the cursor, for reading text. |
-| Bottom | A row of tabs (MAP, KEYS, ZOOM, INFO, and PANEL while a panel is open) over a 320×222 area. See [Bottom screen](#bottom-screen) below. Until the game shows its first frame, it shows the startup messages. |
+| Bottom | A row of tabs (MAP, KEYS, ZOOM, INFO, AIM, and PANEL while a panel is open) over a 320×222 area. See [Bottom screen](#bottom-screen) below. Until the game shows its first frame, it shows the startup messages. |
 
 ## Buttons
 
@@ -51,7 +51,7 @@ The mapping lives in `src/game/controls.cpp`. It follows the ideas D2Vita proved
 | B | Skill 2 (F2) |
 | Y | Skill 3 (F3) |
 | X | Skill 4 (F4) |
-| D-pad | Nothing yet: left free for later shortcuts |
+| D-pad (held) | Picks up items with the auto-target: up valuables (unique, set, runes), right gold, down everything; left is kept free. See [Auto-target](#auto-target-a-and-b) |
 
 L and ZL do as they always do with ZR held.
 
@@ -68,28 +68,43 @@ L and ZL do as they always do with ZR held.
 In the game world (no panel open, nothing on the cursor), A and B aim before they click (`src/game/auto_target.cpp`; only mouse input, no game code is called):
 
 - The cursor jumps onto the enemy in the circle pad's direction (within a cone, or along the last walking direction while the pad is centred), 30 pixels above its feet. The button goes down once the game shows that enemy under the cursor (its health bar), a frame later. If the game never shows it, another one is tried, else it is a plain click there.
-- While the button is held, the cursor follows the target, even out of the cone, and the circle pad only aims: the hero doesn't walk off. Turning the pad well away from the target picks a new one there.
-- An enemy right next to the hero always comes first, even for B with its longer range.
+- While the button is held, the cursor follows the target, even out of the cone, and the circle pad only aims: the hero doesn't walk off. The target never changes by itself; a **flick** of the circle pad (a quick push out of the centre; a slow tilt is not one) switches between enemies:
+  - a flick the way the hero is fighting (within 30° of the line from the hero to the target), light or strong: the next enemy further away along that line; after the furthest, back to the nearest;
+  - a light flick another way: the enemy nearest the target in that direction from it (within 30°), to step sideways;
+  - a strong flick another way: the hero turns to the nearest enemy in the button's cone round that direction;
+  - nobody there: the target stays. The pad has to come back to the centre between two flicks: one flick, one step. Flicks don't switch away from an NPC, an object or an item.
+- An enemy right next to the hero comes first when a button is pressed, even for a long range.
 - The target is kept when you let go and press again, or switch between A and B. It is let go when it dies, leaves the screen, when the hero gets no closer to it for 1.5 s, or 2.5 s after the last attack.
 - Nothing in the cone: a plain click where the cursor is, as before.
-- In town it aims at the NPCs (to talk to), never anything else. Outside town an NPC (Cain, Tyrael) is aimed at only when no enemy is in the cone. The mercenary, summons and other players are never aimed at.
+- With no enemy in the cone, plain A takes, in this order: an object (shrines, then chests and other containers, waypoints and portals, doors and levers, barrels; used ones are skipped, exploding barrels never), an NPC (Cain, Tyrael), the nearest item on the ground (gold first with `aim_gold_first=1`). Held, A goes from one to the next. B aims only at enemies and NPCs. An enemy coming into the cone takes over from an NPC, an object or an item.
+- In town it aims at the NPCs (to talk to) first, then (A) objects and items. The mercenary, summons and other players are never aimed at.
+- When the right button's skill is cast on a corpse (Raise Skeleton, Corpse Explosion, Revive, Find Item...), B aims at corpses by itself.
+- **ZR + D-pad, held**, picks up the items within A's range all around the hero, one after another: up unique and set items, then runes; right gold; down everything (unique and set, runes, gold, the rest; gold first with `aim_gold_first=1`). An item the hero stands next to and still doesn't pick up (no room in the inventory) is skipped for 30 s.
 - L (stand still), R+A/B and ZR+A/B are as before: no aiming.
 
-Each button has its own mode: `enemies`, `corpses` (for corpse skills such as Raise Skeleton, Corpse Explosion, Find Item) or `off`. The settings are lines in `sdmc:/3ds/3ds-d2/settings.txt`, written there at the first start; a change applies at the next start:
+Each button has its own mode: `enemies`, `corpses` (for corpse skills such as Raise Skeleton, Corpse Explosion, Find Item) or `off`. The settings are lines in `sdmc:/3ds/3ds-d2/settings.txt`, written there at the first start; a change made there applies at the next start. The bottom screen's AIM tab changes most of them at once (and saves them):
 
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `aim` | `1` | 0 turns the auto-target off: A and B click where the cursor is |
 | `aim_a_mode`, `aim_b_mode` | `enemies` | `enemies`, `corpses` or `off` |
 | `aim_a_cone`, `aim_b_cone` | `45` | degrees each side of the circle pad's direction |
-| `aim_a_range`, `aim_b_range` | `10`, `20` | subtiles from the hero (a subtile is a third of a floor tile) |
+| `aim_a_range`, `aim_b_range` | `20` | subtiles from the hero (a subtile is a third of a floor tile) |
 | `aim_near` | `4` | an enemy this close (subtiles) always comes first |
 | `aim_near_cone` | `90` | ...when within this many degrees of the pad's direction |
-| `aim_turn` | `60` | degrees the pad must turn away from the target to pick a new one |
+| `aim_flick_cone` | `30` | degrees each side of a flick's direction |
+| `aim_flick_ms` | `150` | a flick gets from the centre to `aim_flick_light` within this time |
+| `aim_flick_light` | `40` | percent of the full tilt a flick reaches |
+| `aim_flick_strong` | `80` | ...and a strong flick (the hero turns) |
+| `aim_objects` | `1` | plain A uses objects with no enemy in the cone |
+| `aim_loot` | `1` | plain A picks up the nearest item with nothing else in the cone |
+| `aim_gold_first` | `0` | gold before other items (plain A and ZR + down) |
 | `aim_lost_ms` | `1500` | the hero hasn't attacked or got closer for this long: the target is given up |
 | `aim_forget_ms` | `2500` | this long after the last attack the target is forgotten |
 | `aim_height` | `30` | pixels above the target's feet for the cursor |
 | `aim_confirm` | `4` | frames to wait for the game to show the target under the cursor |
+
+An older file's `aim_turn` line is ignored and dropped when the file is written again; its other values stay (an `aim_a_range=10` from before stays 10).
 
 game.log's `aim:` lines say what it chose and why it let go, and every 30 s of use a `aim: stats:` line counts it all.
 
@@ -104,6 +119,7 @@ game.log's `aim:` lines say what it chose and why it let go, and every 30 s of u
 | KEYS | 20 buttons: Skill 1–8 (F1–F8), Character, Inventory, Skills, Quests, Party, Merc, Map (Tab), Run/Walk, Swap (W), Items (Alt, latched: tap on, tap off), Chat (Enter), Close all (Space) | Presses the button: the key is held while you touch it |
 | ZOOM | The frame at 1:1 around the cursor: readable text and item details | Points at the game (below) |
 | INFO | The diagnostics: game time, fps, worst frame gap, draw time per frame, guest heap and VirtualAlloc use against their limits (with peaks), host heap, linear and application memory free, the sprite cache, the JIT's memory (in the AOT build, which has none: the compiled functions, how many differ from the image at the start's check, the natives bound, and the most a game thread has used of its host stack), files and bytes read, the last 10 s's hitches (frames over 100 and 250 ms, the longest; frames not drawn and sound starved; what held up the drawing thread: waiting, ready while another game thread ran, host work on its core, and the last heartbeat's length), then the latest runtime messages. **report** at the bottom (lit as **will report**) asks for a [problem report](../README.md#problem-reports) of this session when the game ends; tap it again to take that back. **profiler run** opens a checklist of what to measure: sprite trace, guest code profile (about 12% slower while on), file-read trace, SD card benchmark (a second's pause), frame timing, sound clipping (the mixer's peaks and the limiter, as game.log's `sondiag` lines). Its last row, **log writes**, steps through batched, every second and at once on each tap (how soon game.log and the traces reach the SD card: at once is for chasing a crash or a freeze), a run on or not ([hardware-test.md](hardware-test.md)). Tap the options, then **start the run**; the button stays lit (and the first line shows PROF) until **stop the run**. The ticks are remembered; they cannot change during a run. A session with a run is offered as a problem report when the game ends | Touchpad, except the buttons (and the checklist while it is open) |
+| AIM | The auto-target, on two pages chosen by the buttons at the bottom. **SETTINGS**: a row per setting (Auto-target, A aims at, A cone, A range, B aims at, B cone, B range, Flick cone, Flick time, Light flick, Strong flick, Objects, Loot, Gold first) with its value between **-** and **+**; a tap changes it at once, and it is saved like the other settings. **FAQ**: how the auto-target works | SETTINGS: the **-** and **+** buttons. FAQ: dragging scrolls it |
 | PANEL | The open panel's half of the frame at 1:1. At 640×480 D2's panels are 320 pixels wide, the width of the screen. It scrolls to follow the cursor, and a bar on the right shows where you are. With panels on both sides (stash and inventory, shop and inventory), it shows the side the cursor is on. Tap PANEL again to move the cursor to the same spot on the other side. | Points at the game (below) |
 
 PANEL appears when a panel opens and is shown by itself. Choosing another tab hides it until another panel opens. When the panels close, the bottom screen goes back to your tab.
@@ -117,7 +133,7 @@ The panels are found from the UI table at `0x7A27C0` (see [Telling menus from th
 - **Tiles** (floors, walls, objects, extras): drawn by 3ds-d2 itself from the game's map data, every time the player moves a pixel, at the player's exact position, so the map scrolls smoothly. The level's map layer (`0x7A5164`) holds a binary tree of cells per kind, ordered by y; each cell names a frame of the map's DC6 cell file (`0x7A5168`) and a position in map pixels (world pixels / 10). The frames are decoded once and kept as runs of pixels. Drawn the way the game draws them (bottom-left corner at the cell's position plus the frame's offsets, opaque), they matched every pixel of a capture of the game's own map in the lane. The game draws the ground as single dots with black between; at 1:1 that turned each pixel on and off as the map moved, so the black around each lone dot takes its colour and the ground shows solid, as at half size. Drawing takes about 2 ms in Azahar, where the game's own map took about 16 ms, 15 of them for the tiles.
 - **Units** (the crosses and names of NPCs and other players, waypoint labels): captured from the game. Game.exe's UI pass draws the map with `0x45AD60` when `ui[0x0A]` (Tab) is set. That call site (`0x456F93`) now calls a small stub of guest code in the zero slack after `.text` (`0x6CB5B0`). When a capture is due, the stub runs only the game's map setup (`0x457520`) and units pass (`0x45AC90`, about 1 ms), with the map's offsets and unit bounds set so it draws around the player into a region at the frame's top-left corner, the size of the bottom map plus a margin. That part of the frame is copied aside and cleared to black first; every pixel drawn is kept, and the frame gets its copy back, so the top screen is unaffected. The player's own cross is left out (a filter in front of the per-unit function `0x45A860` skips the player while capturing) and drawn by 3ds-d2 at the centre, in the game's colour for it (`0x7A51B0`). Between captures the unit pixels move with the map. Captures come at the marker refresh set under the map while the player moves, every two seconds standing still (attacking in place included), and at once when MAP is shown, its size changes or the player nears the edge of the last capture. The stub calls the game's functions as ordinary guest code because the map's first draw in a level waits for the game's other threads, which a native `guest_call` cannot do.
 
-On the Linux lane, `M4_BOTTOM=map|help|keys|zoom|info` picks the starting tab. The script event `<ms> touch <x> <y> [ms]` touches the bottom screen, and each `shot` also saves the bottom screen as `b<ms>.png`.
+On the Linux lane, `M4_BOTTOM=map|help|keys|zoom|info|aim` picks the starting tab. The script event `<ms> touch <x> <y> [ms]` touches the bottom screen, and each `shot` also saves the bottom screen as `b<ms>.png`.
 
 ## Screenshots
 

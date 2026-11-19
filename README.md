@@ -102,6 +102,7 @@ Start 3ds-d2 from the HOME menu. The game appears on the top screen. The bottom 
 | R + A / B / X / Y | Character screen / skill tree / automap / quests |
 | ZR + A / B / Y / X | Skill hotkeys F1–F4 |
 | R + D-pad | Skill hotkeys F1–F4 too |
+| ZR + D-pad up / right / down (held) | Pick up items around you: valuables / gold / everything |
 | R + Start | Enter (confirm) |
 | R + Select | On-screen keyboard |
 | L + R + Select | Screenshot into the Camera album |
