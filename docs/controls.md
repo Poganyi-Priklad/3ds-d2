@@ -19,8 +19,8 @@ The mapping lives in `src/game/controls.cpp`. It follows the ideas D2Vita proved
 | Circle pad | In menus and with a panel open: move the cursor. In the game world: walk. The cursor orbits the character in the stick's direction, the left button is held while the pad is pushed, and a fuller push reaches further. |
 | C-stick (New 3DS) | Move the cursor |
 | Touch (bottom screen) | Depends on the tab (see [Bottom screen](#bottom-screen)). On MAP and INFO, a touchpad: drag moves the cursor (one drag across the pad crosses the frame); a short tap clicks where the cursor is |
-| A | Left mouse button (held) |
-| B | Right mouse button (held): cast the right skill |
+| A | Left mouse button (held). In the game world it aims first: see [Auto-target](#auto-target-a-and-b) |
+| B | Right mouse button (held): cast the right skill. In the game world it aims first, like A |
 | X | Inventory (I) |
 | Y | Show items on the ground (Alt, held). With a shop open: sells the item under the cursor. With the inventory open (and no other panel on the left): drops it on the ground. If the cursor isn't on an item, nothing happens. |
 | L | Stand still (Shift, held) |
@@ -62,6 +62,36 @@ L and ZL do as they always do with ZR held.
 | D-pad right / left | Next / previous tab along the bar (PANEL included while a panel is open), wrapping around |
 | D-pad up | MAP (the map, also from HELP) |
 | D-pad down | Switches the map's size (x1 ↔ x1/2), showing MAP |
+
+## Auto-target (A and B)
+
+In the game world (no panel open, nothing on the cursor), A and B aim before they click (`src/game/auto_target.cpp`; only mouse input, no game code is called):
+
+- The cursor jumps onto the enemy in the circle pad's direction (within a cone, or along the last walking direction while the pad is centred), 30 pixels above its feet. The button goes down once the game shows that enemy under the cursor (its health bar), a frame later. If the game never shows it, another one is tried, else it is a plain click there.
+- While the button is held, the cursor follows the target, even out of the cone, and the circle pad only aims: the hero doesn't walk off. Turning the pad well away from the target picks a new one there.
+- An enemy right next to the hero always comes first, even for B with its longer range.
+- The target is kept when you let go and press again, or switch between A and B. It is let go when it dies, leaves the screen, when the hero gets no closer to it for 1.5 s, or 2.5 s after the last attack.
+- Nothing in the cone: a plain click where the cursor is, as before.
+- In town it aims at the NPCs (to talk to), never anything else. Outside town an NPC (Cain, Tyrael) is aimed at only when no enemy is in the cone. The mercenary, summons and other players are never aimed at.
+- L (stand still), R+A/B and ZR+A/B are as before: no aiming.
+
+Each button has its own mode: `enemies`, `corpses` (for corpse skills such as Raise Skeleton, Corpse Explosion, Find Item) or `off`. The settings are lines in `sdmc:/3ds/3ds-d2/settings.txt`, written there at the first start; a change applies at the next start:
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `aim` | `1` | 0 turns the auto-target off: A and B click where the cursor is |
+| `aim_a_mode`, `aim_b_mode` | `enemies` | `enemies`, `corpses` or `off` |
+| `aim_a_cone`, `aim_b_cone` | `45` | degrees each side of the circle pad's direction |
+| `aim_a_range`, `aim_b_range` | `10`, `20` | subtiles from the hero (a subtile is a third of a floor tile) |
+| `aim_near` | `4` | an enemy this close (subtiles) always comes first |
+| `aim_near_cone` | `90` | ...when within this many degrees of the pad's direction |
+| `aim_turn` | `60` | degrees the pad must turn away from the target to pick a new one |
+| `aim_lost_ms` | `1500` | the hero hasn't attacked or got closer for this long: the target is given up |
+| `aim_forget_ms` | `2500` | this long after the last attack the target is forgotten |
+| `aim_height` | `30` | pixels above the target's feet for the cursor |
+| `aim_confirm` | `4` | frames to wait for the game to show the target under the cursor |
+
+game.log's `aim:` lines say what it chose and why it let go, and every 30 s of use a `aim: stats:` line counts it all.
 
 ## Bottom screen
 

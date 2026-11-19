@@ -42,6 +42,7 @@
 #include "game/sound_defer.h"
 #include "game/player_modes.h"
 #include "game/sprite_headers.h"
+#include "game/aim_settings.h"
 #include "game/autoplay.h"
 #include "game/d2_units.h"
 #include "game/automap.h"
@@ -580,6 +581,30 @@ int main(int argc, char **argv)
     if (const char *sc = std::getenv("M4_SCRIPT"))
         autoplay.load(sc);
     static game::Controls controls;
+    // The auto-target on A and B, as on the console (on by default):
+    // M4_AIM=0 turns it off; M4_AIM_SETTINGS="aim_b_mode=corpses,aim_near=3"
+    // changes settings.txt's keys. The reads are timed by the host's clock
+    // (the virtual one doesn't move inside a poll).
+    {
+        game::AimSettings aim;
+        if (const char *on = std::getenv("M4_AIM"))
+            aim.enabled = std::atoi(on) != 0;
+        if (const char *keys = std::getenv("M4_AIM_SETTINGS")) {
+            std::string all(keys);
+            for (size_t start = 0; start <= all.size();) {
+                const size_t comma = std::min(all.find(',', start), all.size());
+                game::parse_aim_setting(all.substr(start, comma - start).c_str(), aim);
+                start = comma + 1;
+            }
+        }
+        controls.set_auto_target(aim, &game::game_aim_world());
+        game::set_aim_clock([]() -> uint64_t {
+            return (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
+                       std::chrono::steady_clock::now().time_since_epoch())
+                .count();
+        });
+        std::fprintf(stderr, "[rt] aim: %s (M4_AIM, M4_AIM_SETTINGS)\n", aim.enabled ? "on" : "off");
+    }
     opt.poll_input = [] {
         const uint64_t now = rt::now_ms();
         bool shot = false;

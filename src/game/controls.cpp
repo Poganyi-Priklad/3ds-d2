@@ -55,6 +55,17 @@ void Controls::set_frame(int width, int height)
 
 void Controls::warp_cursor(int x, int y) { move_cursor(x, y); }
 
+namespace {
+void aim_log(const char *line) { rt::logf("%s", line); }
+}  // namespace
+
+void Controls::set_auto_target(const AimSettings &settings, AimWorld *world)
+{
+    aim_.set_settings(settings);
+    aim_.set_log(aim_log);
+    aim_world_ = world;
+}
+
 void Controls::set_context(bool in_game, bool panel_open, uint64_t ui, bool holding)
 {
     in_game_ = in_game;
@@ -287,6 +298,58 @@ void Controls::update(const Pad &pad, uint64_t now_ms)
         touch_acc_x_ = touch_acc_y_ = 0;
     touch_prev_ = pad.touching;
 
+    // ---- the auto-target on plain A and B (auto_target.h) ----
+    // A and B with no R or ZR layer (bound to the mouse buttons at press
+    // time), in the game world with no panel open, nothing on the cursor,
+    // L (stand still) not held and no script tap. It reads the game only
+    // while A or B is held.
+    AimResult aim;
+    if (aim_world_) {
+        const float vx = pad.circle_x / kStickMax, vy = pad.circle_y / kStickMax;
+        const float m = std::sqrt(vx * vx + vy * vy);
+        const bool stick_engaged = m > kWalkEngage || (walking_ && m >= kWalkRelease);
+        if (stick_engaged) {   // the screen's y is down, the pad's up
+            walk_dir_x_ = vx / m;
+            walk_dir_y_ = -vy / m;
+        }
+        AimPoll poll;
+        poll.now_ms = now_ms;
+        poll.allowed = in_game_ && !panel_open_ && !holding_ && !item_step_ && !(held & kL) && !pad.aim_off &&
+                       !pad.pointing && !select_layer;
+        poll.a_held = (held & kA) && bound_[0] == kMouseLeft;
+        poll.b_held = (held & kB) && bound_[1] == kMouseRight;
+        poll.a_pressed = poll.a_held && (pressed & kA);
+        poll.b_pressed = poll.b_held && (pressed & kB);
+        poll.stick_engaged = stick_engaged;
+        poll.dir_x = walk_dir_x_;
+        poll.dir_y = walk_dir_y_;
+        poll.new_frame = !pumps_ || pump_ != aim_pump_seen_;
+        aim_pump_seen_ = pump_;
+        aim = aim_.update(poll, *aim_world_);
+        if (aim.aiming && !aiming_) {
+            aim_saved_x_ = cx_;
+            aim_saved_y_ = cy_;
+        }
+        if (!aim.aiming && aiming_ && !poll.a_held && !poll.b_held && !stick_engaged)
+            move_cursor(aim_saved_x_, aim_saved_y_);   // let go: the cursor back where it was
+        aiming_ = aim.aiming;
+        const AimStats &st = aim_.stats();
+        if (st.presses != aim_stats_presses_ && now_ms - aim_stats_ms_ >= 30000) {
+            const AimReadCost cost = aim_world_->read_cost();
+            rt::logf("aim: stats: %u presses, %u targets (%u next to the hero), %u confirmed, %u taken from the "
+                     "hover, %u plain clicks at a target, %u with nothing in the cone; held %u frames, %u on the "
+                     "target; dropped %u dead, %u gone, %u turned, %u unreachable, %u off the screen, %u forgotten; "
+                     "%u scans of %u units, %llu us on average, %llu at most",
+                     st.presses, st.targets, st.near_rule, st.confirmed, st.adopted, st.fallbacks, st.no_target,
+                     st.held_polls, st.held_on_target, st.dropped_dead, st.dropped_gone, st.dropped_turn,
+                     st.dropped_lost, st.dropped_screen, st.forgotten, cost.scans, cost.units,
+                     (unsigned long long)(cost.scans ? cost.total_us / cost.scans : 0),
+                     (unsigned long long)cost.longest_us);
+            aim_stats_ms_ = now_ms;
+            aim_stats_presses_ = st.presses;
+        }
+    }
+
     // ---- circle pad: walk in the game world; elsewhere (menus, open
     // panels) it moves the cursor like the C-stick ----
     const bool walk_mode = in_game_ && !panel_open_;
@@ -306,7 +369,13 @@ void Controls::update(const Pad &pad, uint64_t now_ms)
             walk_press_pending_ = false;
             walk_left_ = false;
         }
-        if (walking_) {
+        if (walking_ && aim.aiming) {
+            // The auto-target has the cursor: the stick only aims, the hero
+            // doesn't walk. Once it lets go, the walk moves the cursor first
+            // and presses on the next poll, as at a new tilt.
+            walk_left_ = false;
+            walk_press_pending_ = true;
+        } else if (walking_) {
             // The click point orbits the character (drawn a little above the
             // frame's centre); a fuller tilt reaches further.
             if (m > 1.0f)
@@ -327,6 +396,13 @@ void Controls::update(const Pad &pad, uint64_t now_ms)
 
     // ---- the mouse buttons, from all their sources ----
     const bool item_left = item_move_step(now_ms);
+    if (aim.aiming) {
+        move_cursor(aim.cursor_x, aim.cursor_y);
+        a_left = aim.left;
+        b_right = aim.right;
+    } else if (aim.hold_plain_buttons) {
+        a_left = b_right = false;   // the target is gone under a held button: no click onto its corpse
+    }
     button(false, a_left || walk_left_ || tap_left || pad.point_left || item_left);
     button(true, b_right || pad.point_right);
     prev_ = held;

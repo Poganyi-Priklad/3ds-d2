@@ -10,9 +10,10 @@ CXXFLAGS := -std=gnu++17 -O1 -g -Wall -Wextra -Werror -Wno-unused-parameter -Wno
 run: $(OUT)/pad-tests
 	$(QEMU) $(OUT)/pad-tests
 
-$(OUT)/pad-tests: pad_test.cpp $(ROOT)/src/game/pad_history.h $(ROOT)/src/game/controls.h $(ROOT)/src/game/controls.cpp
+$(OUT)/pad-tests: pad_test.cpp $(ROOT)/src/game/pad_history.h $(ROOT)/src/game/controls.h $(ROOT)/src/game/controls.cpp \
+                  $(ROOT)/src/game/auto_target.h $(ROOT)/src/game/auto_target.cpp
 	@mkdir -p $(OUT)
-	$(CXX) $(CXXFLAGS) -o $@ pad_test.cpp $(ROOT)/src/game/controls.cpp -static
+	$(CXX) $(CXXFLAGS) -o $@ pad_test.cpp $(ROOT)/src/game/controls.cpp $(ROOT)/src/game/auto_target.cpp -static
 
 clean:
 	rm -rf $(OUT)

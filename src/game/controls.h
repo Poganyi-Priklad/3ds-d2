@@ -9,7 +9,10 @@
 //   C-stick      move the cursor (New 3DS)
 //   Touch        a touchpad: drag moves the cursor, a short tap is a left click
 //                at the cursor
-//   A / B        left / right mouse button (held)
+//   A / B        left / right mouse button (held). In the game world, with
+//                the auto-target on (auto_target.h): the cursor first goes
+//                onto the enemy, NPC or corpse the circle pad points at, and
+//                the button goes down once the game shows it under the cursor
 //   X            inventory (I)        Y   show items (Alt, held); with the
 //                inventory open, sells (a shop open) or drops the item under
 //                the cursor (issue #99)
@@ -25,6 +28,8 @@
 //   Select       top screen: whole frame <-> 1:1 zoom around the cursor
 #ifndef D2_GAME_CONTROLS_H
 #define D2_GAME_CONTROLS_H
+
+#include "game/auto_target.h"
 
 #include <cstdint>
 
@@ -53,6 +58,9 @@ struct Pad {
     int point_x = 0, point_y = 0;
     bool point_left = false, point_right = false;
     uint8_t keys[4] = {};             // virtual keys, 0 = none
+    // A script's tap (autoplay.h): A clicks where the script put the
+    // cursor; the auto-target leaves it alone.
+    bool aim_off = false;
 };
 
 class Controls {
@@ -76,6 +84,11 @@ public:
     // only in the game world with no panel open. ui: GameState::ui (the
     // panels open); holding: an item is on the cursor (d2_units.h).
     void set_context(bool in_game, bool panel_open, uint64_t ui = 0, bool holding = false);
+    // The auto-target on plain A and B (auto_target.h): its settings, and
+    // where it reads the game (d2_units.h's game_aim_world). No world (the
+    // default, and the pad test): A and B click where the cursor is.
+    void set_auto_target(const AimSettings &settings, AimWorld *world);
+    const AutoTarget &auto_target() const { return aim_; }
     // Puts the cursor at x,y (scripted tests; a touchpad has no absolute position).
     void warp_cursor(int x, int y);
     int cursor_x() const { return cx_; }
@@ -130,6 +143,15 @@ private:
     bool item_left_ = false;      // the left button as the last step left it
     bool zoom_toggle_ = false, keyboard_ = false, screenshot_ = false;
     Bottom bottom_ = Bottom::kNone;
+    // The auto-target.
+    AutoTarget aim_;
+    AimWorld *aim_world_ = nullptr;
+    float walk_dir_x_ = 0, walk_dir_y_ = 1;   // the last walking direction on the screen (y down)
+    bool aiming_ = false;         // the auto-target had the cursor at the last poll
+    int aim_saved_x_ = 0, aim_saved_y_ = 0;   // where the cursor was before; it goes back there
+    uint32_t aim_pump_seen_ = 0;
+    uint64_t aim_stats_ms_ = 0;
+    uint32_t aim_stats_presses_ = 0;
     uint8_t keys_[256] = {};      // which virtual keys this layer holds down
     uint8_t pad_keys_[4] = {};    // Pad::keys at the previous poll
 };

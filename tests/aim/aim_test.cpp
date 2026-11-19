@@ -1,11 +1,13 @@
 // The auto-target on A and B (src/game/auto_target.h): which unit the cone
 // picks, the rules (an enemy next to the hero first, NPCs in town, the
 // mercenary never), how the target sticks and when it is let go, the
-// settings.txt keys (src/game/aim_settings.h). Made-up units stand in for
-// the game. Run through
+// settings.txt keys (src/game/aim_settings.h), and the controls around it
+// (src/game/controls.cpp: the stick aims instead of walking, the cursor
+// goes back). Made-up units stand in for the game. Run through
 // `scripts/docker.sh test aim`.
 #include "game/aim_settings.h"
 #include "game/auto_target.h"
+#include "game/controls.h"
 #include "game/settings_file.h"
 
 #include <cmath>
@@ -24,6 +26,20 @@ static int g_fail = 0;
             g_fail++;                                                    \
         }                                                                \
     } while (0)
+
+// ---- the runtime the controls call (the cursor and buttons recorded) ----
+static int g_cursor_x = 0, g_cursor_y = 0;
+static bool g_left = false, g_right = false;
+namespace rt {
+void input_button(bool right, bool down) { (right ? g_right : g_left) = down; }
+void input_key(uint8_t, bool) {}
+void input_mouse_move(int x, int y)
+{
+    g_cursor_x = x;
+    g_cursor_y = y;
+}
+void logf(const char *, ...) {}
+}  // namespace rt
 
 // ---- a made-up game ----
 // The hero's feet at 320,232 (640x480, as the lane showed). A unit placed
@@ -549,6 +565,81 @@ static void test_disabled_reads_nothing()
     CHECK(w.scans == 0);
 }
 
+// ---- the controls around it ----
+static Pad pad_with(uint32_t held, int circle_x = 0, int circle_y = 0)
+{
+    Pad p;
+    p.held = held;
+    p.circle_x = circle_x;
+    p.circle_y = circle_y;
+    return p;
+}
+
+static void test_controls()
+{
+    FakeWorld w;
+    double dx, dy;
+    right_of_hero(5, dx, dy);
+    w.add(7, dx, dy);
+    Controls c;
+    c.set_frame(640, 480);
+    c.set_context(true, false, 0, false);
+    c.set_auto_target(AimSettings(), &w);
+    c.warp_cursor(300, 200);
+    auto step = [&](const Pad &p, uint64_t t) {
+        c.update(p, t);
+        w.last_cursor_x = c.cursor_x();
+        w.last_cursor_y = c.cursor_y();
+    };
+    // The stick right (walking), then A: the cursor onto the enemy, the hero
+    // stops walking (no left button) until the game shows it.
+    step(pad_with(0, 140, 0), 0);
+    step(pad_with(0, 140, 0), 40);
+    CHECK(g_left);   // walking holds the left button
+    step(pad_with(kA, 140, 0), 80);
+    CHECK(c.cursor_x() == w.list[0].feet_x && !g_left);
+    step(pad_with(kA, 140, 0), 120);
+    CHECK(g_left);   // shown under the cursor: the attack
+    // Let go, stick centred: the cursor goes back where it was.
+    step(pad_with(0), 160);
+    CHECK(!g_left && c.cursor_x() != w.list[0].feet_x);
+    // L held (stand still, Shift): A is the plain button, where the cursor is.
+    const int x = c.cursor_x(), y = c.cursor_y();
+    step(pad_with(kL | kA), 200);
+    CHECK(g_left && c.cursor_x() == x && c.cursor_y() == y);
+    step(pad_with(0), 240);
+    // R+A (the character sheet) and ZR+A (F1): no aim, no mouse button.
+    step(pad_with(kR | kA), 280);
+    CHECK(!g_left && c.cursor_x() == x);
+    step(pad_with(0), 320);
+    step(pad_with(kZR | kA), 360);
+    CHECK(!g_left && c.cursor_x() == x);
+    step(pad_with(0), 400);
+    // A script's tap: clicks where the script put the cursor.
+    Pad tap = pad_with(kA);
+    tap.aim_off = true;
+    step(tap, 440);
+    CHECK(g_left && c.cursor_x() == x);
+    step(pad_with(0), 480);
+    // A panel open: A is the plain button.
+    c.set_context(true, true, 0, false);
+    step(pad_with(kA), 520);
+    CHECK(g_left && c.cursor_x() == x);
+    step(pad_with(0), 560);
+    // An item on the cursor: the same.
+    c.set_context(true, false, 0, true);
+    step(pad_with(kA), 600);
+    CHECK(g_left && c.cursor_x() == x);
+    step(pad_with(0), 640);
+    // No world (the default): A as always.
+    Controls plain;
+    plain.set_frame(640, 480);
+    plain.set_context(true, false, 0, false);
+    plain.warp_cursor(100, 100);
+    plain.update(pad_with(kA), 0);
+    CHECK(g_left && plain.cursor_x() == 100);
+}
+
 // ---- settings.txt ----
 static void test_settings()
 {
@@ -595,11 +686,12 @@ int main()
     test_near_beats_held_far_target();
     test_town_npc_released_after_talk();
     test_disabled_reads_nothing();
+    test_controls();
     test_settings();
     if (g_fail) {
         std::printf("aim: %d check(s) failed\n", g_fail);
         return 1;
     }
-    std::printf("aim: all checks passed (14 tests)\n");
+    std::printf("aim: all checks passed (15 tests)\n");
     return 0;
 }
