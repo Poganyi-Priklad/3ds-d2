@@ -14,6 +14,20 @@ This port evolves as I play the game. It is quite something that a full computer
 - `v0.4.0`: brought us to the middle of Act II
 - `v0.5.0`: marks the fall of Duriel and the end of Act II
 
+## About this fork
+
+Hi! While playing exsilium's 3ds-d2 I was honestly fascinated by the work behind it: Diablo II's own `Game.exe` running on a New 3DS. That made me genuinely curious whether the game could also get more modern controls, the kind you'd expect from a console game today, simply to make it more comfortable to play. This fork is where I try that.
+
+The main thanks go to exsilium, the author of the original port. Everything here stands on that work; my changes are only a layer of controls and screens on top of it.
+
+What this fork adds:
+
+- **Auto-target** on A and B: the cursor goes onto the enemy the circle pad points at before the button is pressed; flicks of the pad switch targets; ZR + D-pad picks up items; a new AIM tab on the bottom screen with settings and an FAQ. See [docs/fork-auto-target.md](docs/fork-auto-target.md).
+
+If you try the auto-aim, I would be really glad to hear how it feels: what works, what gets in the way, and any ideas for making it better. Please open an issue on this fork.
+
+Like the original, this fork contains no Blizzard files. You need your own copy of Diablo II and Lord of Destruction, patched to 1.14d.
+
 ## Requirements
 
 - A **New 3DS, New 3DS XL or New 2DS XL**. The original 3DS and 2DS do not have enough memory or CPU.
