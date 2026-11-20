@@ -378,13 +378,26 @@ bool pad_art_build(PadArt &art, const PadFileReader &read, const std::string &la
     Img m(kW, kH, rgba(0, 0, 0, 255));
     const Img big = assemble(bg, pal.data());
     composite(m, crop(big, 23, 65, 23 + kW, 65 + kH), 0, 0);
-    // A dark band inside the frame's line, six pixels wide.
+    // A soft shade inside the frame's line, six pixels wide: black laid over
+    // the background, darkest next to the gold line and fading inward
+    // (85%, 70%, 55%, 40%, 25%, 10% black, ring by ring), so the picture
+    // shades into the frame instead of meeting a solid black band.
+    static const int kShade[6] = {217, 179, 140, 102, 64, 26};   // black's share of 255 a ring
+    auto darken = [&](int x, int y, int a) {
+        uint32_t &d = m.px[(size_t)y * kW + x];
+        auto ch = [&](uint32_t c) { return c * (uint32_t)(255 - a) / 255; };
+        d = rgba(ch(d & 255), ch(d >> 8 & 255), ch(d >> 16 & 255), 255);
+    };
     for (int i = 0; i < 6; i++) {
         const int x0 = 3 + i, y0 = 3 + i, x1 = kW - 4 - i, y1 = kH - 4 - i;
-        for (int x = x0; x <= x1; x++)
-            m.px[(size_t)y0 * kW + x] = m.px[(size_t)y1 * kW + x] = rgba(0, 0, 0, 255);
-        for (int y = y0; y <= y1; y++)
-            m.px[(size_t)y * kW + x0] = m.px[(size_t)y * kW + x1] = rgba(0, 0, 0, 255);
+        for (int x = x0; x <= x1; x++) {
+            darken(x, y0, kShade[i]);
+            darken(x, y1, kShade[i]);
+        }
+        for (int y = y0 + 1; y < y1; y++) {   // the corners are done once, by the rows above
+            darken(x0, y, kShade[i]);
+            darken(x1, y, kShade[i]);
+        }
     }
     // The frame: PopUp_340x224's thin gold line, its real corners (4x4) and
     // 3-pixel edges (cut from their middles), nine-sliced to the screen.
