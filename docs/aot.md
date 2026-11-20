@@ -534,12 +534,28 @@ The goal is a build without Box86, so the measure is how much of the game's x86 
 - **Trampolines that move a branch:** a hook writes a `jmp` over a function's first 5 bytes or more. Its trampoline runs those bytes elsewhere, then jumps back. A function whose first bytes had a call, `jmp` or `jcc` couldn't be hooked, and Box86 ran it whenever Box86 code called it. That was 1,435 functions, 8.4% of what Box86 still ran: 475800 starts `push esi; push edi; call`, and 463d80 starts `push ecx; call`. The recompiler now writes their trampolines (`aot_tramps`): a rel8 or rel32 call, `jmp` or `jcc` becomes a rel32 to the same target, and an indirect one is copied as it is. The runtime makes each target relative to where it puts the trampoline. A `ret`, `loop`, `jecxz`, or a `jmp` before the 5th byte still refuses the hook (`AOT_NO_RELOC=1`, running the recompiler directly: none moved). 12,931 of 13,143 compiled functions can be hooked (11,708 before), 1,223 of them through a moved branch. The check runs these trampolines too, since it runs the original from them. In production the trampoline area is 64 KiB larger (the state lines' `va`).
 - **Leftovers found to a fixpoint:** the check found 55c270 returning 55c110's leftover ecx (garbage: scratch that callers don't read, which compiled code doesn't keep). It had never been checked, because it couldn't be hooked. Each function's leftovers were found once, in callees-first order, so in a call cycle a caller could be screened before its callee. 55c270 then claimed ecx as an output, and the check compared it. Leftovers are now found again until none change: 265 functions.
 
+**Tried and dropped: a plain exit's callee returning through the trap.** After a plain exit, Box86 runs the callee and then the rest of the caller from the raw return site. 494020's loop at 494110 is an example: Box86 ran it 30,516 times in Act II, from 2,543 returns at 4940ec. Pointing the callee's return address at the return sites' trap brought about 750 returns a window back into compiled code. But some callees use their return address as data, as the C runtime's frame helpers do. One came back with another esp, then reached the trap where no exit had recorded a site, and the run aborted. Limited to compiled callees, whose code is known, no exit used it at all. These returns need the callee compiled (or bound, below), not a swapped return address.
+
 The trap's own entry (`aot:reenter`) shows in the runtime's "exits to Box86" line, about 39,750 a fight window, one per re-entry. Box86 doesn't run any game code for those.
+
+### The natives' site table (#138, planned)
+
+The natives change the game's code at install time. They do it in their own `install_*` code: about 80 writes across `d2_native`, `d2_memory`, `storm_reads`, `sprite_trace`, `dcc_native`, `frame_reads`, `automap` and `cinematics`. The recompiler can't see those writes. So a function a native changed runs under Box86 at run time (47 functions in production, `60bff0`'s DccDecode loop among them), and compiled callers reach it through `aot_call_stale`. After the steps above, that is most of what Box86 still runs.
+
+The patches move into one table that both the install code and the recompiler read. Each row gives:
+- **Where:** the address, and the game's bytes there, which are checked as the install code checks them today.
+- **What goes there:** the bytes written. A rel32 to a native is named (`{DccDecode}`); a rel32 to the game's code is written as its address.
+- **The native:** its name, the dwords its ret pops, and whether it may redirect (a hand-back) or wait. The recompiler compiles a call to a native as a callout, with all eight registers.
+- **Its group:** the install code applies a group when it decides to (a mode, a setting). The recompiler compiles the groups a production build applies. A function whose bytes still differ at run time (another mode, the lane's switches) stays with Box86 as now, by its hash.
+
+Entry hooks (`rt::hook_function`, 40 in `d2_native`) are rows too: a `jmp` to the native over the function's first bytes. A compiled caller calls the native where it called the function. That replaces the recompiler's hand-written `natives()` (RoomFind and CollisionCross today).
+
+The order: the table and its two readers first, with `dcc_native`'s loop as the first row (`60bff0`, 19% of what Box86 still runs). Then the natives one file at a time, with the check lane and the production state lines after each.
 
 ## Open questions
 
 - **Is the gain there?** Yes, on the console: about 5× Box86 on A* and 3–4.7× on CofParams (#113). The lane's qemu showed 4.1× and 1.6×. What a full build gains depends on how much of a frame's code it covers (#115), and on its calls to code it doesn't compile going through the target table rather than a nested run.
-- **The site table:** the hooks and code patches move from `install_*` code into one table that both the app and the recompiler read. Is that change acceptable before the spike, or only after it?
+- **The site table:** the hooks and code patches move from `install_*` code into one table that both the app and the recompiler read. Is that change acceptable before the spike, or only after it? Now: [The natives' site table](#the-natives-site-table-138-planned).
 - **Does the game write its own code?** If anything other than our patches writes into `.text` at run time, the AOT code for it is stale. Box86's invalidations of `.text` on the lane answer this.
 - **Exceptions:** does any function rely on Windows exception handling for a fault (an access violation caught by `__try`)? If one does, it stays with Box86.
 - **Return sites:** does every call's return site need an entry, or only those a thread can be switched or fall back under? Only those where a call may exit ([What Box86 still runs](#what-box86-still-runs-138)).
