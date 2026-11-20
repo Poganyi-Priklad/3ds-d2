@@ -18,6 +18,7 @@
 #include "game/auto_target.h"
 
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace game {
@@ -111,6 +112,21 @@ int player_class();
 // and +0x28 (low 16 bits) counts them; an entry is 8 bytes: the stat's
 // number << 16 | its parameter, then its value.
 int player_stat(int stat);
+
+// The unit under the cursor, as the PAD window names it (pad_game.h): a
+// monster or NPC (type 1) by its name (its data +0x2C, UTF-16) and, for an
+// enemy, its life and most (stats 6 and 7); an object (type 2) by its
+// objects.txt name (+0x40, UTF-16). An NPC is one MonStats.txt marks npc or
+// interact, one MonStats2.txt marks alSel (Cain, guards), or a pet. False
+// if none (players and items are not named), or not in a game.
+struct HoveredUnit {
+    enum Kind : uint8_t { kNone, kNpc, kEnemy, kObject };
+    Kind kind = kNone;
+    uint32_t type = 0, id = 0, cls = 0;
+    std::u16string name;
+    int32_t hp = 0, hp_max = 0;
+};
+bool hovered_unit(HoveredUnit &out);
 
 }  // namespace game
 

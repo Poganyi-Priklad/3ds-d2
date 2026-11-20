@@ -315,6 +315,10 @@ constexpr uint32_t kItemRowSize = 0x1A8, kItemCode = 0x80;
 // objects.txt's record (the object's data +0x14 points at a pointer to
 // it): OperateFn at +0x1B3.
 constexpr uint32_t kObjectOperateFn = 0x1B3;
+// The unit under the cursor: a monster's name (its data +0x2C, UTF-16), an
+// object's (objects.txt +0x40, UTF-16), checked on the lane (a Fallen,
+// a waypoint).
+constexpr uint32_t kMonsterName = 0x2C, kObjectWideName = 0x40;
 // The player's skills (unit +0xA8): the right button's at +0x0C, a node
 // whose +0x00 points at its skills.txt row; the row starts with the id, and
 // its flags at +0x04 have TargetCorpse in bit 24.
@@ -667,20 +671,91 @@ int player_class()
     return player ? (int)rd32(player + 0x04) : -1;
 }
 
-int player_stat(int stat)
+namespace {
+
+// A unit's stat (its parameter 0) from its base stat list; false if it has none.
+bool unit_stat(uint32_t unit, int stat, int32_t &value)
 {
-    const uint32_t player = rd32(kPlayerUnitVa);
-    const uint32_t list = player ? rd32(player + 0x5C) : 0;
+    const uint32_t list = unit ? rd32(unit + 0x5C) : 0;
     if (!list)
-        return 0;
+        return false;
     const uint32_t entries = rd32(list + 0x24);
     const uint32_t count = rd32(list + 0x28) & 0xFFFF;
     if (!entries || count > 512)
-        return 0;
+        return false;
     for (uint32_t i = 0; i < count; i++)
-        if (rd32(entries + i * 8) == (uint32_t)stat << 16)
-            return (int)rd32(entries + i * 8 + 4);
-    return 0;
+        if (rd32(entries + i * 8) == (uint32_t)stat << 16) {
+            value = (int32_t)rd32(entries + i * 8 + 4);
+            return true;
+        }
+    return false;
+}
+
+// A NUL-ended UTF-16 string of at most `max` characters.
+std::u16string read_wide(uint32_t va, int max)
+{
+    std::u16string s;
+    char16_t buf[16];
+    for (int done = 0; va && done < max; done += 16) {
+        if (!rt::guest_read(va + (uint32_t)done * 2, buf, sizeof buf))
+            break;
+        for (char16_t c : buf) {
+            if (!c || (int)s.size() >= max)
+                return s;
+            s += c;
+        }
+    }
+    return s;
+}
+
+}  // namespace
+
+int player_stat(int stat)
+{
+    int32_t v = 0;
+    return unit_stat(rd32(kPlayerUnitVa), stat, v) ? (int)v : 0;
+}
+
+bool hovered_unit(HoveredUnit &out)
+{
+    out = HoveredUnit();
+    if (!rd32(kPlayerUnitVa) || !rd32(kHoverFlagVa))
+        return false;
+    const uint32_t type = rd32(kHoverTypeVa), id = rd32(kHoverIdVa);
+    if (type != kMonster && type != kObject)
+        return false;   // players and items: not shown
+    uint32_t u = rd32(kUnitTablesVa + (type * kBuckets + (id & (kBuckets - 1))) * 4);
+    for (int n = 0; u && n < 64 && rd32(u + 0x0C) != id; n++)
+        u = rd32(u + kListNext);
+    if (!u || rd32(u) != type || rd32(u + 0x0C) != id)
+        return false;
+    out.type = type;
+    out.id = id;
+    out.cls = rd32(u + 0x04);
+    const uint32_t data = rd32(u + 0x14);
+    if (!data)
+        return false;
+    if (type == kObject) {
+        const uint32_t txt = rd32(data);
+        out.name = txt ? read_wide(txt + kObjectWideName, 64) : std::u16string();
+        out.kind = HoveredUnit::kObject;
+        return !out.name.empty();
+    }
+    out.name = read_wide(rd32(data + kMonsterName), 64);
+    static MonsterFlags flags;
+    uint32_t monstats = 0, monstats2 = 0;
+    flags.get(out.cls, monstats, monstats2);
+    const uint32_t flags_b = rd32(u + 0xC8);
+    const bool friendly = (monstats & (aim_bits::kMonNpc | aim_bits::kMonInteract)) ||
+                          (monstats2 & aim_bits::kMon2AllySelect) || (flags_b & aim_bits::kHasOwner);
+    out.kind = friendly ? HoveredUnit::kNpc : HoveredUnit::kEnemy;
+    if (out.kind == HoveredUnit::kEnemy) {
+        unit_stat(u, 6, out.hp);
+        unit_stat(u, 7, out.hp_max);
+        if (out.hp_max <= 0)
+            out.hp_max = 32768;
+    }
+    return !out.name.empty();
 }
 
 }  // namespace game
