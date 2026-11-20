@@ -14,8 +14,9 @@
 //     long-range profile, so a ranged attack never ignores the enemy next
 //     to the hero.
 //   - Plain A with no enemy in the cone takes, in this order: an object
-//     (shrine, chest, waypoint or portal, door or lever, barrel; used ones
-//     skipped), an NPC, the nearest item on the ground (gold first if the
+//     (shrine, chest, waypoint or portal, door or lever or a level's warp -
+//     a cave entrance, stairs, a passage to the next area -, barrel; used
+//     ones skipped), an NPC, the nearest item on the ground (gold first if the
 //     player asks for it). B only aims at enemies and NPCs (or corpses).
 //   - In town NPCs come first (to talk to), then objects and items; there
 //     are no enemies there.
@@ -51,9 +52,11 @@ enum class AimMode : uint8_t { kOff, kEnemies, kCorpses };
 enum class AimKind : uint8_t { kNone, kEnemy, kNpc, kCorpse, kObject, kItem };
 
 // The objects (unit type 2) plain A uses, from objects.txt's OperateFn
-// (object_kind below). Others (quest objects, braziers, the stash...) are
-// never targets.
-enum class AimObject : uint8_t { kNone, kShrine, kChest, kWaypoint, kPortal, kDoor, kLever, kBarrel };
+// (object_kind below), and a level's warps (unit type 5: a cave entrance,
+// stairs, a passage to the next area; a click on one takes the hero
+// there). Other objects (quest objects, braziers, the stash...) are never
+// targets.
+enum class AimObject : uint8_t { kNone, kShrine, kChest, kWaypoint, kPortal, kDoor, kLever, kBarrel, kWarp };
 
 // What an item on the ground is, for the order it is picked up in.
 enum class AimLoot : uint8_t { kOther, kGold, kRune, kUniqueOrSet };
@@ -92,7 +95,7 @@ struct AimSettings {
 };
 
 // One unit as the game's memory has it: a monster or NPC (type 1), an
-// object (type 2) or an item on the ground (type 4).
+// object (type 2), an item on the ground (type 4) or a level's warp (type 5).
 struct AimUnit {
     uint32_t type = 1;
     uint32_t id = 0, cls = 0, mode = 0;
@@ -118,6 +121,9 @@ struct AimView {
     bool right_skill_on_corpses = false;   // ...is cast on a corpse (skills.txt's TargetCorpse)
     bool hover_on = false;       // the game shows a unit under the cursor
     uint32_t hover_type = 0, hover_id = 0;
+    // The part of the screen a target may be in, across (AimPoll's, copied
+    // in by AutoTarget::update); 0 and 0: all of it.
+    int area_left = 0, area_right = 0;
 };
 
 // What reading the units costs: full reads, units read, their total and
@@ -138,8 +144,9 @@ public:
     virtual void units(std::vector<AimUnit> &out) = 0;
     // One monster or NPC by its id; false if it is gone.
     virtual bool unit(uint32_t id, AimUnit &out) = 0;
-    // The objects (type 2) and the items on the ground (type 4) near the
-    // hero, and one of them by its type and id. None by default.
+    // The objects (type 2), the items on the ground (type 4) and the
+    // level's warps (type 5) near the hero, and one of them by its type and
+    // id. None by default.
     virtual void ground_units(std::vector<AimUnit> &out) { (void)out; }
     virtual bool ground_unit(uint32_t type, uint32_t id, AimUnit &out)
     {
@@ -151,9 +158,9 @@ public:
 // What a unit counts as. Pure: from the fields alone.
 AimKind classify_unit(const AimUnit &unit, bool in_town);
 
-// The kind of object an object unit is (kNone: not one A uses), and its
-// place in plain A's order: 0 shrine, 1 chest, 2 waypoint or portal, 3 door
-// or lever, 4 barrel.
+// The kind of object an object or warp unit is (kNone: not one A uses),
+// and its place in plain A's order: 0 shrine, 1 chest, 2 waypoint or
+// portal, 3 door, lever or warp, 4 barrel.
 AimObject object_kind(const AimUnit &unit);
 int object_rank(AimObject kind);
 
@@ -263,6 +270,10 @@ struct AimPoll {
     float stick_x = 0, stick_y = 0;   // the circle pad's tilt, -1 to 1 (screen y down): flicks
     AimLootCommand loot = AimLootCommand::kNone;   // a ZR + D-pad command held
     bool loot_pressed = false;   // ...pressed this poll
+    // With a panel open on one side, the free half of the screen, across
+    // (game pixels): targets only there, never under the panel. 0 and 0:
+    // the whole screen.
+    int area_left = 0, area_right = 0;
     // A new game frame since the last poll: the game has looked at what is
     // under the cursor again. The 3DS app replays several pad readings in one
     // message pump; only the first of each pump is a new frame.
@@ -330,7 +341,7 @@ private:
     void (*log_)(const char *) = nullptr;
     // The target, kept between presses.
     uint32_t target_id_ = 0;
-    uint32_t target_type_ = 1;     // 1 a monster or NPC, 2 an object, 4 an item
+    uint32_t target_type_ = 1;     // 1 a monster or NPC, 2 an object, 4 an item, 5 a warp
     AimKind target_kind_ = AimKind::kNone;
     uint64_t last_attack_ms_ = 0;                 // a button was held on it
     // Waiting for the game to show it under the cursor.

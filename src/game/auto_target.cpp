@@ -33,6 +33,13 @@ AimKind classify_unit(const AimUnit &unit, bool in_town)
         // An item: only one lying on the ground that the game lets you pick.
         return unit.mode == kItemOnTheGround && (unit.flags_b & kPickable) ? AimKind::kItem : AimKind::kNone;
     }
+    if (unit.type == 5) {
+        // A level's warp (a cave entrance, stairs, a passage to the next
+        // area): used again and again, so any mode; only one the game's hit
+        // test may pick (the lane showed flags_a 0x22, flags_b 0x02000080
+        // on Lut Gholein's warps).
+        return (unit.flags_a & kSelectable) && (unit.flags_b & kPickable) ? AimKind::kObject : AimKind::kNone;
+    }
     if (unit.type == 2) {
         // An object: one of the kinds A uses, not used yet. The game keeps
         // its "can be picked" bit (flags_a bit 1) from objects.txt's
@@ -74,6 +81,8 @@ AimKind classify_unit(const AimUnit &unit, bool in_town)
 
 AimObject object_kind(const AimUnit &unit)
 {
+    if (unit.type == 5)
+        return AimObject::kWarp;   // every warp the same: where it leads doesn't matter
     if (unit.type != 2)
         return AimObject::kNone;
     // objects.txt's OperateFn (The Phrozen Keep's list; the lane showed
@@ -110,7 +119,8 @@ int object_rank(AimObject kind)
     case AimObject::kWaypoint:
     case AimObject::kPortal: return 2;
     case AimObject::kDoor:
-    case AimObject::kLever: return 3;
+    case AimObject::kLever:
+    case AimObject::kWarp: return 3;   // a warp beside doors and levers (the player's choice)
     case AimObject::kBarrel: return 4;
     case AimObject::kNone: break;
     }
@@ -180,6 +190,8 @@ bool point_visible(const AimView &view, int x, int y)
 {
     if (x < 8 || x > view.width - 8 || y < 8)
         return false;
+    if (view.area_right > view.area_left && (x < view.area_left + 8 || x > view.area_right - 8))
+        return false;   // under a panel open on one side
     const bool over_a_globe = x < view.width * 0.19f || x > view.width * 0.81f;
     return y <= (over_a_globe ? view.height * 0.78f : view.height * 0.86f);
 }
@@ -218,11 +230,17 @@ float floor_distance(int x0, int y0, int x1, int y1)
 }
 
 // The cursor's heights above a unit's feet to try, in turn: a monster's
-// body, an object's (chests are low, shrines tall) and an item's (flat on
-// the floor; the lane picked gold up from 4 pixels above its spot).
+// body, an object's (chests are low, shrines tall), an item's (flat on
+// the floor; the lane picked gold up from 4 pixels above its spot) and a
+// warp's (its spot is the warp's corner nearest the top of the screen: the
+// stairs or the opening are drawn below it, so below it is tried first).
 void target_heights(uint32_t type, int height_px, int out[4])
 {
-    if (type == 4) {
+    if (type == 5) {
+        const int warp[4] = {-16, -28, -4, -40};
+        for (int i = 0; i < 4; i++)
+            out[i] = warp[i];
+    } else if (type == 4) {
         const int item[4] = {4, 10, 1, 16};
         for (int i = 0; i < 4; i++)
             out[i] = item[i];
@@ -238,7 +256,7 @@ void target_heights(uint32_t type, int height_px, int out[4])
 }
 
 // How high above its feet a unit is seen by point_visible (its body).
-int visible_height(uint32_t type, int height_px) { return type == 1 ? height_px : type == 2 ? 16 : 4; }
+int visible_height(uint32_t type, int height_px) { return type == 1 ? height_px : type == 2 ? 16 : type == 5 ? -16 : 4; }
 
 }  // namespace
 
@@ -581,7 +599,7 @@ void AutoTarget::take(const AimUnit &u, AimKind kind, const AimPoll &poll, const
         stats_.items++;
     const char *name = kind == AimKind::kNpc      ? "NPC"
                        : kind == AimKind::kCorpse ? "corpse"
-                       : kind == AimKind::kObject ? "object"
+                       : kind == AimKind::kObject ? (u.type == 5 ? "warp" : "object")
                        : kind == AimKind::kItem   ? "item"
                                                   : "enemy";
     say(poll.now_ms, "%s %u (class %u) %.1f subtiles away, %s", name, u.id, u.cls, (double)u.distance, why);
@@ -593,6 +611,13 @@ bool AutoTarget::pick(const AimPoll &poll, const AimView &view, AimWorld &world,
                       bool pressed)
 {
     read_units(poll, view, world, active_profile_ != 1);
+    // A warp only on a press of A, never while it is held: held, the hero
+    // would come out of a warp next to the one leading back and take that
+    // at once (the lane showed him going in and out of a cave that way).
+    if (!pressed)
+        for (const AimUnit &u : units_)
+            if (u.type == 5)
+                skip_keys_.push_back(aim_key(u.type, u.id));
     int i;
     bool near_rule = false;
     if (active_profile_ == 2)
@@ -706,6 +731,8 @@ AimResult AutoTarget::update(const AimPoll &poll, AimWorld &world)
         return result;   // this button clicks as it always did
     if (!world.view(view))
         return result;
+    view.area_left = poll.area_left;   // a panel on one side: its half is left out
+    view.area_right = poll.area_right;
     // B with a skill cast on corpses (Raise Skeleton, Corpse Explosion...):
     // B aims at corpses by itself.
     if (active_profile_ == 1 && profile.mode == AimMode::kEnemies && view.right_skill_on_corpses)

@@ -296,6 +296,7 @@ constexpr uint32_t kPetListVa = 0x007BB5BC;
 constexpr uint32_t kDataTablesVa = 0x00744304;   // the loaded .txt tables
 constexpr float kAimReadSubtiles = 40.0f;          // units further away are never targets
 constexpr uint32_t kItem = 4;
+constexpr uint32_t kWarp = 5;   // a level's warp ("tile" units): cave entrances, stairs, passages
 // Items.txt (weapons, armour and misc in one table): the rows and their
 // count, 0x1A8 bytes a row, the four-character code at +0x80.
 constexpr uint32_t kItemRowsVa = 0x0096CA5C, kItemCountVa = 0x0096CA58;
@@ -398,8 +399,8 @@ public:
         return true;
     }
 
-    // Every object and item near the hero (read only when plain A or a
-    // loot command may use them).
+    // Every object, item and warp near the hero (read only when plain A or
+    // a loot command may use them).
     void ground_units(std::vector<AimUnit> &out) override
     {
         const uint64_t start = g_aim_clock();
@@ -407,7 +408,7 @@ public:
         if (!player || !place(player, player_x_, player_y_) || !feet(player, hero_x_, hero_y_))
             return;
         uint32_t read = 0;
-        for (uint32_t type : {kObject, kItem}) {
+        for (uint32_t type : {kObject, kItem, kWarp}) {
             uint32_t heads[kBuckets] = {};
             rt::guest_read(kUnitTablesVa + type * kBuckets * 4, heads, sizeof heads);
             for (uint32_t b = 0; b < kBuckets; b++) {
@@ -428,11 +429,11 @@ public:
         g_aim_cost.longest_us = took > g_aim_cost.longest_us ? took : g_aim_cost.longest_us;
     }
 
-    // One object or item again, by id (its bucket only).
+    // One object, item or warp again, by id (its bucket only).
     bool ground_unit(uint32_t type, uint32_t id, AimUnit &out) override
     {
         const uint32_t player = rd32(kPlayerUnitVa);
-        if ((type != kObject && type != kItem) || !player || !place(player, player_x_, player_y_) ||
+        if ((type != kObject && type != kItem && type != kWarp) || !player || !place(player, player_x_, player_y_) ||
             !feet(player, hero_x_, hero_y_))
             return false;
         uint32_t u = rd32(kUnitTablesVa + (type * kBuckets + (id & (kBuckets - 1))) * 4);
@@ -536,9 +537,10 @@ private:
         return true;
     }
 
-    // An object's or an item's fields, and the next in its bucket. Its place
-    // is a whole subtile (the static path); its feet on the screen are the
-    // hero's plus the isometric offset.
+    // An object's, an item's or a warp's fields, and the next in its bucket.
+    // Its place is a whole subtile (the static path); its feet on the screen
+    // are the hero's plus the isometric offset. A warp has no data record
+    // (+0x14 is 0): only its place and flags are used.
     bool read_ground_unit(uint32_t u, uint32_t type, AimUnit &out, uint32_t &next)
     {
         uint32_t fields[0xE8 / 4] = {};
@@ -568,7 +570,7 @@ private:
             if (txt)
                 rt::guest_read(txt + kObjectOperateFn, &operate_fn, 1);
             out.operate_fn = operate_fn;
-        } else {
+        } else if (type == kItem) {
             out.quality = data ? rd32(data) : 0;
             const uint32_t rows = rd32(kItemRowsVa);
             out.code = rows && out.cls < rd32(kItemCountVa) ? rd32(rows + out.cls * kItemRowSize + kItemCode) : 0;

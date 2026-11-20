@@ -15,7 +15,8 @@
 //   aim_flick_ms=150      a flick gets from the centre to aim_flick_light within this time
 //   aim_flick_light=40    percent of the full tilt a flick reaches
 //   aim_flick_strong=80   ...and a strong flick (the hero turns)
-//   aim_objects=1         plain A uses shrines, chests, waypoints, doors, barrels
+//   aim_objects=1         plain A uses shrines, chests, waypoints, doors, levers,
+//                         level warps (cave entrances, stairs), barrels
 //   aim_loot=1            plain A picks up items with nothing else around
 //   aim_gold_first=0      gold before other items (plain A and ZR + Down)
 //   aim_lost_ms=1500      the hero hasn't got closer or attacked for this long: give it up

@@ -70,8 +70,10 @@ struct FakeWorld : AimWorld {
         if (hover_follows_cursor) {
             out.hover_on = false;
             for (const AimUnit &u : list)
-                if (std::abs(last_cursor_x - u.feet_x) <= 12 && last_cursor_y <= u.feet_y &&
-                    last_cursor_y >= u.feet_y - 60 && (u.type != 1 || u.mode != 0)) {
+                if (std::abs(last_cursor_x - u.feet_x) <= 12 &&
+                    (u.type == 5 ? last_cursor_y >= u.feet_y + 8 && last_cursor_y <= u.feet_y + 40
+                                 : last_cursor_y <= u.feet_y && last_cursor_y >= u.feet_y - 60) &&
+                    (u.type != 1 || u.mode != 0)) {
                     out.hover_on = true;
                     out.hover_type = u.type;
                     out.hover_id = u.id;
@@ -152,6 +154,21 @@ struct FakeWorld : AimWorld {
         u.flags_a = 0x30000002;
         u.flags_b = 0x02000080;
         u.operate_fn = operate_fn;
+        place(u, dx, dy);
+        list.push_back(u);
+        return list.back();
+    }
+    // A level's warp (unit type 5: a cave entrance, stairs) at dx, dy, with
+    // the flags the lane showed on Lut Gholein's.
+    AimUnit &add_warp(uint32_t id, double dx, double dy)
+    {
+        AimUnit u;
+        u.type = 5;
+        u.id = id;
+        u.cls = 19;
+        u.mode = 0;
+        u.flags_a = 0x22;
+        u.flags_b = 0x02000080;
         place(u, dx, dy);
         list.push_back(u);
         return list.back();
@@ -1338,6 +1355,132 @@ static void test_b_on_corpse_skill()
     CHECK(!r.aiming && aim3.target_id() == 0);
 }
 
+// ---- a level's warps (cave entrances, stairs) on plain A ----
+static void test_warps()
+{
+    double dx, dy;
+    AimSettings s;
+    s.near_subtiles = 0;
+    // What a warp counts as: an object (any mode), beside doors and levers.
+    FakeWorld w;
+    right_of_hero(6, dx, dy);
+    AimUnit &warp = w.add_warp(40, dx, dy);
+    CHECK(classify_unit(warp, false) == AimKind::kObject);
+    CHECK(classify_unit(warp, true) == AimKind::kObject);   // in town too (Lut Gholein's sewer)
+    CHECK(object_kind(warp) == AimObject::kWarp);
+    CHECK(object_rank(AimObject::kWarp) == object_rank(AimObject::kDoor));
+    CHECK(object_rank(AimObject::kWarp) == object_rank(AimObject::kLever));
+    warp.mode = 1;
+    CHECK(classify_unit(warp, false) == AimKind::kObject);
+    warp.flags_b = 0x02000000;   // the game's hit test doesn't pick it (another level's)
+    CHECK(classify_unit(warp, false) == AimKind::kNone);
+    warp.flags_b = 0x02000080;
+    warp.flags_a = 0;
+    CHECK(classify_unit(warp, false) == AimKind::kNone);
+    warp.flags_a = 0x22;
+    CHECK(choose(w, s.a, kAimRight, nullptr, s) == 40);
+    CHECK(choose(w, s.a, kAimLeft, nullptr, s) == 0);           // the cone holds
+    CHECK(choose(w, s.b, kAimRight, nullptr, s, {}, false) == 0);   // B never takes one
+    AimSettings no_objects = s;
+    no_objects.objects = false;
+    CHECK(choose(w, s.a, kAimRight, nullptr, no_objects) == 0);   // aim_objects=0: none
+    // The order: shrine, chest, waypoint, then a door, lever or warp (the
+    // nearest of those), then a barrel; an enemy before all of them.
+    FakeWorld order;
+    right_of_hero(3, dx, dy);
+    order.add_object(1, dx, dy, 5);            // a barrel, nearest
+    right_of_hero(5, dx, dy);
+    order.add_warp(2, dx, dy - 0.2);           // a warp
+    right_of_hero(7, dx, dy);
+    order.add_object(3, dx, dy + 0.2, 8);      // a door, further
+    right_of_hero(8, dx, dy);
+    order.add_object(4, dx, dy - 0.3, 4);      // a chest, furthest
+    CHECK(choose(order, s.a, kAimRight, nullptr, s) == 4);
+    order.find(4)->mode = 1;   // opened
+    CHECK(choose(order, s.a, kAimRight, nullptr, s) == 2);   // the warp: nearer than the door
+    order.place(*order.find(2), dx + 2, dy - 2);   // the warp now further than the door
+    CHECK(choose(order, s.a, kAimRight, nullptr, s) == 3);
+    order.find(3)->mode = 1;   // the door opened
+    CHECK(choose(order, s.a, kAimRight, nullptr, s) == 2);
+    right_of_hero(9, dx, dy);
+    order.add(9, dx, dy);   // an enemy comes first
+    CHECK(choose(order, s.a, kAimRight, nullptr, s) == 9);
+    // Pressed: the cursor goes below the warp's spot (where the stairs are
+    // drawn), and A clicks once the game shows the warp there.
+    FakeWorld press;
+    right_of_hero(5, dx, dy);
+    press.add_warp(7, dx, dy);
+    AutoTarget aim;
+    aim.set_settings(s);
+    AimResult r = poll(aim, press, 0, true, false, true, false, kAimRight);
+    CHECK(r.aiming && !r.left && aim.target_type() == 5 && aim.target_id() == 7);
+    CHECK(r.cursor_x == press.list[0].feet_x && r.cursor_y == press.list[0].feet_y + 16);
+    r = poll(aim, press, 40, true, false, false, false, kAimRight);
+    CHECK(r.aiming && r.left);
+    CHECK(aim.stats().confirmed == 1 && aim.stats().objects == 1);
+    // Taken (the level changes): it is gone, A clicks plainly again.
+    press.remove(7);
+    for (int t = 80; t < 400; t += 40)
+        r = poll(aim, press, (uint64_t)t, true, false, false, false, kAimRight);
+    CHECK(!aim.has_target());
+    // Still held, out of the warp beside the one leading back: that one is
+    // not taken while A is held, only on the next press.
+    right_of_hero(3, dx, dy);
+    press.add_warp(8, dx, dy);
+    for (int t = 400; t < 800; t += 40)
+        r = poll(aim, press, (uint64_t)t, true, false, false, false, kAimRight);
+    CHECK(!aim.has_target());
+    r = poll(aim, press, 800, false, false, false, false, kAimRight);
+    r = poll(aim, press, 840, true, false, true, false, kAimRight);
+    CHECK(aim.has_target() && aim.target_id() == 8 && aim.target_type() == 5);
+}
+
+// ---- a panel open on one side: targets on the free half only ----
+static void test_panel_area()
+{
+    double dx, dy;
+    AimSettings s;
+    s.near_subtiles = 0;
+    FakeWorld w;
+    // The inventory open on the right: the game moves the hero to the left
+    // half's middle (160 across at 640x480).
+    w.v.hero_x = 160;
+    right_of_hero(6, dx, dy);
+    w.add(1, dx, dy);    // right of the hero, under the panel (256 across)... still on the free half
+    right_of_hero(12, dx, dy);
+    w.add(2, dx, dy);    // further right: 352 across, under the panel
+    right_of_hero(-4, dx, dy);
+    w.add(3, dx, dy);    // left of the hero
+    AutoTarget aim;
+    aim.set_settings(s);
+    AimPoll p;
+    p.allowed = true;
+    p.a_held = p.a_pressed = true;
+    p.stick_engaged = true;
+    p.dir_x = 1;
+    p.dir_y = 0;
+    p.area_left = 0;
+    p.area_right = 320;
+    AimResult r = run(aim, w, p);
+    CHECK(r.aiming && aim.target_id() == 1);   // the angle from the hero's real place, not the screen's middle
+    // The nearer one gone: the one under the panel is never taken.
+    w.remove(1);
+    AutoTarget aim2;
+    aim2.set_settings(s);
+    r = run(aim2, w, p);
+    CHECK(!aim2.has_target());
+    p.dir_x = -1;
+    r = run(aim2, w, p);
+    CHECK(r.aiming && aim2.target_id() == 3);
+    // No area (no panel): the whole screen again.
+    AutoTarget aim3;
+    aim3.set_settings(s);
+    p.dir_x = 1;
+    p.area_right = 0;
+    r = run(aim3, w, p);
+    CHECK(r.aiming && aim3.target_id() == 2);
+}
+
 static void test_controls_loot()
 {
     // ZR + Right through the controls: the gold, with the left button.
@@ -1409,10 +1552,12 @@ int main()
     test_item_no_room();
     test_b_on_corpse_skill();
     test_controls_loot();
+    test_warps();
+    test_panel_area();
     if (g_fail) {
         std::printf("aim: %d check(s) failed\n", g_fail);
         return 1;
     }
-    std::printf("aim: all checks passed (29 tests)\n");
+    std::printf("aim: all checks passed (31 tests)\n");
     return 0;
 }

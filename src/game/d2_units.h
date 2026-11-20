@@ -82,9 +82,13 @@ void log_units(bool all = false);
 //   unit +0x2C path: +0x08, +0x0C its feet in world pixels
 //   unit +0xC4, +0xC8         flags (auto_target.h's aim_bits)
 //   MonStats.txt row +0x0C flags; +0x18 its MonStats2 row, whose +0x04 flags
-// And the objects (type 2) and items on the ground (type 4), checked on the
-// lane:
-//   unit +0x2C static path: +0x0C x, +0x10 y in whole subtiles
+// And the objects (type 2), items on the ground (type 4) and the level's
+// warps (type 5: cave entrances, stairs, passages; in the same tables,
+// 128 buckets from 0x007A5E70 + 5 * 0x200), checked on the lane:
+//   unit +0x2C static path: +0x0C x, +0x10 y in whole subtiles (a warp's
+//        corner nearest the top of the screen)
+//   warp: +0x04 its lvlwarp class, data +0x14 is 0; flags_a 0x22,
+//         flags_b 0x02000080 (Lut Gholein's sewer and palace)
 //   object: data +0x14 -> objects.txt record, OperateFn at +0x1B3
 //   item: data +0x14 +0x00 quality; items.txt rows at [0x0096CA5C] (count
 //         [0x0096CA58], 0x1A8 bytes each), the code at +0x80

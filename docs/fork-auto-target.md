@@ -28,8 +28,9 @@ this page is the short version and a map of the code.
    - strongly in another direction: the hero turns to the nearest enemy in that
      direction.
 5. With no enemy in the cone, plain **A** uses objects (shrines, chests,
-   waypoints and portals, doors and levers, barrels), then NPCs, then the
-   nearest item on the ground. In town, A and B go to the NPCs first.
+   waypoints and portals, doors, levers and level warps such as cave
+   entrances, stairs and passages to the next area, barrels), then NPCs, then
+   the nearest item on the ground. In town, A and B go to the NPCs first.
 6. Hold **ZR + D-pad** to pick up the items around you one after another:
    **up** unique, set items and runes; **right** gold; **down** everything.
 7. When the right-hand skill works on corpses (Raise Skeleton, Corpse
