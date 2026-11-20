@@ -13,6 +13,9 @@ namespace game {
 // as missing and output past out_max is dropped; a bad stream ends with what
 // was written so far. `worker`: called on the I/O worker (its own state).
 uint32_t pk_explode(const uint8_t *in, uint32_t in_len, uint8_t *out, uint32_t out_max, bool worker = false);
+// The same with its own state, for a caller on neither of those threads
+// (the bottom screen's art, mpq.h's mpq_read_file).
+uint32_t pk_explode_alone(const uint8_t *in, uint32_t in_len, uint8_t *out, uint32_t out_max);
 
 }  // namespace game
 

@@ -5,6 +5,7 @@
 #include "game/pklib_explode.h"
 
 #include <cstring>
+#include <memory>
 
 namespace game {
 namespace {
@@ -288,11 +289,8 @@ struct Explode {
 // I/O worker's (rt::offload_job, one job at a time).
 Explode g_explode[2];
 
-}  // namespace
-
-uint32_t pk_explode(const uint8_t *in, uint32_t in_len, uint8_t *out, uint32_t out_max, bool worker)
+uint32_t explode_with(Explode &w, const uint8_t *in, uint32_t in_len, uint8_t *out, uint32_t out_max)
 {
-    Explode &w = g_explode[worker ? 1 : 0];
     w.src = in;
     w.src_len = in_len;
     w.src_pos = 0;
@@ -301,6 +299,19 @@ uint32_t pk_explode(const uint8_t *in, uint32_t in_len, uint8_t *out, uint32_t o
     w.dst_pos = 0;
     w.run();
     return w.dst_pos;
+}
+
+}  // namespace
+
+uint32_t pk_explode(const uint8_t *in, uint32_t in_len, uint8_t *out, uint32_t out_max, bool worker)
+{
+    return explode_with(g_explode[worker ? 1 : 0], in, in_len, out, out_max);
+}
+
+uint32_t pk_explode_alone(const uint8_t *in, uint32_t in_len, uint8_t *out, uint32_t out_max)
+{
+    std::unique_ptr<Explode> w(new Explode());
+    return explode_with(*w, in, in_len, out, out_max);
 }
 
 }  // namespace game
