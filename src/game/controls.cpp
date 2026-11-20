@@ -57,6 +57,7 @@ void Controls::set_frame(int width, int height)
 void Controls::warp_cursor(int x, int y) { move_cursor(x, y); }
 
 namespace {
+// The auto-target's "aim:" lines go to game.log like the port's others.
 void aim_log(const char *line) { rt::logf("%s", line); }
 }  // namespace
 
@@ -350,6 +351,8 @@ void Controls::update(const Pad &pad, uint64_t now_ms)
             !stick_engaged)
             move_cursor(aim_saved_x_, aim_saved_y_);   // let go: the cursor back where it was
         aiming_ = aim.aiming;
+        // Every 30 s of use, one summary line in game.log: how often each
+        // rule fired and what the memory reads cost (for tuning and reports).
         const AimStats &st = aim_.stats();
         if (st.presses != aim_stats_presses_ && now_ms - aim_stats_ms_ >= 30000) {
             const AimReadCost cost = aim_world_->read_cost();

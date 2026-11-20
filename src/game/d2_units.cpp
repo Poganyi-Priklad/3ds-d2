@@ -280,6 +280,12 @@ void log_units(bool all)
 }
 
 // ---- the auto-target's reads (d2_units.h, auto_target.h) ----
+//
+// GameAimWorld is the only place the auto-target touches the game: it reads
+// guest memory (never writes it, never calls a game function) and turns what
+// it finds into AimUnit and AimView records. Everything else in the
+// auto-target works on those records, which is what lets tests/aim run the
+// same rules on made-up units. The addresses below are Diablo II 1.14d's.
 
 namespace {
 
@@ -308,9 +314,14 @@ constexpr int kSubtileHalfWidthPx = 16, kSubtileHalfHeightPx = 8;
 uint64_t (*g_aim_clock)() = rt::now_us;
 AimReadCost g_aim_cost;
 
+// The camera's top-left corner in world pixels: a unit's feet on the screen
+// are its world pixel minus these.
 int camera_x() { return (int)(rd32(kCameraXVa) - rd32(kCameraXShiftVa)); }
 int camera_y() { return (int)rd32(kCameraYVa) - 8; }
 
+// The five towns' level ids (Rogue Encampment, Lut Gholein, Kurast Docks,
+// the Pandemonium Fortress, Harrogath): in town only NPCs, objects and
+// items are targets.
 bool is_town(int level) { return level == 1 || level == 40 || level == 75 || level == 103 || level == 109; }
 
 // A monster's flags from MonStats.txt and MonStats2.txt, by its class,
@@ -354,9 +365,16 @@ private:
     std::vector<Flags> known_;
 };
 
+// The AimWorld the console and the Linux lane use (tests/aim has its own,
+// made-up one). Each list read walks the game's unit hash tables (128
+// buckets per unit type), keeps only units within kAimReadSubtiles of the
+// hero, and times itself so game.log's "aim: stats:" line can show what the
+// reads cost.
 class GameAimWorld : public AimWorld {
 public:
     AimReadCost read_cost() const override { return g_aim_cost; }
+    // The hero, the frame's size, the town flag, the hover (what the game
+    // shows under the cursor now) and the right button's skill.
     bool view(AimView &out) override
     {
         const uint32_t player = rd32(kPlayerUnitVa);
@@ -380,6 +398,8 @@ public:
         return true;
     }
 
+    // Every object and item near the hero (read only when plain A or a
+    // loot command may use them).
     void ground_units(std::vector<AimUnit> &out) override
     {
         const uint64_t start = g_aim_clock();
@@ -408,6 +428,7 @@ public:
         g_aim_cost.longest_us = took > g_aim_cost.longest_us ? took : g_aim_cost.longest_us;
     }
 
+    // One object or item again, by id (its bucket only).
     bool ground_unit(uint32_t type, uint32_t id, AimUnit &out) override
     {
         const uint32_t player = rd32(kPlayerUnitVa);
@@ -424,6 +445,8 @@ public:
         return false;
     }
 
+    // Every monster and NPC near the hero, with the pet list read first so
+    // the mercenary and summons are marked as owned.
     void units(std::vector<AimUnit> &out) override
     {
         const uint64_t start = g_aim_clock();
@@ -452,6 +475,8 @@ public:
         g_aim_cost.longest_us = took > g_aim_cost.longest_us ? took : g_aim_cost.longest_us;
     }
 
+    // One monster or NPC again, by id: the current target, every poll
+    // while a button is held.
     bool unit(uint32_t id, AimUnit &out) override
     {
         const uint32_t player = rd32(kPlayerUnitVa);
@@ -571,6 +596,7 @@ private:
 
 }  // namespace
 
+// The one GameAimWorld (Controls keeps a pointer to it).
 AimWorld &game_aim_world()
 {
     static GameAimWorld world;

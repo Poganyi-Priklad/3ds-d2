@@ -1,4 +1,17 @@
-// See auto_target.h.
+// See auto_target.h for the rules and the types.
+//
+// This file has three parts:
+//   1. Pure helpers (classify_unit, object_kind, loot_class, the angles):
+//      what a unit is, from the fields d2_units.cpp read for it.
+//   2. The choices (choose_target, choose_loot, choose_flick): which unit
+//      a press, a held ZR + D-pad or a flick of the circle pad goes to.
+//      They only look at the lists they are given, so tests/aim drives
+//      them with made-up units.
+//   3. AutoTarget, the state machine Controls runs every poll: it picks a
+//      target, puts the cursor on it, waits until the game itself shows the
+//      unit under the cursor (the "confirm" step), and only then lets the
+//      button go down. It never calls game code: its only output is the
+//      cursor position and the two mouse buttons (AimResult).
 #include "game/auto_target.h"
 
 #include <cmath>
@@ -10,6 +23,10 @@ namespace game {
 
 using namespace aim_bits;
 
+// What a unit counts as for the auto-target (enemy, NPC, corpse, object,
+// item or nothing), from the game's own flags. Checked in this order so
+// that a pet, a dying monster or anything the game's hit test would never
+// pick is never chosen.
 AimKind classify_unit(const AimUnit &unit, bool in_town)
 {
     if (unit.type == 4) {
@@ -84,6 +101,7 @@ AimObject object_kind(const AimUnit &unit)
     }
 }
 
+// Plain A's order among objects: lower comes first.
 int object_rank(AimObject kind)
 {
     switch (kind) {
@@ -99,6 +117,7 @@ int object_rank(AimObject kind)
     return 99;
 }
 
+// Sorts an item on the ground into the classes the loot commands use.
 AimLoot loot_class(const AimUnit &item)
 {
     if (item.quality == kQualityUnique || item.quality == kQualitySet)
@@ -112,6 +131,7 @@ AimLoot loot_class(const AimUnit &item)
     return AimLoot::kOther;
 }
 
+// The order items are picked up in: lower comes first.
 int loot_rank(AimLoot loot, bool gold_first)
 {
     if (gold_first && loot == AimLoot::kGold)
@@ -125,6 +145,7 @@ int loot_rank(AimLoot loot, bool gold_first)
     return 3;
 }
 
+// Which classes each ZR + D-pad command picks up.
 bool loot_command_takes(AimLootCommand command, AimLoot loot)
 {
     switch (command) {
@@ -136,6 +157,8 @@ bool loot_command_takes(AimLootCommand command, AimLoot loot)
     return false;
 }
 
+// The angle between the stick's direction and the way to a unit: the
+// "cone" test is angle <= cone_degrees.
 float aim_angle_degrees(float dir_x, float dir_y, int from_x, int from_y, int to_x, int to_y)
 {
     const float vx = (float)(to_x - from_x), vy = (float)(to_y - from_y);
@@ -176,6 +199,7 @@ bool kind_fits(AimKind kind, AimMode mode, bool in_town, bool button_a)
     return kind == AimKind::kEnemy || kind == AimKind::kNpc;
 }
 
+// Whether a unit's key (aim_key) is in a skip list.
 bool contains(const std::vector<uint64_t> &keys, uint64_t key)
 {
     for (uint64_t x : keys)
@@ -428,6 +452,8 @@ AimFlicks::Flick AimFlicks::update(float x, float y, uint64_t now_ms, const AimS
     return f;
 }
 
+// Whether the hero is in the middle of an attack or a cast: used to tell
+// "still fighting" from "stuck" when deciding to give a target up.
 bool AutoTarget::attacking_mode(uint32_t hero_mode)
 {
     // The player's unit modes 7 to 16 (attack 1 and 2, block, cast, throw,
@@ -435,6 +461,8 @@ bool AutoTarget::attacking_mode(uint32_t hero_mode)
     return (hero_mode >= 7 && hero_mode <= 16) || hero_mode == 18;
 }
 
+// One "aim:" line for game.log, at most six a second (a held button polls
+// every frame; the log must not flood the SD card).
 void AutoTarget::say(uint64_t now_ms, const char *fmt, ...)
 {
     if (!log_)
@@ -462,6 +490,9 @@ void AutoTarget::say(uint64_t now_ms, const char *fmt, ...)
     log_(line);
 }
 
+// Remembers a unit not to choose again until until_ms (it was tried and
+// the game never showed it, or the hero could not reach it). The list is
+// short and old entries are pruned as new ones come.
 void AutoTarget::skip(uint64_t key, uint64_t until_ms)
 {
     for (size_t i = 0; i < skips_.size();)
@@ -473,6 +504,7 @@ void AutoTarget::skip(uint64_t key, uint64_t until_ms)
         skips_.push_back({key, until_ms});
 }
 
+// Lets the current target go (why: for the log; counter: the stat to count).
 void AutoTarget::drop(const char *why, uint32_t &counter, uint64_t now_ms)
 {
     say(now_ms, "target %u dropped: %s", target_id_, why);
@@ -484,6 +516,8 @@ void AutoTarget::drop(const char *why, uint32_t &counter, uint64_t now_ms)
     scan_now_ = true;                      // the next one is looked for at once
 }
 
+// The cursor has just been put on a new target: from the next frame on,
+// wait for the game to report that unit under the cursor.
 void AutoTarget::start_confirming(uint64_t now_ms)
 {
     phase_ = Phase::kConfirming;
@@ -493,6 +527,8 @@ void AutoTarget::start_confirming(uint64_t now_ms)
     progress_ms_ = now_ms;
 }
 
+// Reads one unit again by its type and id: monsters and NPCs from the
+// monster table, objects and items from the ground tables.
 bool AutoTarget::look_up(AimWorld &world, uint32_t type, uint32_t id, AimUnit &out)
 {
     return type == 1 ? world.unit(id, out) : world.ground_unit(type, id, out);
