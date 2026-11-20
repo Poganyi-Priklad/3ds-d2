@@ -45,6 +45,7 @@
 #include "game/port_options.h"
 #include "game/game_exe.h"
 #include "game/osk.h"
+#include "game/pad_game.h"
 #include "game/profiler.h"
 #include "game/second_screen.h"
 #include "game/settings_file.h"
@@ -1680,6 +1681,7 @@ bool g_aim_in_settings = false, g_aim_newest_in_settings = false;
 
 void load_settings()
 {
+    rt::logf("%s", game::screen_auto_build_note());   // a personal build's defaults (screen_auto.h)
     FILE *f = std::fopen(kSettings, "r");
     if (!f) {
         g_ss.set_map_help(true);   // the first start: the controls (HELP), until the corner button is tapped
@@ -2196,6 +2198,7 @@ void apply_pad(game::Pad pad, uint64_t now, bool last)
         else
             g_wait_release = false;
     }
+    game::pad_poll(g_ss, gs, now);
     g_ss.update(pad, gs, g_controls.cursor_x(), g_controls.cursor_y(), now);
     if (g_ss.take_aim_changed()) {
         // AIM > SETTINGS: the auto-target runs with the new value at once.

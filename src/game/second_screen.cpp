@@ -113,6 +113,7 @@ const char *bottom_tab_name(BottomTab t)
     case BottomTab::Zoom: return "zoom";
     case BottomTab::Info: return "info";
     case BottomTab::Aim: return "aim";
+    case BottomTab::Pad: return "pad";
     case BottomTab::Panel: return "panel";
     }
     return "map";
@@ -120,7 +121,7 @@ const char *bottom_tab_name(BottomTab t)
 
 bool bottom_tab_from_name(const char *s, BottomTab &t)
 {
-    for (BottomTab c : {BottomTab::Map, BottomTab::Keys, BottomTab::Zoom, BottomTab::Info, BottomTab::Aim})
+    for (BottomTab c : {BottomTab::Map, BottomTab::Keys, BottomTab::Zoom, BottomTab::Info, BottomTab::Aim, BottomTab::Pad})
         if (std::strcmp(s, bottom_tab_name(c)) == 0) {
             t = c;
             return true;
@@ -148,6 +149,8 @@ void SecondScreen::set_frame(int width, int height)
 
 BottomTab SecondScreen::shown_tab() const
 {
+    if (tab_ == BottomTab::Pad)
+        return BottomTab::Pad;   // no panel takes the screen from PAD
     if (panel_sides_ && !panel_dismissed_)
         return BottomTab::Panel;
     return tab_;
@@ -166,6 +169,7 @@ BottomView::Kind SecondScreen::shown_kind() const
     case BottomTab::Panel: return BottomView::kViewport;
     case BottomTab::Info: return BottomView::kInfo;
     case BottomTab::Aim: return BottomView::kAim;
+    case BottomTab::Pad: return BottomView::kPad;
     }
     return BottomView::kInfo;
 }
@@ -176,9 +180,15 @@ void SecondScreen::step_tab(int dir)
 {
     if (shown_kind() == BottomView::kKeyboard)
         return;
-    const int n = panel_sides_ ? 6 : 5;
-    const BottomTab to = (BottomTab)(((int)shown_tab() + dir + n) % n);
+    const int n = panel_sides_ ? 7 : 6;
+    const BottomTab from = shown_tab(), to = (BottomTab)(((int)from + dir + n) % n);
+    if (from == BottomTab::Pad)
+        story_.reset();
+    if (to == BottomTab::Pad && from != BottomTab::Pad)
+        pad_back_ = from == BottomTab::Panel ? tab_ : from;
     if (to == BottomTab::Panel) {
+        if (tab_ == BottomTab::Pad)
+            set_tab(pad_back_);
         panel_dismissed_ = false;
     } else {
         panel_dismissed_ = panel_sides_ != 0;
@@ -191,6 +201,8 @@ void SecondScreen::show_map()
 {
     if (shown_kind() == BottomView::kKeyboard)
         return;
+    if (tab_ == BottomTab::Pad)
+        story_.reset();
     panel_dismissed_ = panel_sides_ != 0;
     set_tab(BottomTab::Map);
     set_map_help(false);
@@ -363,7 +375,7 @@ void SecondScreen::follow_cursor()
 
 void SecondScreen::tab_tapped(int x, Pad &pad)
 {
-    const int n = panel_sides_ ? 6 : 5;
+    const int n = panel_sides_ ? 7 : 6;
     const int i = clampi(x * n / kW, 0, n - 1);
     const BottomTab hit = (BottomTab)i;
     if (hit == shown_tab()) {
@@ -383,7 +395,10 @@ void SecondScreen::tab_tapped(int x, Pad &pad)
         dirty_ = true;
         return;
     }
-    if (hit == BottomTab::Panel) {
+    if (hit == BottomTab::Pad) {
+        pad_back_ = shown_tab() == BottomTab::Panel ? tab_ : shown_tab();
+        set_tab(BottomTab::Pad);
+    } else if (hit == BottomTab::Panel) {
         panel_dismissed_ = false;
     } else {
         panel_dismissed_ = panel_sides_ != 0;
@@ -417,7 +432,9 @@ void SecondScreen::update(Pad &pad, const GameState &gs, int cursor_x, int curso
             t0_ = moved_at_ = now_ms;
             moved_ = 0;
             long_fired_ = scrolled_ = false;
-            if (pad.touch_y < kBarH) {
+            if (kind == BottomView::kPad) {
+                pad_touch(pad, true, now_ms);
+            } else if (pad.touch_y < kBarH) {
                 grip_ = Grip::Bar;
                 tab_tapped(pad.touch_x, pad);
             } else if (kind == BottomView::kKeys) {
@@ -479,6 +496,8 @@ void SecondScreen::update(Pad &pad, const GameState &gs, int cursor_x, int curso
             if (d > moved_)
                 moved_ = d;
         }
+        if (kind == BottomView::kPad && !down)
+            pad_touch(pad, false, now_ms);
         if (grip_ == Grip::Scroll && pad.touching) {
             const int top = clampi(aim_faq_grab_top_ - (pad.touch_y - ty0_) / kAimFaqRowH, 0,
                                    std::max(0, kAimFaqLines - kAimFaqRows));
@@ -596,10 +615,105 @@ void SecondScreen::update(Pad &pad, const GameState &gs, int cursor_x, int curso
     if (alt_latched_ && gs_.in_game && kind != BottomView::kKeyboard && kind != BottomView::kVideo)
         pad.keys[nk++] = VK_MENU;
     if (grip_ == Grip::Bar || grip_ == Grip::Key || grip_ == Grip::Point || grip_ == Grip::MapButton ||
-        grip_ == Grip::Scroll)
+        grip_ == Grip::Scroll || grip_ == Grip::PadClose || grip_ == Grip::PadUp || grip_ == Grip::PadDown ||
+        grip_ == Grip::PadThumb || grip_ == Grip::PadTrack)
         pad.touching = false;
     if (grip_ != Grip::Point)
         follow_cursor();
+}
+
+void SecondScreen::close_pad()
+{
+    if (tab_ != BottomTab::Pad)
+        return;
+    story_.reset();
+    // Back to the tab shown before, with any open panel offered on the bar
+    // (not switched to: it was opened while PAD showed).
+    set_tab(pad_back_);
+    panel_dismissed_ = panel_sides_ != 0;
+    dirty_ = true;
+}
+
+void SecondScreen::set_pad_game(const PadGame &g, uint64_t now_ms)
+{
+    story_.step(g, now_ms);
+}
+
+void SecondScreen::set_pad_art(const PadArt *art)
+{
+    pad_art_ = art;
+    if (art)
+        story_.set_measure([art](const std::u16string &s) { return art->text_font.width(s); });
+    else
+        story_.set_measure([](const std::u16string &s) { return 8 * (int)s.size(); });
+    dirty_ = true;
+}
+
+// PAD's touch: its close button and the story's scroll column; anything
+// else is the touchpad's (Grip::Pad). `down`: the finger just touched.
+void SecondScreen::pad_touch(Pad &pad, bool down, uint64_t now_ms)
+{
+    namespace L = pad_layout;
+    const int x = pad.touch_x, y = pad.touch_y;
+    const bool story = story_.mode() == PadFrame::kStory;
+    auto in_close = [](int tx, int ty) {
+        return tx >= L::kCloseX && tx < L::kCloseX + L::kCloseSize && ty >= L::kCloseY && ty < L::kCloseY + L::kCloseSize;
+    };
+    const bool in_column = x >= L::kScrollX && x < L::kScrollX + L::kScrollW && y >= L::kBoxY0 && y < L::kBoxY1;
+    constexpr uint64_t kFirstRepeatMs = 350, kRepeatMs = 110, kPageRepeatMs = 300;
+    if (down) {
+        int ty = 0, th = 0;
+        L::thumb(story_.top(), story_.total(), ty, th);
+        if (in_close(x, y)) {
+            grip_ = Grip::PadClose;
+            pad_close_inside_ = true;
+        } else if (story && in_column && y < L::kTrackY0) {
+            grip_ = Grip::PadUp;
+            story_.scroll_by(-1);
+            pad_repeat_at_ = now_ms + kFirstRepeatMs;
+        } else if (story && in_column && y >= L::kTrackY1) {
+            grip_ = Grip::PadDown;
+            story_.scroll_by(1);
+            pad_repeat_at_ = now_ms + kFirstRepeatMs;
+        } else if (story && in_column && y >= ty && y < ty + th) {
+            grip_ = Grip::PadThumb;
+            pad_grab_dy_ = y - ty;
+        } else if (story && in_column) {
+            grip_ = Grip::PadTrack;   // a page toward the finger, again while held
+            story_.scroll_by(y < ty ? -L::kRows : L::kRows);
+            pad_repeat_at_ = now_ms + kFirstRepeatMs;
+        } else {
+            grip_ = Grip::Pad;
+        }
+        dirty_ = true;
+        return;
+    }
+    if (!pad.touching) {
+        if (grip_ == Grip::PadClose && pad_close_inside_)
+            close_pad();   // let go on the button: closed (slid off it first: nothing)
+        if (grip_ >= Grip::PadClose)
+            dirty_ = true;
+        return;
+    }
+    if (grip_ == Grip::PadClose) {
+        pad_close_inside_ = in_close(x, y);
+        dirty_ = true;
+    } else if ((grip_ == Grip::PadUp || grip_ == Grip::PadDown) && now_ms >= pad_repeat_at_) {
+        story_.scroll_by(grip_ == Grip::PadUp ? -1 : 1);
+        pad_repeat_at_ = now_ms + kRepeatMs;
+    } else if (grip_ == Grip::PadTrack && now_ms >= pad_repeat_at_) {
+        int ty = 0, th = 0;
+        L::thumb(story_.top(), story_.total(), ty, th);
+        if (y < ty || y >= ty + th)
+            story_.scroll_by(y < ty ? -L::kRows : L::kRows);
+        pad_repeat_at_ = now_ms + kPageRepeatMs;
+    } else if (grip_ == Grip::PadThumb) {
+        int ty = 0, th = 0;
+        L::thumb(story_.top(), story_.total(), ty, th);
+        const int span = (L::kTrackY1 - L::kTrackY0) - th;
+        if (span > 0)
+            story_.scroll_to_fraction((float)(y - pad_grab_dy_ - L::kTrackY0) / (float)span);
+    }
 }
 
 void SecondScreen::set_stats(std::vector<BottomView::Line> lines)
@@ -777,6 +891,17 @@ bool SecondScreen::stage(BottomView &v, uint64_t now_ms)
         redraw |= video_s_ != last_video_s_;
         last_video_s_ = video_s_;
         break;
+    case BottomView::kPad: {
+        story_.frame(v.pad);
+        const bool touching = prev_touch_;
+        v.pad.close_pressed = grip_ == Grip::PadClose && touching && pad_close_inside_;
+        v.pad.up_pressed = grip_ == Grip::PadUp && touching;
+        v.pad.down_pressed = grip_ == Grip::PadDown && touching;
+        v.pad_art = pad_art_;
+        redraw |= v.pad != last_pad_;
+        last_pad_ = v.pad;
+        break;
+    }
     case BottomView::kNone:
         break;
     }
@@ -830,8 +955,8 @@ const uint16_t kKeyBg = rgb(58, 52, 44), kKeyLit = rgb(199, 179, 119), kHint = r
 
 void draw_bar(const Canvas &cv, const BottomView &v)
 {
-    static const char *const kNames[] = {"MAP", "KEYS", "ZOOM", "INFO", "AIM", "PANEL"};
-    const int n = v.panel_tab ? 6 : 5, w = kW / n;
+    static const char *const kNames[] = {"MAP", "KEYS", "ZOOM", "INFO", "AIM", "PAD", "PANEL"};
+    const int n = v.panel_tab ? 7 : 6, w = kW / n;
     cv.fill(0, 0, kW, kBarH, kBarBg);
     for (int i = 0; i < n; i++) {
         const bool on = (int)v.tab == i;
@@ -895,6 +1020,40 @@ void draw_bottom(uint16_t *fb, const BottomView &v, const uint8_t *frame, int fw
                       (unsigned)(len / 60), (unsigned)(len % 60));
         cv.centred(0, y + 66, kW, time, kBarText);
         cv.centred(0, y + 90, kW, "A, B, Start or a tap: skip", kHint);
+        return;
+    }
+    if (v.kind == BottomView::kPad) {
+        // The whole screen, no tabs: the game's art, or plainly without it.
+        if (v.pad_art) {
+            pad_draw(fb, *v.pad_art, v.pad);
+            return;
+        }
+        namespace L = pad_layout;
+        cv.fill(0, 0, kW, SecondScreen::kHeight, kBg);
+        cv.fill(0, 0, kW, 2, kGold);
+        cv.fill(0, SecondScreen::kHeight - 2, kW, 2, kGold);
+        cv.fill(0, 0, 2, SecondScreen::kHeight, kGold);
+        cv.fill(kW - 2, 0, 2, SecondScreen::kHeight, kGold);
+        // Latin letters only in this font: others show as '?'.
+        auto ascii = [](const std::u16string &s) {
+            std::string o;
+            for (char16_t c : s)
+                o += c >= 0x20 && c < 0x7F ? (char)c : '?';
+            return o;
+        };
+        const uint16_t name_c = v.pad.colour == PadFrame::kRed ? rgb(232, 80, 64)
+                                : v.pad.colour == PadFrame::kWhite ? rgb(232, 228, 220) : kGold;
+        cv.centred(0, L::kNameY + 4, kW, v.pad.mode == PadFrame::kIdle ? "PAD" : ascii(v.pad.name).c_str(),
+                   v.pad.mode == PadFrame::kIdle ? kHint : name_c);
+        for (size_t i = 0; i < v.pad.lines.size(); i++)
+            cv.text(L::kBoxX0 + 4, L::kBoxY0 + 4 + (int)i * L::kLineH, ascii(v.pad.lines[i]).c_str(), rgb(232, 228, 220));
+        if (v.pad.mode == PadFrame::kEnemy && v.pad.hp_max > 0) {
+            const int w = (int)((int64_t)(L::kHpX1 - L::kHpX0) * std::max<int32_t>(0, std::min<int32_t>(v.pad.hp, v.pad.hp_max)) / v.pad.hp_max);
+            cv.fill(L::kHpX0, L::kHpY0, L::kHpX1 - L::kHpX0, L::kHpY1 - L::kHpY0 + 1, rgb(48, 4, 4));
+            cv.fill(L::kHpX0, L::kHpY0, w, L::kHpY1 - L::kHpY0 + 1, rgb(196, 16, 12));
+        }
+        cv.fill(L::kCloseX, L::kCloseY, L::kCloseSize, L::kCloseSize, v.pad.close_pressed ? kGold : kKeyBg);
+        cv.centred(L::kCloseX, L::kCloseY + 12, L::kCloseSize, "X", v.pad.close_pressed ? kBg : kBarText);
         return;
     }
     draw_bar(cv, v);

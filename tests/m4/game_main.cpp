@@ -54,6 +54,7 @@
 #include "game/aot_spike.h"
 #include "game/d2_native.h"
 #include "game/d2_state.h"
+#include "game/pad_game.h"
 #include "game/second_screen.h"
 #include "game/sprite_trace.h"
 #include "game/storm_reads.h"
@@ -643,6 +644,7 @@ int main(int argc, char **argv)
         game::Pad pad = autoplay.step(now, controls, shot, gs);
         if (shot)
             shot_now = true;
+        game::pad_poll(second_screen, gs, now);
         second_screen.update(pad, gs, controls.cursor_x(), controls.cursor_y(), now);
         if (second_screen.take_aim_changed()) {
             controls.set_auto_target(second_screen.aim_settings(), &game::game_aim_world());

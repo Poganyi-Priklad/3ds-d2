@@ -14,6 +14,7 @@
 #   scripts/docker.sh test settings      settings.txt rewritten keeping the lines the port doesn't own
 #   scripts/docker.sh test aim           the auto-target on A and B: cone, rules, stickiness, timers, settings
 #   scripts/docker.sh test menu          menu navigation: a flick moves the cursor a cell, round the edges, between windows
+#   scripts/docker.sh test padwin [<game-dir>]   the PAD window: its story, tab and art; with the MPQs, the art from them
 #   scripts/docker.sh test d2d [<game-dir>]   d2d's work tree and its harness's modules; with Game.exe, its cases vs our natives
 #   scripts/docker.sh test aot <game-dir> [<save-dir>]   every AOT-compiled function checked against Box86 on the lane's
 #                                        town walk and fight, and with an Act I save (dist/save/BeforeCh1End/save) Act II
@@ -23,6 +24,8 @@
 #                                             <game-dir> (or D2_GAME_DIR) its icon, banner and tune are the game's
 #   scripts/docker.sh package-cia --slim <game-dir>   ... with your 1.14d files inside (no video/music/speech)
 #   scripts/docker.sh package-cia --full <game-dir>   ... with every MPQ inside
+#     D2_DEFAULT_NO_PANEL_AUTO=1 scripts/docker.sh package-cia ...   a personal build: the SCREEN page's panels,
+#       npcmenu and panelside switches start off (until settings.txt's screenauto= says otherwise)
 #     D2_REPORT_DSN=<Sentry DSN> scripts/docker.sh package-cia ...   crash reports offered to that project (issue #26);
 #                                             default packaging/cia/report.dsn (scripts/sentry-setup.sh), empty: none
 #   scripts/docker.sh game-3dsx          the game app as a .3dsx for Azahar (scripts/run-game-azahar.sh)
@@ -224,6 +227,12 @@ test)
     settings) run_in "$HOSTTEST_IMAGE" make -C tests/settings run ;;   # settings.txt rewritten keeping the lines the port doesn't own
     aim)  run_in "$HOSTTEST_IMAGE" make -C tests/aim run ;;   # the auto-target's rules against made-up units
     menu) run_in "$HOSTTEST_IMAGE" make -C tests/menu run ;;  # menu navigation against made-up windows
+    padwin)  # [<game-dir>]: the PAD window (story, tab, art decoders, SCREEN defaults); with the game
+             # directory (mounted read-only), its art built from those MPQs as well
+        if [ -n "${2:-}" ]; then
+            RUN_EXTRA=(-v "$(host_path "$(cd "$2" && pwd)"):/game:ro" -e PADWIN_GAME=/game)
+        fi
+        run_in "$HOSTTEST_IMAGE" make -C tests/padwin run ;;
     d2d)  # [<game-dir>]: d2d's work tree, prepared and patched (issue #106); with the game directory
           # (mounted read-only), d2d's emulator-made cases against our natives (issue #108)
         if [ -n "${2:-}" ]; then
@@ -507,8 +516,13 @@ package-cia)   # [<game-dir> | --slim|--full <game-dir>]: the game app (+ the us
     # The build ID covers the AOT step: the recompiler's and its arguments'
     # hash, never Game.exe's.
     [ ${#AOT_MAKE[@]} -gt 0 ] && bid="$bid-aot$(cat "$ROOT"/tools/aot/recompile/Cargo.lock "$ROOT"/tools/aot/recompile/src/*.rs "$ROOT"/src/game/native_sites_table.h "$(aot_args_file)" | sha256sum | cut -c1-6)"
+    [ "${D2_DEFAULT_NO_PANEL_AUTO:-0}" != 0 ] && bid="$bid-nopanelauto"   # a personal build: its own name and ID
     report_vars=(BUILD_ID="$bid" D2_VERSION="$version" ${AOT_MAKE[@]+"${AOT_MAKE[@]}"} ${ctr_cpu[@]+"${ctr_cpu[@]}"})
     [ -n "${D2_REPORT_DSN+x}" ] && report_vars+=(D2_REPORT_DSN="$D2_REPORT_DSN")
+    # A personal build: PANEL's three automatic switches off until
+    # settings.txt says otherwise (src/game/screen_auto.h). Repo builds: all on.
+    report_vars+=(D2_DEFAULT_NO_PANEL_AUTO="${D2_DEFAULT_NO_PANEL_AUTO:-0}")
+    [ "${D2_DEFAULT_NO_PANEL_AUTO:-0}" != 0 ] && echo "docker.sh: D2_DEFAULT_NO_PANEL_AUTO=$D2_DEFAULT_NO_PANEL_AUTO: panels, npcmenu and panelside start off"
     # The AOT parts first, AOT_JOBS at a time (2; issue #135: at -j8 cc1 ran out of Docker's 8 GB).
     [ ${#AOT_MAKE[@]} -gt 0 ] && run_in "$TOOLCHAIN_IMAGE" make -s -j"${AOT_JOBS:-2}" -C tests/cpu/ctr "${report_vars[@]}" aot-objs
     run_in "$TOOLCHAIN_IMAGE" make -s -j8 -C tests/cpu/ctr "${report_vars[@]}" "../../../$ctr_out/3ds-d2-game-cia.elf" "../../../$ctr_out/tls.bin"

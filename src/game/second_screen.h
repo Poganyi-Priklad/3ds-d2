@@ -19,6 +19,12 @@
 //          buttons under them, SETTINGS (a row per setting: its value,
 //          "-" and "+" to change it at once) and FAQ (how it works, in
 //          aim_faq.h; dragged to scroll)
+//   PAD    a window of the game's own art (pad_art.h, pad_story.h) over the
+//          whole screen, the tabs hidden: the name of the NPC talked to or
+//          the unit under the cursor, the NPC's story as it is told (and
+//          scrolled), an enemy's life. The touch screen stays the touchpad
+//          but for its close button (back to the tabs) and the story's
+//          scroll column. No panel switches the screen meanwhile.
 //   PANEL  offered while a panel is open (inventory, stash, shop, character,
 //          skills...), and shown by itself when one opens: the panel's half
 //          of the frame at 1:1 (D2's panels are 320 pixels wide at 640x480),
@@ -47,6 +53,8 @@
 #include "game/controls.h"
 #include "game/d2_state.h"
 #include "game/osk.h"
+#include "game/pad_art.h"
+#include "game/pad_story.h"
 #include "game/port_options.h"
 #include "game/profiler.h"
 #include "game/screen_auto.h"
@@ -57,14 +65,14 @@
 
 namespace game {
 
-enum class BottomTab : uint8_t { Map, Keys, Zoom, Info, Aim, Panel };
+enum class BottomTab : uint8_t { Map, Keys, Zoom, Info, Aim, Pad, Panel };
 
 const char *bottom_tab_name(BottomTab t);              // "map", "keys"... (settings files)
 bool bottom_tab_from_name(const char *s, BottomTab &t);
 
 // Everything the bottom screen draws, taken on the game thread.
 struct BottomView {
-    enum Kind : uint8_t { kNone, kMap, kHelp, kKeys, kViewport, kInfo, kKeyboard, kVideo, kAim };
+    enum Kind : uint8_t { kNone, kMap, kHelp, kKeys, kViewport, kInfo, kKeyboard, kVideo, kAim, kPad };
     struct Line {
         std::string text;
         uint16_t color;   // RGB565
@@ -105,6 +113,9 @@ struct BottomView {
     // kVideo: its title, and where it is (whole seconds).
     std::string video_title;
     uint32_t video_s = 0, video_length_s = 0;
+    // kPad: what the window shows, and its art (nullptr: drawn plain).
+    PadFrame pad;
+    const PadArt *pad_art = nullptr;
 };
 
 // A cinematic's title for the player, from its file name
@@ -209,6 +220,15 @@ public:
     void switch_map_size();
     // Controls::take_bottom_request's answer, applied.
     void request(Controls::Bottom r);
+    // PAD: shown (its tab chosen), and closed by its button (back to the
+    // tab shown before).
+    bool pad_shown() const { return shown_kind() == BottomView::kPad; }
+    void close_pad();
+    // While PAD shows, before update: the game's state for the window
+    // (pad_game.h), and the art once loaded.
+    void set_pad_game(const PadGame &g, uint64_t now_ms);
+    void set_pad_art(const PadArt *art);
+    const PadStory &pad_story() const { return story_; }
 
     // Each poll, before Controls::update, with the touch already given to
     // the keyboard if it is open: takes the touches it acts on out of `pad`
@@ -243,6 +263,7 @@ private:
     BottomTab shown_tab() const;
     void tab_tapped(int x, Pad &pad);
     void panel_geometry();
+    void pad_touch(Pad &pad, bool down, uint64_t now_ms);
     void follow_cursor();
 
     BottomTab tab_ = BottomTab::Map;
@@ -267,6 +288,15 @@ private:
     int aim_faq_grab_top_ = 0;        // ...when the finger went down
     const Osk *osk_ = nullptr;
 
+    // PAD.
+    BottomTab pad_back_ = BottomTab::Map;   // the tab to go back to
+    PadStory story_;
+    const PadArt *pad_art_ = nullptr;
+    PadFrame last_pad_;
+    bool pad_close_inside_ = false;   // the finger on the close button is still on it
+    int pad_grab_dy_ = 0;             // the thumb's grip: the finger below its top
+    uint64_t pad_repeat_at_ = 0;      // an arrow or the track held: its next step
+
     // The cinematic playing.
     bool video_ = false;
     std::string video_file_, video_title_;
@@ -285,7 +315,7 @@ private:
     int vx_ = 0, vy_ = 0, scroll_h_ = 0;
 
     // Touch.
-    enum class Grip : uint8_t { None, Bar, Pad, Key, Point, MapButton, Scroll };
+    enum class Grip : uint8_t { None, Bar, Pad, Key, Point, MapButton, Scroll, PadClose, PadUp, PadDown, PadThumb, PadTrack };
     Grip grip_ = Grip::None;
     int key_ = -1;                    // KEYS: the button held
     static constexpr int kKeyOptions = 99;   // INFO's OPTIONS button: under the OPTIONS rows' 100, over the checklist's
