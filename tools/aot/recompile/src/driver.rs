@@ -815,12 +815,29 @@ fn write_out<'a>(
             if sites.is_empty() {
                 continue;
             }
+            // The entry too: sig_<va> calls reent_<va> there, so the code is
+            // there once (AOT_REENT_COPY=1: twice, sig_ its own).
+            let by_reent = !std::env::var("AOT_REENT_COPY").is_ok_and(|v| v == "1");
+            let mut all = sites.clone();
+            if by_reent && !sites.iter().any(|e| e.0 == f.entry) {
+                all.push((f.entry, 0));
+            }
             em.ana = Some(ana);
-            match em.reent_fn(va, &sites) {
+            match em.reent_fn(va, &all) {
                 Ok(t) => {
                     resume_texts.entry(va).or_default().push(t);
                     reents.extend(sites.iter().map(|&(x, sp)| (x, va, sp)));
                     reent_fns += 1;
+                    if by_reent {
+                        let w = em.sig_by_reent(va);
+                        if let Some(v) = texts.get_mut(&va) {
+                            for (m, text) in v.iter_mut() {
+                                if *m == "sig" {
+                                    *text = w.clone();
+                                }
+                            }
+                        }
+                    }
                 }
                 Err(Refused(e)) => *reent_why.entry(e.split(" at ").next().unwrap_or("").to_string()).or_default() += sites.len(),
             }
@@ -847,7 +864,11 @@ fn write_out<'a>(
             (va, calls_tails(&f).filter_map(|(_, t)| t.direct()).filter(|t| cset.contains(t)).collect())
         })
         .collect();
-    let size_of = |va: u32| -> usize { texts[&va].iter().map(|(_, t)| t.len()).sum() };
+    // With the entries written beside it (resume_, reent_): sig_ may be only a
+    // call to reent_ (issue #138: counted alone, one part had 105 MB of C).
+    let size_of = |va: u32| -> usize {
+        texts[&va].iter().map(|(_, t)| t.len()).sum::<usize>() + resume_texts.get(&va).map_or(0, |v| v.iter().map(|t| t.len()).sum())
+    };
     let cut = |order: &[u32]| -> (usize, Vec<Vec<u32>>) {
         let mut parts: Vec<Vec<u32>> = Vec::new();
         let mut cur: Vec<u32> = Vec::new();

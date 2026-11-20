@@ -366,6 +366,33 @@ impl<'p, 'a> Emitter<'p, 'a> {
         Ok(out.join("\n"))
     }
 
+    /// sig_<va> for a function with a return sites' entry (issue #138): its
+    /// code is reent_<va>'s, entered at the entry, so it is there once.
+    pub fn sig_by_reent(&self, va: u32) -> String {
+        let sig = &self.sigs[&va];
+        let fill: Vec<String> =
+            (0..8u8).map(|r| if r == ESP || sig.ins.contains(&r) { REGS[r as usize].to_string() } else { "0u".to_string() }).collect();
+        let outs = &sig.outs;
+        let back = match outs.len() {
+            0 => "return;".to_string(),
+            1 => format!("return t.r[{}];", outs[0]),
+            2 => format!("return (uint64_t)t.r[{}] | (uint64_t)t.r[{}] << 32;", outs[0], outs[1]),
+            _ => {
+                let s: Vec<String> = outs.iter().enumerate().map(|(k, &r)| format!("o[{}] = t.r[{}];", k, r)).collect();
+                s.join(" ") + " return;"
+            }
+        };
+        format!(
+            "AOT_FN void {}(AotRegs *R, uint32_t at);\n{}\n{{\n    AotRegs t = {{{{{}}}}};\n    {}(&t, 0x{:08x}u);\n    {}\n}}",
+            reent_name(va),
+            self.proto(va),
+            fill.join(", "),
+            reent_name(va),
+            va,
+            back
+        )
+    }
+
     pub fn proto(&self, va: u32) -> String {
         if self.mode == "ctx" {
             return format!("AOT_FN void {}(AotRegs *R)", self.name(va));
