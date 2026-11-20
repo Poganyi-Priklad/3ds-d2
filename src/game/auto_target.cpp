@@ -234,9 +234,16 @@ float floor_distance(int x0, int y0, int x1, int y1)
 // the floor; the lane picked gold up from 4 pixels above its spot) and a
 // warp's (its spot is the warp's corner nearest the top of the screen: the
 // stairs or the opening are drawn below it, so below it is tried first).
-void target_heights(uint32_t type, int height_px, int out[4])
+// A corpse lies on the floor: the game shows it under the cursor only from
+// about 4 to 16 pixels below its feet point (a hover scan on the lane; above
+// the feet it shows nothing, or what stands there), so it is aimed below.
+void target_heights(uint32_t type, bool corpse, int height_px, int out[4])
 {
-    if (type == 5) {
+    if (corpse) {
+        const int body[4] = {-8, -12, -4, -16};
+        for (int i = 0; i < 4; i++)
+            out[i] = body[i];
+    } else if (type == 5) {
         const int warp[4] = {-16, -28, -4, -40};
         for (int i = 0; i < 4; i++)
             out[i] = warp[i];
@@ -255,8 +262,12 @@ void target_heights(uint32_t type, int height_px, int out[4])
     }
 }
 
-// How high above its feet a unit is seen by point_visible (its body).
-int visible_height(uint32_t type, int height_px) { return type == 1 ? height_px : type == 2 ? 16 : type == 5 ? -16 : 4; }
+// How high above its feet a unit is seen by point_visible (its body; a
+// corpse's below its feet, where the game shows it).
+int visible_height(uint32_t type, int height_px, bool corpse = false)
+{
+    return corpse ? -8 : type == 1 ? height_px : type == 2 ? 16 : type == 5 ? -16 : 4;
+}
 
 }  // namespace
 
@@ -282,7 +293,7 @@ int choose_target(const std::vector<AimUnit> &units, const std::vector<AimKind> 
             continue;
         if (kind == AimKind::kItem && !settings.loot)
             continue;
-        if (!point_visible(view, u.feet_x, u.feet_y - visible_height(u.type, settings.height_px)))
+        if (!point_visible(view, u.feet_x, u.feet_y - visible_height(u.type, settings.height_px, kind == AimKind::kCorpse)))
             continue;
         const float angle = aim_angle_degrees(dir_x, dir_y, view.hero_x, view.hero_y, u.feet_x, u.feet_y);
         const bool in_cone = angle <= (float)profile.cone_degrees && u.distance <= (float)profile.range_subtiles;
@@ -468,6 +479,15 @@ AimFlicks::Flick AimFlicks::update(float x, float y, uint64_t now_ms, const AimS
         armed_ = rising_ = false;
     }
     return f;
+}
+
+// Whether the hero is casting: a skill went off (a corpse it was aimed at
+// is used up).
+bool AutoTarget::casting_mode(uint32_t hero_mode)
+{
+    // 10 a cast (SC), 13 to 16 the skill animations (S1-S4); not 7-9, 11, 12
+    // (attacks, block, throw, kick).
+    return hero_mode == 10 || (hero_mode >= 13 && hero_mode <= 16);
 }
 
 // Whether the hero is in the middle of an attack or a cast: used to tell
@@ -754,7 +774,8 @@ AimResult AutoTarget::update(const AimPoll &poll, AimWorld &world)
                 target_id_ = 0;   // not what this button aims at (A on enemies, B on corpses): a new choice
                 phase_ = Phase::kIdle;
             } else if (!point_visible(view, current.feet_x,
-                                      current.feet_y - visible_height(target_type_, settings_.height_px))) {
+                                      current.feet_y - visible_height(target_type_, settings_.height_px,
+                                                                      target_kind_ == AimKind::kCorpse))) {
                 drop("off the screen", stats_.dropped_screen, now);
             }
         }
@@ -805,8 +826,25 @@ AimResult AutoTarget::update(const AimPoll &poll, AimWorld &world)
     if (phase_ == Phase::kIdle)
         start_confirming(now);   // a remembered target: the cursor back on it, then the press
 
+    // A skill cast on a corpse uses it up (Find Item, Raise Skeleton,
+    // Corpse Explosion...): once the hero goes into a cast while B is on a
+    // corpse (and was not already casting when it was chosen), that corpse
+    // is left alone from then on and the next one taken. The game keeps no
+    // sign of it in the unit that could be read instead: on the lane only
+    // its random seed changed, and the hover stopped showing it.
+    if (target_kind_ == AimKind::kCorpse) {
+        if (!casting_mode(view.hero_mode)) {
+            corpse_ready_id_ = target_id_;
+        } else if (corpse_ready_id_ == target_id_) {
+            skip(aim_key(target_type_, target_id_), now + kUsedCorpseSkipMs);
+            drop("a skill was cast on it", stats_.dropped_dead, now);
+            result.hold_plain_buttons = true;
+            return result;
+        }
+    }
+
     int heights[4];
-    target_heights(target_type_, settings_.height_px, heights);
+    target_heights(target_type_, target_kind_ == AimKind::kCorpse, settings_.height_px, heights);
     const bool on_target = view.hover_on && view.hover_type == target_type_ && view.hover_id == target_id_;
     // An NPC, an object and an item are clicked; an enemy is held.
     const bool clicked = target_kind_ == AimKind::kNpc || target_kind_ == AimKind::kObject ||

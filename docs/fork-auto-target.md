@@ -34,7 +34,10 @@ this page is the short version and a map of the code.
 6. Hold **ZR + D-pad** to pick up the items around you one after another:
    **up** unique, set items and runes; **right** gold; **down** everything.
 7. When the right-hand skill works on corpses (Raise Skeleton, Corpse
-   Explosion, Revive, Find Item...), B aims at corpses by itself.
+   Explosion, Revive, Find Item...), B aims at corpses by itself. The
+   cursor goes just below the corpse's feet, where the game shows a corpse
+   under the cursor; once the skill has been cast on it, that corpse is
+   skipped for 10 minutes and B goes on to the next one.
 
 An enemy right next to the hero always comes first, so a ranged attack never
 ignores the monster hitting you. The mercenary, summons and other players are

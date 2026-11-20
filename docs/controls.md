@@ -78,7 +78,7 @@ In the game world (no panel open, nothing on the cursor), A and B aim before the
 - Nothing in the cone: a plain click where the cursor is, as before.
 - With no enemy in the cone, plain A takes, in this order: an object (shrines, then chests and other containers, waypoints and portals, doors, levers and level warps (cave entrances, stairs, passages to the next area), barrels; used ones are skipped, exploding barrels never), an NPC (Cain, Tyrael), the nearest item on the ground (gold first with `aim_gold_first=1`). Held, A goes from one to the next. B aims only at enemies and NPCs. An enemy coming into the cone takes over from an NPC, an object or an item.
 - In town it aims at the NPCs (to talk to) first, then (A) objects and items. The mercenary, summons and other players are never aimed at.
-- When the right button's skill is cast on a corpse (Raise Skeleton, Corpse Explosion, Revive, Find Item...), B aims at corpses by itself.
+- When the right button's skill is cast on a corpse (Raise Skeleton, Corpse Explosion, Revive, Find Item...), B aims at corpses by itself. The cursor goes just below the corpse's feet (where the game shows a corpse under the cursor); once the skill has been cast on a corpse (the hero's casting mode), it is skipped for 10 minutes and B goes on to the next one.
 - **ZR + D-pad, held**, picks up the items within A's range all around the hero, one after another: up unique and set items, then runes; right gold; down everything (unique and set, runes, gold, the rest; gold first with `aim_gold_first=1`). An item the hero stands next to and still doesn't pick up (no room in the inventory) is skipped for 30 s. With nothing to pick up, nothing is clicked.
 - L (stand still), R+A/B and ZR+A/B are as before: no aiming.
 

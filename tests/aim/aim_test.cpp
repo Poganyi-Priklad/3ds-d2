@@ -53,7 +53,8 @@ struct FakeWorld : AimWorld {
     std::vector<AimUnit> list;
     int scans = 0;
     // Where the cursor was at the previous frame: what the game shows under
-    // it now (each unit's body from 0 to 60 pixels above its feet, 24 wide).
+    // it now (each unit's body from 0 to 60 pixels above its feet, 24 wide;
+    // a corpse from 4 to 16 below them and a warp from 8 to 40 below, as on the lane).
     bool hover_follows_cursor = true;
     int last_cursor_x = -1000, last_cursor_y = -1000;
     FakeWorld()
@@ -71,8 +72,9 @@ struct FakeWorld : AimWorld {
             out.hover_on = false;
             for (const AimUnit &u : list)
                 if (std::abs(last_cursor_x - u.feet_x) <= 12 &&
-                    (u.type == 5 ? last_cursor_y >= u.feet_y + 8 && last_cursor_y <= u.feet_y + 40
-                                 : last_cursor_y <= u.feet_y && last_cursor_y >= u.feet_y - 60) &&
+                    (u.type == 5   ? last_cursor_y >= u.feet_y + 8 && last_cursor_y <= u.feet_y + 40
+                     : u.mode == 12 ? last_cursor_y >= u.feet_y + 4 && last_cursor_y <= u.feet_y + 16   // a corpse
+                                    : last_cursor_y <= u.feet_y && last_cursor_y >= u.feet_y - 60) &&
                     (u.type != 1 || u.mode != 0)) {
                     out.hover_on = true;
                     out.hover_type = u.type;
@@ -1355,6 +1357,46 @@ static void test_b_on_corpse_skill()
     CHECK(!r.aiming && aim3.target_id() == 0);
 }
 
+// A corpse skill (Find Item) with B held: the cursor goes below the
+// corpse's feet, where the game shows it, and B is held there; once the hero
+// casts, that corpse is used up: dropped, the next one taken, and not chosen
+// again. A cast already going on when a corpse is chosen doesn't count.
+static void test_corpse_skill_cast()
+{
+    FakeWorld w;
+    double dx, dy;
+    right_of_hero(5, dx, dy);
+    w.add(2, dx, dy, AimKind::kCorpse);
+    right_of_hero(8, dx, dy);
+    w.add(3, dx, dy + 0.4, AimKind::kCorpse);
+    w.v.right_skill = 142;
+    w.v.right_skill_on_corpses = true;
+    w.v.hero_mode = 10;   // still casting at another corpse
+    AutoTarget aim;
+    AimResult r = poll(aim, w, 0, false, true, false, true, kAimRight);
+    CHECK(aim.target_id() == 2);
+    AimUnit c;
+    CHECK(w.ground_unit(1, 2, c) && r.cursor_y > c.feet_y);   // below its feet
+    uint64_t t = 0;
+    for (int i = 0; i < 6; i++)
+        r = poll(aim, w, t += 40, false, true, false, false, kAimRight);
+    CHECK(aim.target_id() == 2 && r.right);   // the old cast is not this corpse's
+    w.v.hero_mode = 2;                        // walking to it
+    r = poll(aim, w, t += 40, false, true, false, false, kAimRight);
+    CHECK(aim.target_id() == 2 && r.right);
+    w.v.hero_mode = 10;                       // the skill goes off on it
+    r = poll(aim, w, t += 40, false, true, false, false, kAimRight);
+    CHECK(aim.target_id() == 0 && !r.right);
+    w.v.hero_mode = 1;
+    for (int i = 0; i < 4; i++)
+        r = poll(aim, w, t += 40, false, true, false, false, kAimRight);
+    CHECK(aim.target_id() == 3);
+    // A new press later: the used corpse is still left alone.
+    poll(aim, w, t += 40, false, false, false, false, kAimRight);
+    poll(aim, w, t += 3000, false, true, false, true, kAimRight);
+    CHECK(aim.target_id() == 3);
+}
+
 // ---- a level's warps (cave entrances, stairs) on plain A ----
 static void test_warps()
 {
@@ -1551,6 +1593,7 @@ int main()
     test_loot_command();
     test_item_no_room();
     test_b_on_corpse_skill();
+    test_corpse_skill_cast();
     test_controls_loot();
     test_warps();
     test_panel_area();
@@ -1558,6 +1601,6 @@ int main()
         std::printf("aim: %d check(s) failed\n", g_fail);
         return 1;
     }
-    std::printf("aim: all checks passed (31 tests)\n");
+    std::printf("aim: all checks passed (32 tests)\n");
     return 0;
 }

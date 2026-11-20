@@ -335,6 +335,7 @@ private:
     void skip(uint64_t key, uint64_t until_ms);
     void say(uint64_t now_ms, const char *fmt, ...) __attribute__((format(printf, 3, 4)));
     static bool attacking_mode(uint32_t hero_mode);
+    static bool casting_mode(uint32_t hero_mode);   // a cast or a skill's animation
 
     AimSettings settings_;
     AimStats stats_;
@@ -379,6 +380,9 @@ private:
     // An item stood by but not picked up for this long: no room for it.
     static constexpr float kItemReachSubtiles = 2.5f;
     static constexpr int kNoRoomSkipMs = 30000;
+    // A corpse a skill was cast on: used up, left alone this long.
+    static constexpr int kUsedCorpseSkipMs = 600000;
+    uint32_t corpse_ready_id_ = 0;   // the corpse target the hero was seen not casting at
     // Scratch for scans (kept to avoid allocating each time).
     std::vector<AimUnit> units_;
     std::vector<AimKind> kinds_;
