@@ -186,6 +186,40 @@ fn main() {
         l.sort();
         let have: HashSet<u32> = extra.iter().chain(roots.iter()).copied().collect();
         extra.extend(l.into_iter().filter(|v| !have.contains(v)));
+        // And the code pointers in their immediates (issue #138: callbacks the
+        // game stores, 501650 into [841da0], 463d80 into ebx, not on d2d's
+        // list): an address in .text on 16 bytes, after an int3 or nop pad,
+        // and in no listed function's code.
+        let prog = Program::new(&img, starts.clone(), natives(), callouts);
+        let mut have: HashSet<u32> = extra.iter().chain(roots.iter()).copied().collect();
+        let mut inside: HashSet<u32> = HashSet::new();
+        let mut found: BTreeSet<u32> = BTreeSet::new();
+        for &va in &extra {
+            let f = prog.func(va);
+            inside.extend(f.insns.keys().filter(|&&a| a != va).copied());
+            for i in f.insns.values() {
+                if i.mnemonic.starts_with("call") || i.mnemonic.starts_with('j') {
+                    continue;
+                }
+                for op in &i.ops {
+                    if let cs::OpKind::Imm(v) = op.kind {
+                        let t = v as u32;
+                        if t >= img.text_lo && t < img.text_hi && t % 16 == 0 && !have.contains(&t) {
+                            let pad = img.mem[(t - 1 - img.base) as usize];
+                            if pad == 0xcc || pad == 0x90 {
+                                found.insert(t);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        found.retain(|t| !inside.contains(t));
+        println!("aot: {} code pointers in the listed functions' immediates added", found.len());
+        for t in found {
+            have.insert(t);
+            extra.push(t);
+        }
     }
     let intr = intrinsics();
     let nat = natives();
