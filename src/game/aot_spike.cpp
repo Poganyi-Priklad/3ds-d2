@@ -3,6 +3,7 @@
 // user's Game.exe), linked only when the build is given them: their tables
 // are weak here.
 #include "game/aot_spike.h"
+#include "game/native_sites.h"
 #include "game/aot_rt.h"
 
 #include "runtime/bridge.h"
@@ -1293,6 +1294,10 @@ void set_aot_mode(Cpu &c, AotMode mode)
         rt::logf("aot: changed since compiled: %s", names.substr(p, q - p).c_str());
         p = q + (q < names.size());
     }
+    const std::string unapplied = compiled_sites_not_applied();
+    if (!unapplied.empty())
+        rt::logf("aot: natives' sites compiled but not applied, their functions changed since compiled: %s",
+                 unapplied.c_str());
 }
 
 std::vector<std::string> aot_lines()
@@ -1624,6 +1629,7 @@ void aot_call_stale(uint32_t va, AotRegs *t)
 void aot_exit(uint32_t target, uint32_t eax, uint32_t ecx, uint32_t edx, uint32_t ebx, uint32_t esp, uint32_t ebp,
               uint32_t esi, uint32_t edi)
 {
+    target = game::aot_site_target(target);
     game::ExitJump *x = game::g_exit_jump;
     if (!x || game::g_no_exit) {   // compiled code entered other than by a trap (AotFunc::may_exit not honoured): a bug of ours
         rt::logf("aot: an exit to %08x with no trap to go back to", target);
@@ -1673,6 +1679,7 @@ void aot_exit(uint32_t target, uint32_t eax, uint32_t ecx, uint32_t edx, uint32_
 void aot_call_out(uint32_t x, AotRegs *t, uint32_t pops)
 {
     using namespace game;
+    x = aot_site_target(x);   // a native's call at one of its sites (native_sites_table.h)
     uint32_t *r = t->r;
     const uint32_t esp0 = r[4], ra = aot_ld32(aot_mem, esp0), want = esp0 + 4u + pops;
     const uint32_t keep[4] = {r[3], r[5], r[6], r[7]};

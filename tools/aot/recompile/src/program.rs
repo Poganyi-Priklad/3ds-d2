@@ -293,7 +293,8 @@ impl<'a> Program<'a> {
             }
             Tgt::Import(slot) => {
                 return Summary {
-                    reads: bit(ESP),
+                    // A native (issue #138) reads what it likes of the registers.
+                    reads: if self.img.native_slots.contains(&slot) { ALL } else { bit(ESP) },
                     preserved: CALLEE_SAVED,
                     pops: self.img.import_pops.get(&slot).copied().flatten(),
                     known: true,

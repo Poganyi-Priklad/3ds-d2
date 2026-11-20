@@ -173,7 +173,9 @@ impl Func {
                 if m == "call" {
                     let op = ops[0];
                     let mm = op.mem();
-                    let t = if op.is_imm() {
+                    let t = if op.is_imm() && img.native_slots.contains(&imm_addr(op.imm())) {
+                        Tgt::Import(imm_addr(op.imm()))   // a native's site (issue #138): its call as an import's
+                    } else if op.is_imm() {
                         Tgt::Direct(imm_addr(op.imm()))
                     } else if op.is_mem()
                         && mm.base == 0

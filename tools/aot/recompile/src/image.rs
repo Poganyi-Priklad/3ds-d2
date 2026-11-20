@@ -5,7 +5,7 @@ use crate::cs::{Cs, Insn};
 use crate::omap::OMap;
 use crate::Refused;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -20,6 +20,13 @@ pub struct Image {
     /// Where our natives hand a call back to the game's code (issue #138):
     /// d2_native.cpp's resume_original(c, 0x..., ...), in order.
     pub resumes: Vec<u32>,
+    /// The natives' entries as the code compiled has them (issue #138,
+    /// src/game/native_sites_table.h): imports named "native!<name>" at
+    /// 0xfee00000 + 16 k, which a native's sites call.
+    pub native_slots: HashSet<u32>,
+    /// The natives' sites applied to `mem`: (group, va, bytes), and why a group wasn't.
+    pub sites: Vec<(String, u32, usize)>,
+    pub sites_skipped: Vec<String>,
     cs: Cs,
     cache: RefCell<HashMap<u32, Rc<Insn>>>,
 }
@@ -163,8 +170,10 @@ impl Image {
                 d += 20;
             }
         }
-        let import_pops = import_pops(&imports, src_root);
+        let mut import_pops = import_pops(&imports, src_root);
         let resumes = resumes(&src_root.join("src/game/d2_native.cpp"));
+        let (native_slots, sites, sites_skipped) =
+            apply_sites(&mut mem, base, &mut imports, &mut import_pops, &src_root.join("src/game/native_sites_table.h"));
         Ok(Image {
             base,
             mem,
@@ -173,6 +182,9 @@ impl Image {
             imports,
             import_pops,
             resumes,
+            native_slots,
+            sites,
+            sites_skipped,
             cs: Cs::new(),
             cache: RefCell::new(HashMap::new()),
         })
@@ -367,4 +379,118 @@ fn resumes(path: &Path) -> Vec<u32> {
         }
     }
     out
+}
+
+/// The arguments of a table row's macro: `NAME(a, "b c", d)` -> [a, b c, d].
+fn row_args(line: &str, name: &str) -> Option<Vec<String>> {
+    let rest = line.strip_prefix(name)?.strip_prefix('(')?;
+    let rest = rest.trim_end().strip_suffix(')')?;
+    let mut out = Vec::new();
+    let (mut cur, mut quoted) = (String::new(), false);
+    for ch in rest.chars() {
+        match ch {
+            '"' => quoted = !quoted,
+            ',' if !quoted => {
+                out.push(cur.trim().to_string());
+                cur.clear();
+            }
+            _ => cur.push(ch),
+        }
+    }
+    out.push(cur.trim().to_string());
+    Some(out)
+}
+
+fn hex_bytes(s: &str) -> Option<Vec<u8>> {
+    s.split_whitespace().map(|b| u8::from_str_radix(b, 16).ok().filter(|_| b.len() == 2)).collect()
+}
+
+/// native_sites_table.h's sites, of the groups marked compiled, written into
+/// `mem` as the install code writes them, each native's rel32 to its slot
+/// (an import of its own, popping its stack dwords). A group whose game
+/// bytes differ anywhere is left out whole, as the install code leaves it.
+fn apply_sites(
+    mem: &mut [u8],
+    base: u32,
+    imports: &mut OMap<u32, (String, String)>,
+    import_pops: &mut HashMap<u32, Option<i64>>,
+    table: &Path,
+) -> (HashSet<u32>, Vec<(String, u32, usize)>, Vec<String>) {
+    const SLOT_BASE: u32 = 0xfee0_0000;
+    const SLOT_STEP: u32 = 16;
+    let text = std::fs::read_to_string(table).unwrap_or_default();
+    let mut natives: Vec<(String, i64)> = Vec::new();
+    let mut compiled: HashSet<String> = HashSet::new();
+    let mut rows: Vec<(String, u32, String, String)> = Vec::new();
+    for line in text.lines().map(str::trim) {
+        if let Some(a) = row_args(line, "NATIVE") {
+            natives.push((a[0].clone(), a[1].parse().expect("NATIVE's stack dwords")));
+        } else if let Some(a) = row_args(line, "GROUP") {
+            if a[1] == "1" {
+                compiled.insert(a[0].clone());
+            }
+        } else if let Some(a) = row_args(line, "SITE") {
+            let va = crate::driver::parse_hex(&a[1]).expect("SITE's address");
+            rows.push((a[0].clone(), va, a[2].clone(), a[3].clone()));
+        }
+    }
+    let mut slots = HashSet::new();
+    for (k, (name, n)) in natives.iter().enumerate() {
+        let slot = SLOT_BASE + SLOT_STEP * k as u32;
+        imports.insert(slot, ("native".to_string(), name.clone()));
+        import_pops.insert(slot, Some(4 * n));
+        slots.insert(slot);
+    }
+    let build = |va: u32, w: &str| -> Option<Vec<u8>> {
+        let mut out = Vec::new();
+        let mut rest = w;
+        while !rest.trim_start().is_empty() {
+            rest = rest.trim_start();
+            if let Some(r) = rest.strip_prefix('{') {
+                let end = r.find('}')?;
+                let name = &r[..end];
+                let target = if let Some(a) = name.strip_prefix('=') {
+                    crate::driver::parse_hex(a).ok()?
+                } else {
+                    SLOT_BASE + SLOT_STEP * natives.iter().position(|(n, _)| n == name)? as u32
+                };
+                let rel = target.wrapping_sub(va + out.len() as u32 + 4);
+                out.extend_from_slice(&rel.to_le_bytes());
+                rest = &r[end + 1..];
+            } else {
+                let b = rest.get(..2)?;
+                out.push(u8::from_str_radix(b, 16).ok()?);
+                rest = &rest[2..];
+            }
+        }
+        Some(out)
+    };
+    let mut done = Vec::new();
+    let mut skipped = Vec::new();
+    let mut groups: Vec<String> = Vec::new();
+    for (g, ..) in &rows {
+        if compiled.contains(g) && !groups.contains(g) {
+            groups.push(g.clone());
+        }
+    }
+    'group: for g in groups {
+        let mut writes = Vec::new();
+        for (rg, va, game, written) in rows.iter().filter(|r| r.0 == g) {
+            let o = va.wrapping_sub(base) as usize;
+            let (Some(want), Some(bytes)) = (hex_bytes(game), build(*va, written)) else {
+                skipped.push(format!("{}: the row at {:08x} doesn't parse", rg, va));
+                continue 'group;
+            };
+            if bytes.len() != want.len() || mem.get(o..o + want.len()) != Some(&want[..]) {
+                skipped.push(format!("{}: other bytes at {:08x}", rg, va));
+                continue 'group;
+            }
+            writes.push((*va, o, bytes));
+        }
+        for (va, o, bytes) in writes {
+            mem[o..o + bytes.len()].copy_from_slice(&bytes);
+            done.push((g.clone(), va, bytes.len()));
+        }
+    }
+    (slots, done, skipped)
 }

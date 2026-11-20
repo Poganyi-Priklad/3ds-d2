@@ -163,6 +163,12 @@ fn main() {
         eprintln!("recompile: {}", e);
         std::process::exit(1);
     });
+    println!(
+        "aot: {} natives' sites compiled as changed ({} bytes){}",
+        img.sites.len(),
+        img.sites.iter().map(|s| s.2).sum::<usize>(),
+        if img.sites_skipped.is_empty() { String::new() } else { format!("; not: {}", img.sites_skipped.join(", ")) }
+    );
     let starts = driver::load_starts(&a.functions);
     if a.census {
         census::census(&img, &starts, &a.functions, &a.out, &a.hot, &modes(&a.modes), callouts);

@@ -43,6 +43,7 @@
 // (issue #33). install_sprite_frames gives them an allocator of their own
 // (sprite_frames.h) with finer classes, in blocks of the same shared pool.
 #include "game/d2_memory.h"
+#include "game/native_sites.h"
 #include "game/sprite_governor.h"
 
 #include "runtime/bridge.h"
@@ -786,10 +787,8 @@ bool install_sprite_frames(d2rt::Cpu &c)
         c.write(va, j, n);
         c.invalidate_code(va, n);
     };
-    uint8_t call[5] = {0xe8};
-    put_rel32(call + 1, kFramesCall + 5, alloc);
-    c.write(kFramesCall, call, sizeof call);
-    c.invalidate_code(kFramesCall, sizeof call);
+    if (!apply_sites(c, "sprite_frames_alloc", {{"SpriteFramesAlloc", alloc}}))   // call alloc (native_sites_table.h)
+        return false;
     jump(kPoolFree, sizeof kPoolFreeOrig, kFreeStub);
     jump(kPoolDestroy, sizeof kPoolDestroyOrig, kDestroyStub);
     jump(kCountFrames, sizeof kCountFramesOrig, kCountFramesStub);
