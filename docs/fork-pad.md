@@ -94,6 +94,20 @@ it or calls game code.
 | `src/game/screen_auto.h`, `second_screen.cpp` | The SCREEN page's switches and the `screenauto=` setting |
 | `src/game/screen_auto.h`, `tests/cpu/ctr/Makefile`, `scripts/docker.sh` | The `D2_DEFAULT_NO_PANEL_AUTO` defaults and how the build passes them on |
 
+## Ideas for the future
+
+Decided while building menu navigation and PAD, not built (Nov 2026):
+
+- No rule yet for which of an NPC's talk and a hovered item a bottom-screen
+  mirror would show first: the game never shows a talk and the inventory
+  together.
+- A hovered item's description on the bottom screen is postponed: the game
+  builds it on the stack each frame and keeps no copy.
+- A belt opened without the inventory gets no window, as before. A "belt"
+  button on a future bottom-screen story screen, to pick a potion there, is
+  only an idea.
+- The PANELs are left as they are (they are awkward at any resolution).
+
 ## Tests
 
 ```
