@@ -155,7 +155,7 @@ The windows: the inventory with its equipment slots, a shop, the stash, the Hora
 
 PANEL appears when a panel opens and is shown by itself. Choosing another tab hides it until another panel opens. When the panels close, the bottom screen goes back to your tab.
 
-**What switches by itself, and how to stop it**: INFO → **options** → **screen switches** (the OPTIONS page's second page, SCREEN; **engine options** goes back). A box per automatic switch, all on by default, applied at once and saved in settings.txt as `screenauto=` (`-name` for one that is off, `src/game/screen_auto.h`). A personal build made with `D2_DEFAULT_NO_PANEL_AUTO=1` (for example `D2_DEFAULT_NO_PANEL_AUTO=1 scripts/docker.sh package-cia ...`) starts with `panels`, `npcmenu` and `panelside` off and `keyboard` and `video` on, when settings.txt has no `screenauto=` line yet; a saved line always wins (game.log's first lines say which defaults the build has):
+**What switches by itself, and how to stop it**: INFO → **options** → **screen switches** (the OPTIONS page's second page, SCREEN; **engine options** goes back; the short version is in [fork-pad.md](fork-pad.md#bottom-screen-switches-screen-page)). A box per automatic switch, all on by default, applied at once and saved in settings.txt as `screenauto=` (`-name` for one that is off, `src/game/screen_auto.h`). A personal build made with `D2_DEFAULT_NO_PANEL_AUTO=1` (for example `D2_DEFAULT_NO_PANEL_AUTO=1 scripts/docker.sh package-cia ...`) starts with `panels`, `npcmenu` and `panelside` off and `keyboard` and `video` on, when settings.txt has no `screenauto=` line yet; a saved line always wins (game.log's first lines say which defaults the build has):
 
 | Row | settings.txt | On (the default) | Off |
 | --- | --- | --- | --- |
