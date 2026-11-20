@@ -1,7 +1,8 @@
 // The bottom screen's automatic switches: what changes the bottom screen by
 // itself, without a tap or a button. Each one is a box on the OPTIONS
 // page's second page (SCREEN, second_screen.h), on by default (the way the
-// port has always behaved), and saved in settings.txt as "screenauto="
+// port has always behaved; a personal build may start three of them off:
+// D2_DEFAULT_NO_PANEL_AUTO below), and saved in settings.txt as "screenauto="
 // (screen_auto_names), "-name" for one that is off.
 #ifndef D2_GAME_SCREEN_AUTO_H
 #define D2_GAME_SCREEN_AUTO_H
@@ -56,15 +57,35 @@ constexpr bool screen_autos_fit(int i = 0)
 }
 static_assert(screen_autos_fit(), "a SCREEN label or note is longer than the 36 characters the page shows");
 
-inline constexpr uint32_t kScreenAutoDefault = kAutoPanel | kAutoNpcMenu | kAutoPanelSide | kAutoKeyboard | kAutoVideo;
-inline constexpr uint32_t kScreenAutoAll = kScreenAutoDefault;
+inline constexpr uint32_t kScreenAutoAll = kAutoPanel | kAutoNpcMenu | kAutoPanelSide | kAutoKeyboard | kAutoVideo;
+// The switches on until settings.txt says otherwise: all of them, unless
+// the build is made with D2_DEFAULT_NO_PANEL_AUTO=1 (a personal build:
+// docker.sh package-cia passes it on), where the three that show PANEL
+// by themselves (panels, npcmenu, panelside) start off and the keyboard and
+// the cinematic panel stay on. A "screenauto=" line overrides either way.
+#ifndef D2_DEFAULT_NO_PANEL_AUTO
+#define D2_DEFAULT_NO_PANEL_AUTO 0
+#endif
+inline constexpr uint32_t kScreenAutoPanelBits = kAutoPanel | kAutoNpcMenu | kAutoPanelSide;
+inline constexpr uint32_t screen_auto_default(bool no_panel_auto)
+{
+    return no_panel_auto ? kScreenAutoAll & ~kScreenAutoPanelBits : kScreenAutoAll;
+}
+inline constexpr uint32_t kScreenAutoDefault = screen_auto_default(D2_DEFAULT_NO_PANEL_AUTO != 0);
+// The build's defaults in words, for the log at start-up (and to tell a
+// personal build's ELF by its strings).
+inline const char *screen_auto_build_note()
+{
+    return D2_DEFAULT_NO_PANEL_AUTO ? "screenauto defaults: panels, npcmenu, panelside off (D2_DEFAULT_NO_PANEL_AUTO=1)"
+                                    : "screenauto defaults: all on";
+}
 
 // settings.txt's "screenauto=": the switches, "-name" for one that is off
-// ("panels,-npcmenu"). One not named keeps its default; unknown names are
-// left out.
-inline uint32_t screen_auto_bits(const char *names)
+// ("panels,-npcmenu"). One not named keeps its default (`defaults`: the
+// build's); unknown names are left out.
+inline uint32_t screen_auto_bits(const char *names, uint32_t defaults = kScreenAutoDefault)
 {
-    uint32_t bits = kScreenAutoDefault;
+    uint32_t bits = defaults;
     while (*names) {
         const size_t n = std::strcspn(names, ", \r\n");
         const bool off = n > 0 && *names == '-';

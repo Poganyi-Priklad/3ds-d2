@@ -73,6 +73,13 @@ CXXFLAGS += -MMD -MP
 CFLAGS += -DPROF_COUNTERS
 CXXFLAGS += -DPROF_COUNTERS
 LDFLAGS := -specs=3dsx.specs -g $(ARCH) -L$(CTRULIB)/lib -Wl,-Map,$(OUT)/cpu-lane.map
+# A personal build's bottom-screen defaults (src/game/screen_auto.h):
+# D2_DEFAULT_NO_PANEL_AUTO=1 (docker.sh package-cia passes it on from the
+# environment) starts the three switches that show PANEL by themselves off.
+# defaults.cfg changes with it, so the objects are rebuilt when it does.
+D2_DEFAULT_NO_PANEL_AUTO ?= 0
+CXXFLAGS += -DD2_DEFAULT_NO_PANEL_AUTO=$(D2_DEFAULT_NO_PANEL_AUTO)
+DEFAULTS_CFG = $(OUT)/game/defaults.cfg
 
 CORE := dynarec/dynarec.c dynarec/dynablock.c dynarec/dynarec_arm.c dynarec/dynarec_arm_functions.c \
         dynarec/dynarec_arm_jmpnext.c custommem.c tools/rbtree.c emu/x87emu_private.c emu/x86primop.c \
@@ -184,12 +191,12 @@ $(OUT)/m3.3dsx: $(OUT)/m3.elf $(OUT)/m3.smdh
 	3dsxtool $< $@ --smdh=$(OUT)/m3.smdh
 	@echo "built $@"
 
-$(OUT)/game/%.o: $(ROOT)/src/game/%.cpp $(wildcard $(ROOT)/src/game/*.h) $(wildcard $(ROOT)/src/runtime/rt_*.h)
+$(OUT)/game/%.o: $(ROOT)/src/game/%.cpp $(wildcard $(ROOT)/src/game/*.h) $(wildcard $(ROOT)/src/runtime/rt_*.h) $(DEFAULTS_CFG)
 	@mkdir -p $(@D); $(CXX) $(CXXFLAGS) -O2 -I$(ROOT)/src -c $< -o $@
 # The Bink decoder: hot integer code, built for speed like the blitters.
 $(OUT)/game/bink/%.o: $(ROOT)/src/game/bink/%.cpp $(wildcard $(ROOT)/src/game/bink/*.h)
 	@mkdir -p $(@D); $(CXX) $(CXXFLAGS) -O2 -I$(ROOT)/src -c $< -o $@
-$(OUT)/game/ctr_game.o: $(ROOT)/src/app/ctr_game.cpp $(ROOT)/src/app/ctr_writer.h $(wildcard $(ROOT)/src/game/*.h) $(wildcard $(ROOT)/src/runtime/rt_*.h)
+$(OUT)/game/ctr_game.o: $(ROOT)/src/app/ctr_game.cpp $(ROOT)/src/app/ctr_writer.h $(wildcard $(ROOT)/src/game/*.h) $(wildcard $(ROOT)/src/runtime/rt_*.h) $(DEFAULTS_CFG)
 	@mkdir -p $(@D); $(CXX) $(CXXFLAGS) -O2 -I$(ROOT)/src -c $< -o $@
 # The CIA flavour: the same objects, with the app built for the New 3DS's
 # extended memory mode and its RomFS (scripts/package-cia.sh packs it).
@@ -221,9 +228,11 @@ ifeq ($(origin D2_REPORT_DSN),undefined)
 D2_REPORT_DSN := $(shell tr -d '\r\n' < $(ROOT)/packaging/cia/report.dsn 2>/dev/null)
 endif
 REPORT_CFG := $(BUILD_ID) $(D2_VERSION) $(D2_REPORT_DSN)
+$(OUT)/game/defaults.cfg: FORCE
+	@mkdir -p $(@D); echo '$(D2_DEFAULT_NO_PANEL_AUTO)' | cmp -s - $@ || echo '$(D2_DEFAULT_NO_PANEL_AUTO)' > $@
 $(OUT)/game/report.cfg: FORCE
 	@mkdir -p $(@D); echo '$(REPORT_CFG)' | cmp -s - $@ || echo '$(REPORT_CFG)' > $@
-$(OUT)/game/ctr_report.o: $(ROOT)/src/app/ctr_report.cpp $(wildcard $(ROOT)/src/game/*.h) $(OUT)/game/report.cfg
+$(OUT)/game/ctr_report.o: $(ROOT)/src/app/ctr_report.cpp $(wildcard $(ROOT)/src/game/*.h) $(OUT)/game/report.cfg $(DEFAULTS_CFG)
 	@mkdir -p $(@D); $(CXX) $(CXXFLAGS) -Os -I$(ROOT)/src -I$(PORTLIBS)/include -DD2_BUILD_ID='"$(BUILD_ID)"' \
 	    -DD2_VERSION='"$(D2_VERSION)"' -DD2_REPORT_DSN='"$(D2_REPORT_DSN)"' -c $< -o $@
 $(OUT)/game/report.o: $(ROOT)/src/game/report.cpp $(ROOT)/src/game/report.h
@@ -249,7 +258,7 @@ $(OUT)/tls.bin: $(OUT)/tls/tls_module.elf $(ROOT)/src/tls/pack_module.py
 	python3 -I $(ROOT)/src/tls/pack_module.py $< $@
 $(OUT)/romfs-3dsx/tls.bin: $(OUT)/tls.bin
 	@mkdir -p $(@D); cp $< $@
-$(OUT)/game/ctr_game_cia.o: $(ROOT)/src/app/ctr_game.cpp $(wildcard $(ROOT)/src/game/*.h) $(wildcard $(ROOT)/src/runtime/rt_*.h)
+$(OUT)/game/ctr_game_cia.o: $(ROOT)/src/app/ctr_game.cpp $(wildcard $(ROOT)/src/game/*.h) $(wildcard $(ROOT)/src/runtime/rt_*.h) $(DEFAULTS_CFG)
 	@mkdir -p $(@D); $(CXX) $(CXXFLAGS) -O2 -DD2_CIA -I$(ROOT)/src -c $< -o $@
 $(OUT)/3ds-d2-game-cia.elf: $(filter-out $(OUT)/game/ctr_game.o,$(GAMEOBJ)) $(OUT)/game/ctr_game_cia.o $(OUT)/aot.cfg
 	$(CXX) $(LDFLAGS) $(GAMELDFLAGS) $(filter %.o,$^) -L$(PORTLIBS)/lib -ljpeg -lz -lctru -lm -o $@
