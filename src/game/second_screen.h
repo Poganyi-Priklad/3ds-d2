@@ -315,7 +315,7 @@ private:
     int vx_ = 0, vy_ = 0, scroll_h_ = 0;
 
     // Touch.
-    enum class Grip : uint8_t { None, Bar, Pad, Key, Point, MapButton, Scroll, PadClose, PadUp, PadDown, PadThumb, PadTrack };
+    enum class Grip : uint8_t { None, Bar, Pad, Key, Point, MapButton, Scroll, PadClose, PadUp, PadDown, PadThumb };
     Grip grip_ = Grip::None;
     int key_ = -1;                    // KEYS: the button held
     static constexpr int kKeyOptions = 99;   // INFO's OPTIONS button: under the OPTIONS rows' 100, over the checklist's

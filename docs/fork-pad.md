@@ -30,7 +30,7 @@ closes, a shop or trade opens, or a fight takes over.
 | Touch | Action |
 | --- | --- |
 | Anywhere in the window | The touchpad, as on the other touchpad tabs (drag moves the cursor, a short tap clicks) |
-| The scroll column's arrows, bar, or a drag on the bar | Scrolls the text; while you have not scrolled up, it follows the newest line |
+| The scroll column's arrows, bar, or a drag on the bar | Scrolls the text; while you have not scrolled up, it follows the newest line. A tap on the track (above or below the bar) puts the bar's middle under the finger, and the same touch then drags it on. The column takes touches from the text box's right edge to the screen's (x 296 to 319), a little wider than the drawn 12-pixel column |
 | The close button (bottom right) | Back to the tab shown before |
 
 While PAD is shown, panels, NPC menus and the panel side never switch the

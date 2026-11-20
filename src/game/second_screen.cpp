@@ -616,7 +616,7 @@ void SecondScreen::update(Pad &pad, const GameState &gs, int cursor_x, int curso
         pad.keys[nk++] = VK_MENU;
     if (grip_ == Grip::Bar || grip_ == Grip::Key || grip_ == Grip::Point || grip_ == Grip::MapButton ||
         grip_ == Grip::Scroll || grip_ == Grip::PadClose || grip_ == Grip::PadUp || grip_ == Grip::PadDown ||
-        grip_ == Grip::PadThumb || grip_ == Grip::PadTrack)
+        grip_ == Grip::PadThumb)
         pad.touching = false;
     if (grip_ != Grip::Point)
         follow_cursor();
@@ -659,8 +659,11 @@ void SecondScreen::pad_touch(Pad &pad, bool down, uint64_t now_ms)
     auto in_close = [](int tx, int ty) {
         return tx >= L::kCloseX && tx < L::kCloseX + L::kCloseSize && ty >= L::kCloseY && ty < L::kCloseY + L::kCloseSize;
     };
-    const bool in_column = x >= L::kScrollX && x < L::kScrollX + L::kScrollW && y >= L::kBoxY0 && y < L::kBoxY1;
-    constexpr uint64_t kFirstRepeatMs = 350, kRepeatMs = 110, kPageRepeatMs = 300;
+    // The scroll column's touch area: the drawn 12-pixel column and the empty
+    // strips beside it, from the story box's right edge to the screen's, so
+    // a finger a little off the narrow bar still takes it.
+    const bool in_column = x >= L::kBoxX1 && x < kWidth && y >= L::kBoxY0 && y < L::kBoxY1;
+    constexpr uint64_t kFirstRepeatMs = 350, kRepeatMs = 110;
     if (down) {
         int ty = 0, th = 0;
         L::thumb(story_.top(), story_.total(), ty, th);
@@ -676,12 +679,16 @@ void SecondScreen::pad_touch(Pad &pad, bool down, uint64_t now_ms)
             story_.scroll_by(1);
             pad_repeat_at_ = now_ms + kFirstRepeatMs;
         } else if (story && in_column && y >= ty && y < ty + th) {
-            grip_ = Grip::PadThumb;
+            grip_ = Grip::PadThumb;   // the thumb follows the finger, held where it was taken
             pad_grab_dy_ = y - ty;
         } else if (story && in_column) {
-            grip_ = Grip::PadTrack;   // a page toward the finger, again while held
-            story_.scroll_by(y < ty ? -L::kRows : L::kRows);
-            pad_repeat_at_ = now_ms + kFirstRepeatMs;
+            // The track: the thumb jumps there, centred on the finger, and
+            // is then held by its middle, so the same touch drags on.
+            grip_ = Grip::PadThumb;
+            pad_grab_dy_ = th / 2;
+            const int span = (L::kTrackY1 - L::kTrackY0) - th;
+            if (span > 0)
+                story_.scroll_to_fraction((float)(y - pad_grab_dy_ - L::kTrackY0) / (float)span);
         } else {
             grip_ = Grip::Pad;
         }
@@ -701,12 +708,6 @@ void SecondScreen::pad_touch(Pad &pad, bool down, uint64_t now_ms)
     } else if ((grip_ == Grip::PadUp || grip_ == Grip::PadDown) && now_ms >= pad_repeat_at_) {
         story_.scroll_by(grip_ == Grip::PadUp ? -1 : 1);
         pad_repeat_at_ = now_ms + kRepeatMs;
-    } else if (grip_ == Grip::PadTrack && now_ms >= pad_repeat_at_) {
-        int ty = 0, th = 0;
-        L::thumb(story_.top(), story_.total(), ty, th);
-        if (y < ty || y >= ty + th)
-            story_.scroll_by(y < ty ? -L::kRows : L::kRows);
-        pad_repeat_at_ = now_ms + kPageRepeatMs;
     } else if (grip_ == Grip::PadThumb) {
         int ty = 0, th = 0;
         L::thumb(story_.top(), story_.total(), ty, th);

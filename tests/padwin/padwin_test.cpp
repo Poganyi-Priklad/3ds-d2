@@ -561,10 +561,24 @@ static void test_pad_scroll_column()
     poll(ss, gs, t += 20, L::kScrollX + 5, L::kTrackY1 + 30);
     CHECK(ss.pad_story().top() == bottom);
     poll(ss, gs, t += 20);
-    // The track above the thumb: a page up.
+    // A tap on the track: the thumb jumps there, centred on the finger...
     L::thumb(ss.pad_story().top(), ss.pad_story().total(), ty, th);
-    poll(ss, gs, t += 20, L::kScrollX + 5, L::kTrackY0 + 2);
-    CHECK(ss.pad_story().top() == bottom - L::kRows);
+    const int mid = (L::kTrackY0 + L::kTrackY1) / 2;
+    poll(ss, gs, t += 20, L::kScrollX + 5, mid);
+    CHECK(ss.pad_story().top() > 0 && ss.pad_story().top() < bottom);
+    L::thumb(ss.pad_story().top(), ss.pad_story().total(), ty, th);
+    CHECK(std::abs(ty + th / 2 - mid) <= 3);
+    // ...and the same touch drags it on.
+    poll(ss, gs, t += 20, L::kScrollX + 5, L::kTrackY0 - 30);
+    CHECK(ss.pad_story().top() == 0);
+    poll(ss, gs, t += 20);
+    // Taken beside the drawn column (the touch area runs from the box's edge
+    // to the screen's): the track's bottom end, the last line; its top, the first.
+    poll(ss, gs, t += 20, L::kScrollX + L::kScrollW + 4, L::kTrackY1 - 1);
+    CHECK(ss.pad_story().top() == bottom);
+    poll(ss, gs, t += 20);
+    p = poll(ss, gs, t += 20, L::kBoxX1 + 1, L::kTrackY0 + 1);
+    CHECK(!p.touching && ss.pad_story().top() == 0);
     poll(ss, gs, t += 20);
     // Outside the column and the button: the touchpad.
     p = poll(ss, gs, t += 20, 150, 100);
