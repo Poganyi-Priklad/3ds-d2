@@ -95,6 +95,10 @@ pub fn resume_name(x: u32) -> String {
     format!("AOT_SYM(resume_{:08x})", x)
 }
 
+pub fn reent_name(va: u32) -> String {
+    format!("AOT_SYM(reent_{:08x})", va)
+}
+
 pub struct Emitter<'p, 'a> {
     p: &'p Program<'a>,
     pub mode: &'static str,
@@ -107,8 +111,10 @@ pub struct Emitter<'p, 'a> {
     pub ana: Option<Analysis<'p, 'a>>,
     trace_all: Option<u32>,
     /// A resume entry being written (issue #138): where a native hands the
-    /// call back, and the stack offset there from the entry's esp.
-    resume: Option<(u32, i64)>,
+    /// call back, and the stack offset there from the entry's esp. Or, with
+    /// reent, the function's return sites (reent_<va>, entered at one).
+    resume: Option<Vec<(u32, i64)>>,
+    reent: bool,
 }
 
 impl<'p, 'a> Emitter<'p, 'a> {
@@ -128,6 +134,7 @@ impl<'p, 'a> Emitter<'p, 'a> {
             ana: None,
             trace_all,
             resume: None,
+            reent: false,
         }
     }
 
@@ -147,9 +154,23 @@ impl<'p, 'a> Emitter<'p, 'a> {
     /// them as ctx mode's does (esp after the ret). Sig mode only; the
     /// analysis must be one without skipped saves (the native stored them).
     pub fn resume_fn(&mut self, va: u32, x: u32, sp: i64) -> R<String> {
-        self.resume = Some((x, sp));
+        self.resume = Some(vec![(x, sp)]);
         let r = self.function(va);
         self.resume = None;
+        r
+    }
+
+    /// reent_<va> (issue #138): `va`'s code entered at one of its return
+    /// sites (`at`, each with its stack offset from the entry's esp), with all
+    /// eight registers as there, as resume_fn's is: where a thread that
+    /// stopped in compiled code (a shim's yield, the C frames above dropped)
+    /// goes on when the scheduler runs it again.
+    pub fn reent_fn(&mut self, va: u32, sites: &[(u32, i64)]) -> R<String> {
+        self.resume = Some(sites.to_vec());
+        self.reent = true;
+        let r = self.function(va);
+        self.resume = None;
+        self.reent = false;
         r
     }
 
@@ -282,8 +303,9 @@ impl<'p, 'a> Emitter<'p, 'a> {
         self.sig = Some(sig.clone());
         self.df = direction(&f);
         let mut out: Vec<String> = Vec::new();
-        out.push(match self.resume {
-            Some((x, _)) => format!("AOT_FN void {}(AotRegs *R)\n{{", resume_name(x)),
+        out.push(match &self.resume {
+            Some(_) if self.reent => format!("AOT_FN void {}(AotRegs *R, uint32_t at)\n{{", reent_name(va)),
+            Some(v) => format!("AOT_FN void {}(AotRegs *R)\n{{", resume_name(v[0].0)),
             None => self.proto(va) + "\n{",
         });
         let mut decl: Vec<String> = Vec::new();
@@ -300,9 +322,10 @@ impl<'p, 'a> Emitter<'p, 'a> {
             "uint32_t F_A = 0, F_B = 0, F_R = 0, F_C = 0; int F_K = 0; (void)F_A; (void)F_B; (void)F_R; (void)F_C; (void)F_K;"
                 .to_string(),
         );
-        decl.push(match self.resume {
+        decl.push(match &self.resume {
+            Some(_) if self.reent => "uint8_t *const M = aot_mem; uint32_t esp0 = 0, ra0 = 0;".to_string(),
             // The entry's esp, from the stack offset at x.
-            Some((_, sp)) => format!("uint8_t *const M = aot_mem; const uint32_t esp0 = esp + 0x{:x}u, ra0 = LD32(esp0);", (sp as i32).wrapping_neg() as u32),
+            Some(v) => format!("uint8_t *const M = aot_mem; const uint32_t esp0 = esp + 0x{:x}u, ra0 = LD32(esp0);", (v[0].1 as i32).wrapping_neg() as u32),
             None => "uint8_t *const M = aot_mem; const uint32_t esp0 = esp, ra0 = LD32(esp);".to_string(),
         });
         if f.insns.values().any(|i| x87_op(i).is_some()) {
@@ -311,11 +334,20 @@ impl<'p, 'a> Emitter<'p, 'a> {
         out.push(format!("    {}", decl.join(" ")));
         out.push(format!("    AOT_TRACE(0x{:08x}u, eax, ecx, edx, ebx, esp, ebp, esi, edi);", va));
         out.push(format!("    {}", (0..8).map(|r| format!("(void){};", REGS[r])).collect::<Vec<_>>().join(" ")));
-        let start = self.resume.map_or(f.entry, |(x, _)| x);
-        out.push(format!("    goto L_{:08x};", start));
+        let starts: Vec<u32> = self.resume.as_ref().map_or(vec![f.entry], |v| v.iter().map(|e| e.0).collect());
+        if let (true, Some(v)) = (self.reent, &self.resume) {
+            // Each site's entry esp from its stack offset.
+            let cases: Vec<String> = v
+                .iter()
+                .map(|&(x, sp)| format!("case 0x{:08x}u: esp0 = esp + 0x{:x}u; ra0 = LD32(esp0); goto L_{:08x};", x, (sp as i32).wrapping_neg() as u32, x))
+                .collect();
+            out.push(format!("    switch (at) {{ {} }}\n    aot_unreachable(at); return;", cases.join(" ")));
+        } else {
+            out.push(format!("    goto L_{:08x};", starts[0]));
+        }
         for &a in &f.order {
             let i = f.insns[&a].clone();
-            if f.leaders.contains(&a) || a == start {
+            if f.leaders.contains(&a) || starts.contains(&a) {
                 out.push(format!("L_{:08x}:", a));
             }
             out.push(format!("    /* {:08x} {} {} */", a, i.mnemonic, i.op_str));

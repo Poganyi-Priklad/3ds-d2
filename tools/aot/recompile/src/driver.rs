@@ -3,7 +3,7 @@
 
 use crate::analysis::Analysis;
 use crate::cs::{OpKind, GRP_JUMP, REG_EIP};
-use crate::emit::{resume_name, x87_op, Emitter, Sig};
+use crate::emit::{reent_name, resume_name, x87_op, Emitter, Sig};
 use crate::flags::Flags;
 use crate::func::{Func, Tgt};
 use crate::image::Image;
@@ -255,7 +255,9 @@ fn reads_first(img: &Image, mut va: u32, depth: u32, steps: u32) -> Result<bool,
     Ok(false)
 }
 
-/// Of vas, the functions whose flags a caller may read after they return.
+/// Of vas, the functions whose flags a caller may read after they return. A
+/// function that never returns has no after (issue #138: exit(-1) at 46169c
+/// ends the function, the bytes after the call being the next one's).
 pub fn flags_read_after(img: &Image, vas: &BTreeSet<u32>) -> OMap<u32, u32> {
     let mut hit = OMap::new();
     let mem = text_bytes(img);
@@ -268,7 +270,7 @@ pub fn flags_read_after(img: &Image, vas: &BTreeSet<u32>) -> OMap<u32, u32> {
             continue;
         }
         let t = (img.text_lo as i64 + k + 5 + i32_at(mem, ku + 1)) as u32;
-        if vas.contains(&t) && !hit.contains_key(&t) {
+        if vas.contains(&t) && !NORETURN_FUNCS.contains(&t) && !hit.contains_key(&t) {
             if let Ok(true) = reads_first(img, img.text_lo + ku as u32 + 5, 0, 12) {
                 hit.insert(t, img.text_lo + ku as u32);
             }
@@ -755,6 +757,81 @@ fn write_out<'a>(
             em.ana = None;
         }
     }
+    // The return sites (issue #138): where a thread stopped in compiled code
+    // goes on (a shim's yield at a callout, the C frames above it dropped),
+    // each function's in one entry, reent_<va>. A callout's return, and a
+    // direct call's to a compiled function that may exit. AOT_NO_REENT=1:
+    // none.
+    let mut reents: Vec<(u32, u32, i64)> = Vec::new();
+    let mut reent_fns = 0usize;
+    let mut reent_why: BTreeMap<String, usize> = BTreeMap::new();
+    let mut reent_taken: HashSet<u32> = HashSet::new();   // a site in two functions' code: the first's
+    if let (Some(mi), false) = (mode_list.iter().position(|&m| m == "sig"), std::env::var("AOT_NO_REENT").is_ok_and(|v| v == "1")) {
+        let em = &mut ems[mi];
+        for (n, &va) in compiled.iter().enumerate() {
+            progress.tick("writing the return sites' entries", n, compiled.len());
+            if !prog.may_exit.contains(&va) {
+                continue;
+            }
+            let f = prog.func(va);
+            let mut want: Vec<u32> = Vec::new();
+            for (&c, t) in f.calls.iter() {
+                if f.noreturn.contains(&c) {
+                    continue;
+                }
+                let ra = c.wrapping_add(f.insns[&c].size);
+                if !f.insns.contains_key(&ra) {
+                    continue;
+                }
+                let exits = f.callouts.contains_key(&c)
+                    || t.direct().is_some_and(|d| prog.compiled.contains(&d) && prog.may_exit.contains(&d));
+                if exits {
+                    want.push(ra);
+                }
+            }
+            if want.is_empty() {
+                continue;
+            }
+            let out = set_of(&sigs[&va].outs);
+            let ana = match Analysis::new(&prog, f.clone(), Some(out), false) {
+                Ok(a) => a,
+                Err(Refused(e)) => {
+                    *reent_why.entry(e.split(" at ").next().unwrap_or("").to_string()).or_default() += want.len();
+                    continue;
+                }
+            };
+            let mut sites: Vec<(u32, i64)> = Vec::new();
+            for x in want {
+                if !reent_taken.insert(x) {
+                    *reent_why.entry("a site of another function's entry".to_string()).or_default() += 1;
+                } else if Flags::read_before_set(&f, x).is_some() {
+                    *reent_why.entry("flags read before anything sets them".to_string()).or_default() += 1;
+                } else if let Some(Some(sp)) = ana.sp_at.get(&x).copied() {
+                    sites.push((x, sp));
+                } else {
+                    *reent_why.entry("the stack offset there not known".to_string()).or_default() += 1;
+                }
+            }
+            if sites.is_empty() {
+                continue;
+            }
+            em.ana = Some(ana);
+            match em.reent_fn(va, &sites) {
+                Ok(t) => {
+                    resume_texts.entry(va).or_default().push(t);
+                    reents.extend(sites.iter().map(|&(x, sp)| (x, va, sp)));
+                    reent_fns += 1;
+                }
+                Err(Refused(e)) => *reent_why.entry(e.split(" at ").next().unwrap_or("").to_string()).or_default() += sites.len(),
+            }
+            em.ana = None;
+        }
+    }
+    let mut ej = J::obj();
+    ej.set("functions", J::Int(reent_fns as i64));
+    ej.set("sites", J::Int(reents.len() as i64));
+    ej.set("refused", J::Obj(reent_why.iter().map(|(k, v)| (k.clone(), J::Int(*v as i64))).collect()));
+    report.set("reents", ej);
     let mut rj = J::obj();
     for &(x, va, _) in &resumed {
         rj.set(&format!("{:08x}", x), J::Str(format!("{:08x}", va)));
@@ -1073,6 +1150,19 @@ fn write_out<'a>(
     chunks.push("const AotResume AOT_SYM(resumes)[] = {".to_string());
     for &(x, va, sp) in &resumed {
         chunks.push(format!("    {{0x{:08x}u, 0x{:08x}u, 0x{:x}u, AOT_SYM(rs_{:08x})}},", x, va, sp as i32 as u32, x));
+    }
+    chunks.push("    {0, 0, 0, 0}".to_string());
+    chunks.push("};".to_string());
+    // The return sites' entries: reent_<va>, one per function, called with the site.
+    let mut declared: HashSet<u32> = HashSet::new();
+    for &(_, va, _) in &reents {
+        if declared.insert(va) {
+            chunks.push(format!("AOT_FN void {}(AotRegs *R, uint32_t at);", reent_name(va)));
+        }
+    }
+    chunks.push("const AotReent AOT_SYM(reents)[] = {".to_string());
+    for &(x, va, sp) in &reents {
+        chunks.push(format!("    {{0x{:08x}u, 0x{:08x}u, 0x{:x}u, {}}},", x, va, sp as i32 as u32, reent_name(va)));
     }
     chunks.push("    {0, 0, 0, 0}".to_string());
     chunks.push("};".to_string());

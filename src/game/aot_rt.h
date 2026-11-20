@@ -90,6 +90,15 @@ typedef struct {
     uint32_t sp;          /* esp at va less the entry's: the return address at esp - sp */
     AotRootFn fn;
 } AotResume;
+/* The return sites' entries (issue #138; AOT_SYM(reents)): `func`'s code
+ * entered at `va` (fn(R, va), one entry per function for all its sites), with
+ * all eight registers as there; R->r[4] comes back past the function's ret. */
+typedef void (*AotReentFn)(AotRegs *R, uint32_t at);
+typedef struct {
+    uint32_t va, func;
+    uint32_t sp;          /* as AotResume's */
+    AotReentFn fn;
+} AotReent;
 #ifdef AOT_SPLIT
 #define AOT_LEAF(x) 0
 #define AOT_EXIT(own, tree) (own)

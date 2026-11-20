@@ -42,6 +42,7 @@ extern const AotRoot aotn_roots[] __attribute__((weak));
 extern const AotFunc aot_funcs[] __attribute__((weak));
 extern const AotFunc aotj_funcs[] __attribute__((weak));
 extern const AotResume aot_resumes[] __attribute__((weak));
+extern const AotReent aot_reents[] __attribute__((weak));
 }
 
 using d2rt::Cpu;
@@ -324,6 +325,17 @@ bool g_stale_calls = false;
 std::unordered_map<uint32_t, const AotResume *> g_resume_at;
 uint32_t g_resumed = 0, g_resume_exits = 0;
 std::map<uint32_t, uint32_t> g_resumed_by;
+// The return sites' entries (issue #138; reent_<va>, D2_AOT_REENT=0: none):
+// a shim's yield at a callout exits to g_reent_trap, not to the return, with
+// the site kept by the thread's esp there; when the scheduler runs the thread
+// again the trap runs the function's compiled code from the site, then each
+// compiled caller's from its return site, in C, until one isn't. This
+// window's: the trap's runs, the functions run, and the exits from them.
+std::unordered_map<uint32_t, const AotReent *> g_reent_at;
+std::unordered_map<uint32_t, uint32_t> g_reent_pending;
+uint32_t g_reent_trap = 0;
+uint32_t g_reent_runs = 0, g_reent_fns = 0, g_reent_exits = 0;
+std::map<uint32_t, uint32_t> g_reent_ended;   // where Box86 took over, by address
 uint32_t g_handed = 0;   // natives' hand-backs to compiled code (aot_trap_for), this window
 uint32_t g_handed_direct = 0;   // ... and those run in C (aot_direct)
 uint32_t g_callout_shims = 0, g_callout_fns = 0, g_callout_back = 0;
@@ -766,6 +778,64 @@ bool aot_resume(Cpu &c, uint32_t va, uint32_t esp, uint32_t stack_args)
     return true;
 }
 
+namespace {
+// The trap a thread goes on at after a shim's yield at a callout (g_reent_at).
+// Each compiled function runs from its site to its ret (r[4] past it, as
+// aot_resume's), then its caller's from the return address, while that is a
+// site; Box86 on from the first that isn't, or at an exit's target (another
+// yield's: this trap again).
+// run_catching's function: the site g_reent_cur names, the registers in place
+// (AotRegs is the eight words).
+const AotReent *g_reent_cur;
+uint32_t reent_run(uint32_t *r)
+{
+    g_reent_cur->fn(reinterpret_cast<AotRegs *>(r), g_reent_cur->va);
+    return r[0];
+}
+
+uint32_t reenter(Cpu &c)
+{
+    uint32_t r[8];
+    c.regs_gp(r);
+    const auto p = g_reent_pending.find(r[4]);
+    if (p == g_reent_pending.end()) {
+        rt::logf("aot: a thread at the return sites' trap with esp %08x, which no yield left", r[4]);
+        std::abort();
+    }
+    uint32_t at = p->second;
+    g_reent_pending.erase(p);
+    Cpu *const prev = g_cpu;
+    g_cpu = &c;
+    g_reent_runs++;
+    uint32_t target = at;
+    for (;;) {
+        const auto it = g_reent_at.find(at);
+        if (it == g_reent_at.end()) {
+            target = at;
+            g_reent_ended[at]++;
+            break;
+        }
+        const uint32_t ra = c.read_u32(r[4] - it->second->sp);
+        ExitJump x;
+        g_reent_fns++;
+        g_reent_cur = it->second;
+        if (!run_catching(reent_run, r, x)) {
+            g_reent_exits++;
+            std::memcpy(r, x.r, sizeof r);
+            target = x.target;
+            break;
+        }
+        at = ra;
+    }
+    g_cpu = prev;
+    for (int k = 0; k < 8; k++)
+        c.set_reg(k, r[k]);
+    c.set_reg(4, r[4] - 4u);   // the bridge's epilogue adds that back
+    rt::bridge().redirect_next(target);
+    return r[0];
+}
+}  // namespace
+
 bool aot_linked() { return (aot_roots && aot_roots[0].va) || (aot_funcs && aot_funcs[0].va); }
 AotMode aot_mode() { return g_mode; }
 
@@ -921,6 +991,15 @@ void install_fns(Cpu &c)
     }
     if (!g_resume_at.empty())
         rt::logf("aot: %u of the natives' hand-backs compiled", (unsigned)g_resume_at.size());
+    {
+        const char *e = std::getenv("D2_AOT_REENT");
+        if (aot_reents && !(e && !std::strcmp(e, "0"))) {
+            for (const AotReent *r = aot_reents; r->va; r++)
+                g_reent_at[r->va] = r;
+            g_reent_trap = rt::native_entry("aot:reenter", 0, [](Cpu &cc) { return reenter(cc); });
+            rt::logf("aot: %u return sites' entries compiled", (unsigned)g_reent_at.size());
+        }
+    }
     rt::logf("aot: %u of %u compiled functions can be hooked (%u entered in line)%s%s%s", (unsigned)g_fns.size(),
              (unsigned)all, (unsigned)in_line, moved ? " (some had other bytes at their entry)" : "", skipped.empty() ? "" : "; not: ",
              skipped.c_str());
@@ -1367,6 +1446,21 @@ std::vector<std::string> aot_lines()
         g_stale_shims = g_stale_handed = g_stale_waits = g_stale_guest = 0;
         g_stale_by.clear();
     }
+    if (g_reent_runs) {
+        char line[256];
+        int p = std::snprintf(line, sizeof line,
+                              "aot: threads on at a return site in compiled code: %u (%u functions run, %u exited); "
+                              "Box86 on at:", g_reent_runs, g_reent_fns, g_reent_exits);
+        std::vector<std::pair<uint32_t, uint32_t>> by;
+        for (const auto &kv : g_reent_ended)
+            by.push_back({kv.second, kv.first});
+        std::sort(by.rbegin(), by.rend());
+        for (size_t k = 0; k < by.size() && k < 6 && p < (int)sizeof line; k++)
+            p += std::snprintf(line + p, sizeof line - p, " %08x %u", by[k].second, by[k].first);
+        out.push_back(line);
+        g_reent_runs = g_reent_fns = g_reent_exits = 0;
+        g_reent_ended.clear();
+    }
     if (g_resumed) {
         char line[256];
         int p = std::snprintf(line, sizeof line, "aot: the natives' hand-backs in compiled code: %u (%u exited):",
@@ -1424,7 +1518,7 @@ void aot_guest_call(uint32_t va, AotRegs *r)
     game::g_nested_n++;
 }
 
-[[noreturn]] static void call_out_back(uint32_t x, uint32_t to, const uint32_t *r);
+[[noreturn]] static void call_out_back(uint32_t x, uint32_t to, const uint32_t *r, bool clean = false);
 
 // A register the original keeps that its native didn't (named once each):
 // compiled callers above take it as kept.
@@ -1537,10 +1631,20 @@ void aot_exit(uint32_t target, uint32_t eax, uint32_t ecx, uint32_t edx, uint32_
 // callee-saved register, not what the compiled caller assumed; or a shim that
 // asked to yield (the trap's tail that entered compiled code does it) or to
 // run guest code first (rd).
-[[noreturn]] static void call_out_back(uint32_t x, uint32_t to, const uint32_t *r)
+//
+// clean: only a yield; registers and esp as the compiled caller has them at
+// the return. Where the return is a site with an entry (issue #138), the
+// thread goes on there in compiled code: the exit is to the return sites'
+// trap, the site kept by esp.
+[[noreturn]] static void call_out_back(uint32_t x, uint32_t to, const uint32_t *r, bool clean)
 {
-    game::g_callout_back++;
-    game::g_callout_back_by[x]++;
+    using namespace game;
+    g_callout_back++;
+    g_callout_back_by[x]++;
+    if (clean && g_reent_trap && g_mode == AotMode::Sig && g_reent_at.count(to)) {
+        g_reent_pending[r[4]] = to;
+        to = g_reent_trap;
+    }
     aot_exit(to, r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7]);
 }
 
@@ -1606,8 +1710,10 @@ void aot_call_out(uint32_t x, AotRegs *t, uint32_t pops)
                 c.set_reg(k, saved[k]);
             c.set_reg(d2rt::R_EIP, saved[8]);
             g_callout_shims++;
-            if (rd || yield || r[4] != want)
-                call_out_back(x, rd ? rd : ra, r);
+            if (rd || yield || r[4] != want) {
+                const bool kept = r[3] == keep[0] && r[5] == keep[1] && r[6] == keep[2] && r[7] == keep[3];
+                call_out_back(x, rd ? rd : ra, r, !rd && r[4] == want && kept);
+            }
         } else {
             const auto it = g_fn_at.find(x);
             if (it == g_fn_at.end())
