@@ -43,6 +43,7 @@ extern const AotFunc aot_funcs[] __attribute__((weak));
 extern const AotFunc aotj_funcs[] __attribute__((weak));
 extern const AotResume aot_resumes[] __attribute__((weak));
 extern const AotReent aot_reents[] __attribute__((weak));
+extern const AotTramp aot_tramps[] __attribute__((weak));
 }
 
 using d2rt::Cpu;
@@ -915,6 +916,11 @@ void install_fns(Cpu &c)
         return;
     }
     g_fns.reserve(n);
+    std::unordered_map<uint32_t, const AotTramp *> relocs;
+    uint32_t relocs_n = 0;
+    if (aot_tramps)
+        for (const AotTramp *m = aot_tramps; m->va; m++)
+            relocs[m->va] = m;
     std::string skipped;
     uint32_t moved = 0, index = 0, left_out = 0, in_line = 0;
     // D2_AOT_FNS=<first>-<last> (the lane, issue #115): only the hookable
@@ -950,11 +956,25 @@ void install_fns(Cpu &c)
         F.fj = fj;
         F.tramp = at + 32 * (uint32_t)(g_fns.size() - 1);
         uint8_t t[32];
+        uint32_t len = f->keep;
         std::memcpy(t, f->head, f->keep);
-        t[f->keep] = 0xe9;
-        const uint32_t rel = (f->va + f->keep) - (F.tramp + f->keep + 5);
-        std::memcpy(t + f->keep + 1, &rel, 4);
-        c.write(F.tramp, t, f->keep + 5u);
+        auto mv = relocs.find(f->va);
+        if (mv != relocs.end()) {   // a branch in the first bytes, done from the trampoline
+            const AotTramp *m = mv->second;
+            len = m->len;
+            std::memcpy(t, m->code, len);
+            for (int k = 0; k < m->nrel; k++) {
+                uint32_t to;
+                std::memcpy(&to, t + m->rel[k], 4);
+                to -= F.tramp + m->rel[k] + 4;
+                std::memcpy(t + m->rel[k], &to, 4);
+            }
+            relocs_n++;
+        }
+        t[len] = 0xe9;
+        const uint32_t rel = (f->va + f->keep) - (F.tramp + len + 5);
+        std::memcpy(t + len + 1, &rel, 4);
+        c.write(F.tramp, t, len + 5u);
         Fn *Fp = &F;
         const std::string trap_name = std::string("aotfn:") + f->name;
         F.trap = rt::native_entry(trap_name.c_str(), f->pops / 4, [Fp](Cpu &cc) { return enter_fn(*Fp, cc); });
@@ -1003,6 +1023,8 @@ void install_fns(Cpu &c)
     rt::logf("aot: %u of %u compiled functions can be hooked (%u entered in line)%s%s%s", (unsigned)g_fns.size(),
              (unsigned)all, (unsigned)in_line, moved ? " (some had other bytes at their entry)" : "", skipped.empty() ? "" : "; not: ",
              skipped.c_str());
+    if (relocs_n)
+        rt::logf("aot: %u of them with a branch in their first bytes done from the trampoline", (unsigned)relocs_n);
     if (left_out)
         rt::logf("aot: %u left out (D2_AOT_FNS %u-%u)", (unsigned)left_out, (unsigned)first, (unsigned)last);
 }

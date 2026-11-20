@@ -93,6 +93,16 @@ typedef struct {
 /* The return sites' entries (issue #138; AOT_SYM(reents)): `func`'s code
  * entered at `va` (fn(R, va), one entry per function for all its sites), with
  * all eight registers as there; R->r[4] comes back past the function's ret. */
+/* The trampolines with a branch moved (issue #138; AOT_SYM(tramps)): a
+ * function whose first bytes (keep) have a call, jmp or jcc has its
+ * trampoline's code here, each rel32 at rel[] written as the absolute
+ * target. */
+typedef struct {
+    uint32_t va;
+    uint8_t len, nrel;
+    uint8_t rel[4];
+    uint8_t code[27];
+} AotTramp;
 typedef void (*AotReentFn)(AotRegs *R, uint32_t at);
 typedef struct {
     uint32_t va, func;

@@ -516,12 +516,32 @@ A thunk with no ret of its own (`004baea0`: `mov ecx, [ecx + 8]; mov eax, [ecx];
 | The coverage set (2,417 functions) | 152 s, 2,374 MB | 10.8 s, 384 MB |
 | d2d's whole list (13,048 functions) | 481 s, 5,169 MB | 36.5 s, 912 MB |
 
+### What Box86 still runs (#138)
+
+The goal is a build without Box86, so the measure is how much of the game's x86 code Box86 still runs in production. `scripts/docker.sh test aot-left dist/game` reads the profiled production run (`AOT_MODE=1 AOT_PARALLEL=1 D2_AOT_SET=whole AOT_ENV="D2_AOT_STALE=1 WX86_HOTPROF=1 D2_NOLINK=1 M4_HOTPROF_TOP=20000"`). It gives the bytes Box86 ran as a share of what the Box86 lane runs on the same scripts, by function and by why. Each step below kept the check at 0 differ, with the whole list and `D2_AOT_STALE=1`. The lane's state lines (reads, files, heap, frames) stayed the same on the three scripts.
+
+| Step | Box86's share |
+| --- | --- |
+| Tail calls through a pointer | 6.50% |
+| A frame's `mov ebp, esp` ends the count of a callout's pushed arguments | 1.40% |
+| Return-site entries | 0.63% |
+| Code pointers in immediates | 0.39% |
+| Trampolines that move a branch | 0.22% |
+
+- **A callout's pushed arguments:** the walk back from a callout counted the pushes before it as its arguments. It also counted `push ebp` before `mov ebp, esp`, so `renderer_line` (4f6380) looked like it passed 20 bytes for 16. Its calls through the renderer's table became plain exits, and Box86 ran the rest of its callers' loops. A frame's `mov ebp, esp` now ends the walk.
+- **Return-site entries:** a function that may exit has one more entry, `reent_<va>(R, at)`, with all eight registers. It is a `switch` on the site, over the function's own code. The sites are the return addresses of its callouts and of its calls to compiled functions that may exit: 48,651 sites in 9,509 functions. Its signature entry `sig_<va>` calls it at the function's entry, so the code exists once and the check covers it. Then a shim yields at a callout, with the registers and esp as the caller has them. The callout exits to a trap (`aot:reenter`), with the site kept by esp. When the thread runs again, the trap runs the function from the site to its ret, then each caller from its return site, until one isn't a site. Before this, each wait left the frame to Box86. One example is the main loop's `Sleep(0)` at 44c713: Box86 ran from 44c715 up, 19.9k times a fight window. This answers the open question below: the entries are needed where a call may exit, not at every call. The lane build's AOT code is 21.5 MiB, about 13 MiB without the entries. `AOT_NO_REENT=1` (recompiler) and `D2_AOT_REENT=0` (runtime) turn them off.
+- **Code pointers in immediates:** some callbacks are stored, not called: 501650 into `[841da0]`, 463d80 into `ebx`. They aren't on d2d's list, and a call through them was an exit to Box86. The whole list's build now also compiles every immediate in a listed function that points at an address in `.text` on 16 bytes, after an `int3` or `nop` pad, and not inside a listed function's code. That adds 350 functions.
+- **Trampolines that move a branch:** a hook writes a `jmp` over a function's first 5 bytes or more. Its trampoline runs those bytes elsewhere, then jumps back. A function whose first bytes had a call, `jmp` or `jcc` couldn't be hooked, and Box86 ran it whenever Box86 code called it. That was 1,435 functions, 8.4% of what Box86 still ran: 475800 starts `push esi; push edi; call`, and 463d80 starts `push ecx; call`. The recompiler now writes their trampolines (`aot_tramps`): a rel8 or rel32 call, `jmp` or `jcc` becomes a rel32 to the same target, and an indirect one is copied as it is. The runtime makes each target relative to where it puts the trampoline. A `ret`, `loop`, `jecxz`, or a `jmp` before the 5th byte still refuses the hook (`AOT_NO_RELOC=1`, running the recompiler directly: none moved). 12,931 of 13,143 compiled functions can be hooked (11,708 before), 1,223 of them through a moved branch. The check runs these trampolines too, since it runs the original from them. In production the trampoline area is 64 KiB larger (the state lines' `va`).
+- **Leftovers found to a fixpoint:** the check found 55c270 returning 55c110's leftover ecx (garbage: scratch that callers don't read, which compiled code doesn't keep). It had never been checked, because it couldn't be hooked. Each function's leftovers were found once, in callees-first order, so in a call cycle a caller could be screened before its callee. 55c270 then claimed ecx as an output, and the check compared it. Leftovers are now found again until none change: 265 functions.
+
+The trap's own entry (`aot:reenter`) shows in the runtime's "exits to Box86" line, about 39,750 a fight window, one per re-entry. Box86 doesn't run any game code for those.
+
 ## Open questions
 
 - **Is the gain there?** Yes, on the console: about 5× Box86 on A* and 3–4.7× on CofParams (#113). The lane's qemu showed 4.1× and 1.6×. What a full build gains depends on how much of a frame's code it covers (#115), and on its calls to code it doesn't compile going through the target table rather than a nested run.
 - **The site table:** the hooks and code patches move from `install_*` code into one table that both the app and the recompiler read. Is that change acceptable before the spike, or only after it?
 - **Does the game write its own code?** If anything other than our patches writes into `.text` at run time, the AOT code for it is stale. Box86's invalidations of `.text` on the lane answer this.
 - **Exceptions:** does any function rely on Windows exception handling for a fault (an access violation caught by `__try`)? If one does, it stays with Box86.
-- **Return sites:** does every call's return site need an entry, or only those a thread can be switched or fall back under?
+- **Return sites:** does every call's return site need an entry, or only those a thread can be switched or fall back under? Only those where a call may exit ([What Box86 still runs](#what-box86-still-runs-138)).
 - **`LODPatch_114d.exe`:** how its Game.exe is stored, and whether extracting it needs anything we would rather not depend on.
 - **Faults:** is a report with the function and offset enough, or does the check build need precise x86 state at each memory access?

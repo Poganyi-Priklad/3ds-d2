@@ -101,6 +101,83 @@ pub fn root_head(img: &Image, va: u32) -> Result<(u32, Vec<u8>), Refused> {
     Ok((keep, (0..16).map(|k| img.u8(va + k)).collect()))
 }
 
+/// A function's trampoline where its first bytes have a branch (issue #138):
+/// the code, with each rel32 written as the absolute target, and where those
+/// are (the runtime makes them relative to where it puts the code).
+pub type Tramp = (Vec<u8>, Vec<u8>);
+
+/// root_head, and where the first bytes have a call, a jmp or a jcc that the
+/// trampoline can do from elsewhere (rel8 and rel32, to rel32; an indirect
+/// one as it is), that trampoline. Not a ret, a loop or jecxz, nor a jmp
+/// before the 5 bytes (what follows it isn't the function's to overwrite).
+pub fn fn_head(img: &Image, va: u32) -> Result<(u32, Vec<u8>, Option<Tramp>), Refused> {
+    if let Ok((keep, hd)) = root_head(img, va) {
+        return Ok((keep, hd, None));
+    }
+    let no = || Refused(format!("a branch in the first bytes at {:08x}: no trampoline", va));
+    let mut keep = 0u32;
+    let mut code: Vec<u8> = Vec::new();
+    let mut rel: Vec<u8> = Vec::new();
+    while keep < 5 {
+        let a = va + keep;
+        let i = img.insn(a)?;
+        if i.ops.iter().any(|o| matches!(o.kind, OpKind::Mem(m) if m.base == REG_EIP)) {
+            return Err(no());
+        }
+        let b = &i.bytes;
+        let target = |d: i64| (a as i64 + i.size as i64 + d) as u32;
+        let i8_at = |k: usize| b[k] as i8 as i64;
+        let i32_at = |k: usize| i32::from_le_bytes([b[k], b[k + 1], b[k + 2], b[k + 3]]) as i64;
+        let mut push_rel = |code: &mut Vec<u8>, op: &[u8], t: u32| {
+            code.extend_from_slice(op);
+            rel.push(code.len() as u8);
+            code.extend_from_slice(&t.to_le_bytes());
+        };
+        let last;
+        match (b[0], b.get(1).copied().unwrap_or(0)) {
+            (0xe8, _) if i.size == 5 => {
+                push_rel(&mut code, &[0xe8], target(i32_at(1)));
+                last = false;
+            }
+            (0xe9, _) if i.size == 5 => {
+                push_rel(&mut code, &[0xe9], target(i32_at(1)));
+                last = true;
+            }
+            (0xeb, _) if i.size == 2 => {
+                push_rel(&mut code, &[0xe9], target(i8_at(1)));
+                last = true;
+            }
+            (0x70..=0x7f, _) if i.size == 2 => {
+                push_rel(&mut code, &[0x0f, 0x80 + (b[0] - 0x70)], target(i8_at(1)));
+                last = false;
+            }
+            (0x0f, 0x80..=0x8f) if i.size == 6 => {
+                push_rel(&mut code, &[0x0f, b[1]], target(i32_at(2)));
+                last = false;
+            }
+            (0xff, m) if (m >> 3) & 7 == 2 || (m >> 3) & 7 == 4 => {
+                code.extend_from_slice(b);
+                last = (m >> 3) & 7 == 4;
+            }
+            _ => {
+                if i.mnemonic == "ret" || i.mnemonic.starts_with('j') || i.mnemonic.starts_with("loop") || i.mnemonic == "call" {
+                    return Err(no());
+                }
+                code.extend_from_slice(b);
+                last = false;
+            }
+        }
+        keep += i.size;
+        if last && keep < 5 {
+            return Err(no());
+        }
+    }
+    if code.len() + 5 > 32 || keep > 16 {
+        return Err(no());
+    }
+    Ok((keep, (0..16).map(|k| img.u8(va + k)).collect(), Some((code, rel))))
+}
+
 fn text_bytes(img: &Image) -> &[u8] {
     let lo = (img.text_lo - img.base) as usize;
     let hi = (lo + (img.text_hi - img.text_lo) as usize).min(img.mem.len());
@@ -307,21 +384,29 @@ pub fn code_hash(img: &Image, ranges: &[(u32, u32)]) -> u32 {
 }
 
 /// Each compiled function's entry for the check: (keep, head) where it can be hooked, else why not.
-pub fn hookable(img: &Image, prog: &Program) -> (BTreeMap<u32, (u32, Vec<u8>)>, BTreeMap<u32, String>) {
+/// The trampolines with a branch moved are in the third map (AOT_NO_RELOC=1: none, those not hooked).
+#[allow(clippy::type_complexity)]
+pub fn hookable(img: &Image, prog: &Program) -> (BTreeMap<u32, (u32, Vec<u8>)>, BTreeMap<u32, String>, BTreeMap<u32, Tramp>) {
     let mut heads: BTreeMap<u32, (u32, Vec<u8>)> = BTreeMap::new();
     let mut why: BTreeMap<u32, String> = BTreeMap::new();
+    let mut tramps: BTreeMap<u32, Tramp> = BTreeMap::new();
+    let reloc = std::env::var("AOT_NO_RELOC").map(|v| v != "1").unwrap_or(true);
     for &va in &prog.compiled {
-        match root_head(img, va) {
+        let h = if reloc { fn_head(img, va) } else { root_head(img, va).map(|(k, h)| (k, h, None)) };
+        match h {
             Err(e) => {
                 why.insert(va, e.0);
                 continue;
             }
-            Ok(h) => {
+            Ok((keep, hd, t)) => {
                 if prog.summ[&va].pops.is_none() {
                     why.insert(va, "its ret pops aren't known".to_string());
                     continue;
                 }
-                heads.insert(va, h);
+                heads.insert(va, (keep, hd));
+                if let Some(t) = t {
+                    tramps.insert(va, t);
+                }
             }
         }
     }
@@ -363,7 +448,8 @@ pub fn hookable(img: &Image, prog: &Program) -> (BTreeMap<u32, (u32, Vec<u8>)>, 
         why.entry(inner[&t]).or_insert_with(|| format!("a 32-bit branch somewhere in .text could reach its first bytes ({:08x})", t));
     }
     heads.retain(|va, _| !why.contains_key(va));
-    (heads, why)
+    tramps.retain(|va, _| heads.contains_key(va));
+    (heads, why, tramps)
 }
 
 fn mask(rs: &[u8]) -> u32 {
@@ -499,6 +585,36 @@ pub fn compile_set<'a>(
     }
     prog.apply_exits(&blocks);
     prog.summarize(&reach_sorted, 50);
+    // A callee's leftovers (garbage) in ecx or edx that reach a caller's ret
+    // are its leftovers too, also where the callee is screened after it (a
+    // cycle): 55c270 returned 55c110's ecx, which its compiled code doesn't
+    // keep, and its callers' read of it was compared.
+    let mut more = 0usize;
+    for _ in 0..20 {
+        let mut changed = 0usize;
+        for &va in &screen {
+            if !prog.compiled.contains(&va) {
+                continue;
+            }
+            let f = prog.func(va);
+            if !calls_tails(&f).any(|(_, t)| t.direct().is_some_and(|d| prog.garbage.get(&d).is_some_and(|&g| g != 0))) {
+                continue;
+            }
+            let Ok(a) = Analysis::new(&prog, f, Some(full_outs), true) else { continue };
+            let old = prog.garbage.get(&va).copied().unwrap_or(0);
+            if a.garbage & !old != 0 {
+                prog.garbage.insert(va, old | a.garbage);
+                changed += 1;
+            }
+        }
+        more += changed;
+        if changed == 0 {
+            break;
+        }
+    }
+    if more > 0 {
+        eprintln!("aot: {} functions' leftovers found again after their callees'", more);
+    }
     let mut rounds = 0usize;
     let mut outs: HashMap<u32, Regs>;
     let sigs: HashMap<u32, Sig>;
@@ -1069,7 +1185,7 @@ fn write_out<'a>(
             ));
         }
     }
-    let (heads, why) = hookable(img, &prog);
+    let (heads, why, tramps) = hookable(img, &prog);
     let mut leaf_n = 0usize;
     if mode_list.contains(&"sig") {
         let em = Emitter::new(&prog, "sig", &sigs);
@@ -1187,8 +1303,24 @@ fn write_out<'a>(
     }
     chunks.push("    {0, 0, 0, 0}".to_string());
     chunks.push("};".to_string());
+    chunks.push("const AotTramp AOT_SYM(tramps)[] = {".to_string());
+    for (va, (code, rel)) in &tramps {
+        let mut r4 = rel.clone();
+        r4.resize(4, 0);
+        chunks.push(format!(
+            "    {{0x{:08x}u, {}, {}, {{{}}}, {{{}}}}},",
+            va,
+            code.len(),
+            rel.len(),
+            r4.iter().map(|b| b.to_string()).collect::<Vec<_>>().join(", "),
+            code.iter().map(|b| format!("0x{:02x}", b)).collect::<Vec<_>>().join(", ")
+        ));
+    }
+    chunks.push("    {0, 0, 0, {0}, {0}}".to_string());
+    chunks.push("};".to_string());
     let mut hk = J::obj();
     hk.set("hookable", J::Int(heads.len() as i64));
+    hk.set("moved", J::Int(tramps.len() as i64));
     hk.set("not", J::Obj(why.iter().map(|(k, v)| (format!("{:08x}", k), J::Str(v.clone()))).collect()));
     report.set("hooks", hk);
     chunks.push("const AotRoot AOT_SYM(roots)[] = {".to_string());
