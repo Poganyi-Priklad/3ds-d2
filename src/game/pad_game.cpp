@@ -1,4 +1,11 @@
-// See pad_game.h.
+// See pad_game.h for the addresses.
+//
+// The PAD window's link to the running game. Each poll it reads (never
+// writes) a few values from the game's memory: whether an NPC is talking and
+// the talk's lines, the NPC menu's title, and the unit under the cursor with
+// its name and life. PadStory (pad_story.cpp) turns that into what the window
+// shows. The art is built from the player's MPQs on the first poll that
+// shows PAD, and kept.
 #include "game/pad_game.h"
 
 #include "game/d2_units.h"
@@ -18,6 +25,7 @@ constexpr uint32_t kFontFolderVa = 0x00841D8C;
 constexpr int kMaxTalkLines = 400, kMaxChars = 256;
 constexpr uint64_t kUiNpcMenu = 1ull << 0x08, kUiShop = 1ull << 0x0C, kUiTrade = 1ull << 0x17;
 
+// One 32-bit word of guest memory (0 when it can't be read).
 uint32_t rd32(uint32_t va)
 {
     uint32_t v = 0;

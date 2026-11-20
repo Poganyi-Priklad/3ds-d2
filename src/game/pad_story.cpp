@@ -1,10 +1,19 @@
 // See pad_story.h.
+//
+// PadStory is the PAD window's state, kept apart from the game and from
+// drawing so tests/padwin can drive it with made-up polls: which NPC the
+// dialog is with, the talks ("stories") told in it so far, how many of
+// their lines have been revealed (at the game's own scroll speed, so the
+// window never runs ahead of the speech), the lines wrapped to the window's
+// width, the scroll position, and the hovered unit's name and life.
 #include "game/pad_story.h"
 
 #include <algorithm>
 
 namespace game {
 
+// The game's text without its colour codes and control characters (line
+// breaks and tabs become spaces): the window wraps and colours it itself.
 std::u16string pad_plain_text(const std::u16string &s)
 {
     std::u16string out;
@@ -78,6 +87,7 @@ PadStory::PadStory(std::function<int(const std::u16string &)> measure, int width
 {
 }
 
+// Out of the game: everything forgotten.
 void PadStory::reset()
 {
     clear_stories();
@@ -93,6 +103,7 @@ void PadStory::reset()
     dialog_ = false;
 }
 
+// The dialog closed (or a shop or trade opened): its talks are dropped.
 void PadStory::clear_stories()
 {
     stories_.clear();
@@ -105,6 +116,8 @@ void PadStory::clear_stories()
 
 int PadStory::max_top() const { return std::max(0, (int)wrapped_.size() - pad_layout::kRows); }
 
+// Scrolling by the player. Scrolled to the bottom, the window follows new
+// lines again; scrolled up, it stays where it was put.
 void PadStory::scroll_by(int lines)
 {
     top_ = std::max(0, std::min(max_top(), top_ + lines));
@@ -119,6 +132,8 @@ void PadStory::scroll_to_fraction(float f)
     follow_ = top_ == max_top();
 }
 
+// One poll of the game (read_pad_game): starts, extends or closes the
+// dialog's stories, follows the hovered unit, and reveals lines.
 void PadStory::step(const PadGame &g, uint64_t now_ms)
 {
     if (!g.in_game) {
@@ -217,6 +232,8 @@ void PadStory::step(const PadGame &g, uint64_t now_ms)
         rewrap();
 }
 
+// How many lines of each story are shown: as far as the game's own talk
+// has scrolled, or by time when the game's scroll can't be read.
 void PadStory::reveal(uint64_t now_ms)
 {
     for (Story &s : stories_) {
@@ -236,6 +253,7 @@ void PadStory::reveal(uint64_t now_ms)
     }
 }
 
+// The revealed lines wrapped to the window's width with the game's font.
 void PadStory::rewrap()
 {
     rewrap_ = false;
@@ -322,6 +340,8 @@ void PadStory::rewrap()
     follow_ = top_ == max_top();
 }
 
+// Which of the window's layouts shows: a story while a dialog has lines,
+// a name for an NPC or object, a life bar for an enemy, or the idle art.
 PadFrame::Mode PadStory::mode() const
 {
     if (dialog_)

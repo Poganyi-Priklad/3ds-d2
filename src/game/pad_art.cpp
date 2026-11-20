@@ -1,4 +1,12 @@
 // See pad_art.h.
+//
+// The PAD window's look, built once at run time from the player's own
+// Diablo II MPQs (nothing of the game's art is stored in this repository):
+// the DC6 sprite decoder, the game's fonts (DC6 glyphs plus their .tbl
+// metrics), and a small RGBA compositor that lays the pieces out into three
+// ready 320x240 backgrounds (idle, story, enemy) and a few sprites. pad_draw
+// then only copies a background and draws the text and the life bar on it,
+// so a frame of the bottom screen costs little.
 #include "game/pad_art.h"
 
 #include <algorithm>
@@ -10,6 +18,8 @@ namespace {
 namespace L = pad_layout;
 constexpr int kW = 320, kH = 240;
 
+// Little-endian reads that return 0 past the end of the data (a short or
+// damaged file never reads out of bounds).
 uint32_t le32(const std::vector<uint8_t> &d, size_t at)
 {
     return at + 4 <= d.size() ? (uint32_t)d[at] | (uint32_t)d[at + 1] << 8 | (uint32_t)d[at + 2] << 16 | (uint32_t)d[at + 3] << 24
@@ -20,6 +30,7 @@ uint16_t le16(const std::vector<uint8_t> &d, size_t at)
     return at + 2 <= d.size() ? (uint16_t)(d[at] | d[at + 1] << 8) : 0;
 }
 
+// The bottom screen's pixel format.
 inline uint16_t rgb565(uint32_t r, uint32_t g, uint32_t b)
 {
     return (uint16_t)(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
@@ -35,6 +46,7 @@ struct Img {
 };
 constexpr uint32_t rgba(uint32_t r, uint32_t g, uint32_t b, uint32_t a) { return r | g << 8 | b << 16 | a << 24; }
 
+// One DC6 frame through the game's palette (its transparent pixels stay clear).
 Img frame_img(const Dc6Frame &f, const uint8_t pal[768])
 {
     Img im(f.w, f.h);
@@ -83,6 +95,7 @@ Img assemble(const std::vector<Dc6Frame> &frames, const uint8_t pal[768])
     return out;
 }
 
+// The part x0..x1, y0..y1 of a picture (outside it: transparent).
 Img crop(const Img &src, int x0, int y0, int x1, int y1)
 {
     Img out(x1 - x0, y1 - y0);
@@ -114,6 +127,7 @@ void composite(Img &dst, const Img &src, int dx, int dy)
         }
 }
 
+// A border strip repeated to a width (tile_h) or a height (tile_v).
 Img tile_h(const Img &strip, int w)
 {
     Img out(w, strip.h);
@@ -147,6 +161,9 @@ void frame40(Img &m, const std::vector<Img> &ts, int x0, int y0, int x1, int y1)
     composite(m, o, x0, y0);
 }
 
+// A finished 320x240 picture in the 3DS framebuffer's layout: RGB565,
+// stored a column at a time from the bottom up (the screen is mounted
+// rotated).
 std::vector<uint16_t> to_fb(const Img &m)
 {
     std::vector<uint16_t> fb((size_t)kW * kH);
@@ -158,6 +175,8 @@ std::vector<uint16_t> to_fb(const Img &m)
     return fb;
 }
 
+// A picture kept as a sprite drawn later over a background: RGB565 plus
+// its alpha.
 PadSprite to_sprite(const Img &im)
 {
     PadSprite s;
@@ -173,6 +192,7 @@ PadSprite to_sprite(const Img &im)
     return s;
 }
 
+// Reads and decodes one DC6 file from the MPQs; error says what was missing.
 bool read_dc6(const PadFileReader &read, const std::string &name, std::vector<Dc6Frame> &frames, std::string &error)
 {
     std::vector<uint8_t> file;
@@ -298,6 +318,7 @@ bool pad_font_decode(const std::vector<uint8_t> &dc6, const std::vector<uint8_t>
     return !out.glyphs.empty();
 }
 
+// How much memory the built art takes (logged once it is built).
 size_t PadArt::bytes() const
 {
     size_t n = (bg_idle.size() + bg_story.size() + bg_enemy.size()) * 2;
