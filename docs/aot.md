@@ -560,6 +560,7 @@ Done so far, in `src/game/native_sites_table.h`:
 | --- | --- | --- | --- |
 | `dcc` | DccDecode | `60c10a`, `60bff0`'s per-direction loop | 21 |
 | `sprite_frames` | SpriteFramesAlloc, SpriteFramesFree, SpriteFramesPoolGone, SpriteFramesHeld | `60c103`, `60bff0`'s call to `40b430`; jumps at `409ab0`, `409c80`, `5ff72d`, `60002d` to four stubs in slack | 150 |
+| `decode_timer` | SpriteDecodeBegin, SpriteDecodeEnd | `5ff6e0` to a stub in slack that calls the function's first bytes, moved after it | 57 |
 | `pool_release` | PoolReleaseNext | `40a080` to a stub in slack | 66 |
 | `pool_block_size` | none | `409fa8` to a stub in slack | 21 |
 | `sprite_cache_counter` | SpriteCacheInsert | `5ff476` to a stub in slack | 30 |
@@ -567,13 +568,15 @@ Done so far, in `src/game/native_sites_table.h`:
 
 - **Stubs in slack:** the recompiler takes an applied site's bytes as code even past `.text`'s virtual size, where the stubs are. Otherwise a function that jumps to one is refused ("code outside .text"), as `409ab0` and `40a080` were in the first run of these rows.
 - **What the run chooses** (the frames' granules, the pools' block size) goes in data dwords the stubs read, so the bytes written are the same on every run. The pool-release stub saves `eax`, `ecx` and `edx` itself, since the recompiler doesn't compile `pushad`.
-- **Not yet rows:** `d2_memory`'s decode timer (its stub calls into itself, which the recompiler would take for an exit) and the sprite cache's floor (it needs a new stub, and its slack is taken).
+- **A call into a site:** the decode timer's stub calls its own tail, which runs `5ff6e0`'s first bytes and jumps to the rest. The recompiler compiles each such call's target (a direct call in an applied site to another applied site) as a function of its own (`6cb774`), so the call is compiled code to compiled code.
+- **Not yet a row:** the sprite cache's floor (it needs a new stub, and its slack is taken).
 - **At run time:** `apply_sites` (`native_sites.cpp`) checks every row's game bytes, then writes them with the native's real entry. The code hash reads each site as compiled, so a function changed only by applied rows still matches its compiled code.
 - **In the recompiler:** native k is an import at `0xfee00000 + 16k`, with its pops. `aot_call_out` and `aot_exit` map that address to the native's entry. A `jmp` to a native is a tail call to that import.
 - **A group compiled but not applied** leaves its functions changed since compiled, so Box86 runs them as before. The runtime names such groups after the changed list. The lane runs the PC layout by default, which doesn't install the sprite-frames allocator (only the 3DS layouts do, as the app always does). So `60bff0` stayed with Box86 there. The lane's checks of the table run with `M4_LAYOUT=ctr`.
 - **The check lane with `M4_LAYOUT=ctr`:** 0 differ (town-walk 13.7M calls, fight 113.1M, Act II 49.2M), and `60bff0` is off the changed list on all three scripts. A call that reaches a native counts as unchecked: the compiled run's result is kept, so the native doesn't run twice.
 - **Profiled production with `M4_LAYOUT=ctr`:** Box86 ran 0.19% of its own lane's x86 bytes, against 0.24% for the same build with both groups at `compiled 0`, where `60bff0` was 18.16% of what Box86 still ran. In the state lines, reads, files, heap, va and free are the same on the three scripts. `peeks` is 44 to 59 higher from the load window on, and Act II has one frame more at 50 s (1501, the same again by 60 s). The lane runs the DCC native off, so `60bff0` decodes with the game's code. In Box86 that work counts toward a thread's slice, compiled it doesn't: the load window had 39,904 thread switches against 39,912. The virtual clock moves 250 us a switch, so the game's idle loop peeks a few more times.
 - **`d2_memory`'s rows, the check lane with `M4_LAYOUT=ctr`:** 0 differ (town-walk 13.3M calls, fight 112.3M, Act II 48.5M). 12,889 functions hooked, 6 more than before. `409ab0`, `409c80`, `409dd0`, `40a080`, `5ff3f0` and `681e09` are off the changed list. `5ff6e0` is on it now that it compiles, because the decode timer, not yet a row, still changes it.
+- **The decode timer's rows, the check lane with `M4_LAYOUT=ctr`:** 0 differ (the same calls as above), 22 sites and 383 bytes, `5ff6e0` off the changed list. Not measured in production on its own: Box86 ran `5ff6e0` 6 times in the three scripts.
 - **`d2_memory`'s rows, profiled production with `M4_LAYOUT=ctr`:** Box86 ran 36,312,337 x86 bytes, against 39,408,605 with the first two rows (0.18% of its own lane's, against 0.19%), in 459 hooked functions against 646. The state lines' frames, files and heap are the same on the three scripts. `peeks` differs by 3 to 25. In the fight, reads and va at 90 s and 100 s are ahead by up to 53 KiB and 192 KiB, and the same again by 110 s: the same reads, at other times on the virtual clock.
 
 ## Open questions

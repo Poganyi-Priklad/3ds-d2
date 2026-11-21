@@ -125,15 +125,13 @@ constexpr uint32_t kInsert = 0x005ff476;
 // goes on drawing without the sprite).
 // It takes three stack arguments and returns with ret 0xc; its first bytes
 // are push ebp; mov ebp, esp; push ebx; push esi. The stub, in .text's
-// slack after the sprite trace's:
+// slack after the sprite trace's (native_sites_table.h, decode_timer):
 //   S+0   push eax; push ecx; push edx; call begin; pop edx; pop ecx; pop eax
 //   S+11  push [esp+0xc] three times (the arguments again); call S+52
 //   S+28  push eax; push ecx; push edx; call end; pop edx; pop ecx; pop eax
 //   S+39  ret 0xc
 //   S+52  <the 5 bytes>; jmp 0x5ff6e5
-constexpr uint32_t kDecode = 0x005ff6e0, kDecodeNext = 0x005ff6e5;
-constexpr uint8_t kDecodeOrig[] = {0x55, 0x8b, 0xec, 0x53, 0x56};
-constexpr uint32_t kDecodeStub = 0x006cb740, kDecodeStubEnd = 0x006cb780;
+constexpr uint32_t kDecode = 0x005ff6e0;
 // The frames of a decoded group (issue #44): 0x60bff0 asks the cache's pool
 // system for their block at 0x60c103 (call 0x40b430: ecx the pool, edx the
 // bytes, three stack arguments for the file and line). The call goes to a
@@ -192,12 +190,6 @@ FrameHeap *g_frames = nullptr;
 uint8_t *g_frames_map = nullptr;   // host address of kFramesMap: a byte per 64 KiB granule from g_map_base
 uint32_t g_map_base = 0;
 uint32_t g_frames_to_pool = 0, g_frames_dropped = 0, g_frames_strays = 0;
-
-void put_rel32(uint8_t *at, uint32_t insn_end, uint32_t target)
-{
-    const uint32_t rel = target - insn_end;
-    std::memcpy(at, &rel, 4);
-}
 
 bool all_int3(d2rt::Cpu &c, uint32_t va, uint32_t n)
 {
@@ -367,12 +359,6 @@ bool install_sprite_cache_counter(d2rt::Cpu &c)
 
 bool install_sprite_decode_timer(d2rt::Cpu &c)
 {
-    uint8_t have[sizeof kDecodeOrig];
-    uint8_t slack[kDecodeStubEnd - kDecodeStub];
-    static const uint8_t kZero[sizeof slack] = {};
-    if (!c.read(kDecode, have, sizeof have) || std::memcmp(have, kDecodeOrig, sizeof have) != 0 ||
-        !c.read(kDecodeStub, slack, sizeof slack) || std::memcmp(slack, kZero, sizeof slack) != 0)
-        return false;
     // The game's thread decodes, and Storm's read thread in its loads'
     // callbacks (issue #76): a start by thread, the guest's threads taking
     // turns (no lock). A decode does not nest in another on one thread. The
@@ -398,36 +384,10 @@ bool install_sprite_decode_timer(d2rt::Cpu &c)
         }
         return 0;
     });
-    if (!begin || !end)
+    // The stub, the function's first bytes after it, and the jump to it
+    // (native_sites_table.h, decode_timer).
+    if (!begin || !end || !apply_sites(c, "decode_timer", {{"SpriteDecodeBegin", begin}, {"SpriteDecodeEnd", end}}))
         return false;
-    uint8_t s[kDecodeStubEnd - kDecodeStub] = {};
-    const uint8_t save[] = {0x50, 0x51, 0x52}, restore[] = {0x5a, 0x59, 0x58};
-    const uint8_t arg[] = {0xff, 0x74, 0x24, 0x0c};   // push dword [esp+0xc]
-    uint32_t at = 0;
-    auto put = [&](const uint8_t *b, uint32_t n) {
-        std::memcpy(s + at, b, n);
-        at += n;
-    };
-    auto call = [&](uint8_t op, uint32_t target) {
-        s[at] = op;
-        put_rel32(s + at + 1, kDecodeStub + at + 5, target);
-        at += 5;
-    };
-    put(save, 3), call(0xe8, begin), put(restore, 3);
-    put(arg, 4), put(arg, 4), put(arg, 4);
-    call(0xe8, kDecodeStub + 52);
-    put(save, 3), call(0xe8, end), put(restore, 3);
-    const uint8_t ret[] = {0xc2, 0x0c, 0x00};
-    put(ret, 3);
-    at = 52;
-    put(kDecodeOrig, sizeof kDecodeOrig);
-    call(0xe9, kDecodeNext);
-    uint8_t jump[sizeof kDecodeOrig] = {0xe9};
-    put_rel32(jump + 1, kDecode + 5, kDecodeStub);
-    c.write(kDecodeStub, s, sizeof s);
-    c.write(kDecode, jump, sizeof jump);
-    c.invalidate_code(kDecodeStub, sizeof s);
-    c.invalidate_code(kDecode, sizeof jump);
     rt::logf("sprite cache: decodes timed at %08x", kDecode);
     return true;
 }

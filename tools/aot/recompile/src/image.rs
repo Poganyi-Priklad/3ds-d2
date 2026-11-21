@@ -212,6 +212,29 @@ impl Image {
             || self.sites.iter().any(|&(_, s, n)| s <= va && va < s + n as u32)
     }
 
+    /// The targets of the direct calls in the applied sites that land in
+    /// another applied site (issue #138: the decode timer's stub calls its
+    /// own tail, which runs the function's first bytes and jumps to the
+    /// rest). Each is a function of its own. The sites are code from their
+    /// first byte, at instruction boundaries.
+    pub fn site_call_targets(&self) -> Vec<u32> {
+        let mut out = Vec::new();
+        for &(_, s, n) in &self.sites {
+            let mut va = s;
+            while va < s + n as u32 {
+                let Ok(i) = self.insn(va) else { break };
+                if i.mnemonic == "call" && i.bytes[0] == 0xe8 {
+                    let t = va.wrapping_add(i.size).wrapping_add(i32::from_le_bytes(i.bytes[1..5].try_into().unwrap()) as u32);
+                    if t != s && self.sites.iter().any(|&(_, s2, n2)| s2 <= t && t < s2 + n2 as u32) && !out.contains(&t) {
+                        out.push(t);
+                    }
+                }
+                va += i.size;
+            }
+        }
+        out
+    }
+
     /// The instruction at va; `rep ret` (F3 C3) is a ret (issue #135).
     pub fn insn(&self, va: u32) -> Result<Rc<Insn>, Refused> {
         if let Some(i) = self.cache.borrow().get(&va) {

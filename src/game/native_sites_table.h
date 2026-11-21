@@ -54,6 +54,17 @@ SITE(sprite_frames, 0x00409c80, "55 8b ec 83 ec 08", "e9 {=0x6cb860} 90")
 SITE(sprite_frames, 0x005ff72d, "8b 4e 18 6a 00 51", "e9 {=0x6cb880} 90")
 SITE(sprite_frames, 0x0060002d, "50 e8 fd f5 ff ff", "e9 {=0x6cb8a0} 90")
 
+// d2_memory.cpp, install_sprite_decode_timer: 0x5ff6e0 (a sprite's decode
+// into the cache, ret 0xc) timed by two natives around it. Its stub calls the
+// function's first bytes, moved to their own row after it, which jump to the
+// rest (the recompiler compiles that call's target as a function).
+NATIVE(SpriteDecodeBegin, 0)
+NATIVE(SpriteDecodeEnd, 0)
+GROUP(decode_timer, 1)
+SITE(decode_timer, 0x006cb740, "00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00", "50 51 52 e8 {SpriteDecodeBegin} 5a 59 58 ff 74 24 0c ff 74 24 0c ff 74 24 0c e8 {=0x6cb774} 50 51 52 e8 {SpriteDecodeEnd} 5a 59 58 c2 0c 00")
+SITE(decode_timer, 0x006cb774, "00 00 00 00 00 00 00 00 00 00", "55 8b ec 53 56 e9 {=0x5ff6e5}")
+SITE(decode_timer, 0x005ff6e0, "55 8b ec 53 56", "e9 {=0x6cb740}")
+
 // d2_memory.cpp, install_pool_release: 0x40a080 (the pool system's
 // allocation) frees the blocks a native hands it first, while the flag byte
 // at 0x6cb6a0 is set: VirtualFree and free (0x683fc0) for each.

@@ -169,7 +169,9 @@ fn main() {
         img.sites.iter().map(|s| s.2).sum::<usize>(),
         if img.sites_skipped.is_empty() { String::new() } else { format!("; not: {}", img.sites_skipped.join(", ")) }
     );
-    let starts = driver::load_starts(&a.functions);
+    let mut starts = driver::load_starts(&a.functions);
+    let site_calls = img.site_call_targets();
+    starts.extend(site_calls.iter().copied());
     if a.census {
         census::census(&img, &starts, &a.functions, &a.out, &a.hot, &modes(&a.modes), callouts);
         return;
@@ -186,6 +188,11 @@ fn main() {
         names.extend(n);
     }
     let (mut extra, _) = parse_vas(&a.compile.join(","));
+    for &t in &site_calls {
+        if !extra.contains(&t) && !roots.contains(&t) {
+            extra.push(t);
+        }
+    }
     if a.all {
         // d2d's whole list, as the census compiles it (#138: the lane on all of it).
         let mut l: Vec<u32> = census::load_list(&a.functions, None).keys().copied().collect();
