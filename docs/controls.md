@@ -20,7 +20,7 @@ The mapping lives in `src/game/controls.cpp`. It follows the ideas D2Vita proved
 | C-stick (New 3DS) | Move the cursor |
 | Touch (bottom screen) | Depends on the tab (see [Bottom screen](#bottom-screen)). On MAP and INFO, a touchpad: drag moves the cursor (one drag across the pad crosses the frame); a short tap clicks where the cursor is |
 | A | Left mouse button (held). In the game world it aims first: see [Auto-target](#auto-target-a-and-b) |
-| B | Right mouse button (held): cast the right skill. In the game world it aims first, like A. Before the game, Escape (back one screen; nothing on the main menu) (see [Menu navigation](#menu-navigation)) |
+| B | Right mouse button (held): cast the right skill. In the game world it aims first, like A. In a submenu of the game menu, its Previous; before the game, Escape (back one screen; nothing on the main menu) (see [Menu navigation](#menu-navigation)) |
 | X | Inventory (I) |
 | Y | Show items on the ground (Alt, held). With a shop open: sells the item under the cursor. With the inventory open (and no other panel on the left): drops it on the ground. If the cursor isn't on an item, nothing happens. |
 | L | Stand still (Shift, held) |
@@ -117,7 +117,9 @@ On the screens before the game (the main menu, character select, the class scree
 
 On the character screen with more than eight heroes, a flick right from the right column reaches the scroll bar's up and down buttons, and A scrolls one row a press. A scroll button that has reached the end of the list sends the cursor back to the nearest slot.
 
-**B is Escape**: back from the character select to the main menu, from the class screen to the character select, and so on; on the main menu itself it does nothing (Escape there would ask to quit).
+The game menu (Start) and its submenus (Options, Sound, Video, Automap) use the game's own keyboard navigation: a push of the circle pad up or down (half way out; back to the centre between two) is the Up or Down arrow key, which moves the game's light past titles and disabled rows and round at the ends, and the cursor then goes onto the lit row, so A takes it. Left and right are the Left and Right keys on a choice or a slider (they do nothing on a button). The circle pad doesn't move the cursor there (the C-stick and touch still do). When a menu opens, the cursor goes onto its lit row. **B in a submenu is its Previous** (one menu back); in the top menu it is Escape (the menu closes). Configure Controls keeps a free cursor: the circle pad moves it, B is Escape (back to Options).
+
+**B is Escape** before the game too: back from the character select to the main menu, from the class screen to the character select, and so on; on the main menu itself it does nothing (Escape there would ask to quit).
 
 ## Bottom screen
 

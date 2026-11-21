@@ -21,10 +21,11 @@ constexpr uint32_t kUiTableVa = 0x007A27C0;
 constexpr uint32_t kFocusVa = 0x007D55C8;
 constexpr uint32_t kEditBoxType = 1;
 // UI table entries that are panels over the world: inventory, character
-// sheet, skill tree, NPC dialogue, game menu, shop, add-socket, quest log
-// (0x0F, seen on the lane), waypoint, party, trade, stash, cube, help,
-// mercenary inventory.
-constexpr uint8_t kPanels[] = {0x01, 0x02, 0x04, 0x08, 0x09, 0x0C, 0x0E, 0x0F, 0x14,
+// sheet, skill tree, NPC dialogue, game menu, Configure Controls (0x0B,
+// the game menu's 0x09 off while it is open; seen on the lane), shop,
+// add-socket, quest log (0x0F, seen on the lane), waypoint, party, trade,
+// stash, cube, help, mercenary inventory.
+constexpr uint8_t kPanels[] = {0x01, 0x02, 0x04, 0x08, 0x09, 0x0B, 0x0C, 0x0E, 0x0F, 0x14,
                                0x16, 0x17, 0x19, 0x1A, 0x21, 0x24};
 
 }  // namespace

@@ -17,6 +17,8 @@
 namespace game {
 namespace {
 
+constexpr uint64_t ui_bit(int id) { return 1ull << id; }
+
 uint32_t rd32(uint32_t va)
 {
     uint32_t v = 0;
@@ -107,6 +109,47 @@ void d2win_windows(int width, int height, std::vector<NavWindow> &out)
         out.push_back(w);
 }
 
+// ---- the game menu (Escape) and its submenus ----
+
+constexpr uint32_t kGameMenuLitVa = 0x007BC938;    // the lit row
+constexpr uint32_t kGameMenuHeadVa = 0x007BC93C;   // the open menu's header: its rows, their step
+constexpr uint32_t kGameMenuRowsVa = 0x007BC940;   // its rows, 0x550 bytes each
+constexpr uint32_t kGameMenuRowSize = 0x550;
+
+// The open game menu (Escape) or one of its submenus: its rows, which one
+// is lit, and which row goes back ("Previous"). False when no menu is open
+// or the record doesn't look right (it is stale once the menu closes).
+bool read_game_menu(int width, int height, GameMenu &out)
+{
+    out = GameMenu();
+    const uint32_t head = rd32(kGameMenuHeadVa), rows = rd32(kGameMenuRowsVa);
+    if (head < 0x00400000 || head >= 0x01000000 || rows < 0x00400000 || rows >= 0x01000000)
+        return false;
+    const int count = (int)rd32(head), step = (int)rd32(head + 4);
+    if (count < 1 || count > 16)
+        return false;
+    int8_t kinds[16] = {};
+    for (int i = 0; i < count; i++) {
+        const uint32_t row = rows + (uint32_t)i * kGameMenuRowSize;
+        const int32_t kind = (int32_t)rd32(row);
+        if (kind < -1 || kind > 2)
+            return false;
+        kinds[i] = (int8_t)kind;
+        // Its name (+0x0C): "Previous", "SPrevious"... go one menu back.
+        char id[24] = {};
+        rt::guest_read(row + 0x0C, id, sizeof id - 1);
+        const size_t len = std::strlen(id);
+        if (len >= 8 && std::strcmp(id + len - 8, "Previous") == 0)
+            out.previous = i;
+    }
+    game_menu_rows(count, step, kinds, width, height, out);
+    if (out.rows.empty())
+        return false;
+    const int lit = (int)rd32(kGameMenuLitVa);
+    out.lit = lit >= 0 && lit < count ? lit : -1;
+    return true;
+}
+
 // The MenuWorld the console and the Linux lane use (tests/menu has its own).
 class GameMenuWorld : public MenuWorld {
 public:
@@ -117,6 +160,13 @@ public:
         std::vector<D2WinControl> controls;
         d2win_controls(controls);
         return d2win_main_menu(controls);
+    }
+
+    bool game_menu(uint64_t ui, int width, int height, GameMenu &out) override
+    {
+        if (!(ui & ui_bit(0x09)) || player_class() < 0)
+            return false;   // its pointers are stale once it is closed
+        return read_game_menu(width, height, out);
     }
 
     void windows(uint64_t ui, int width, int height, std::vector<NavWindow> &out) override

@@ -20,6 +20,10 @@ the later parts use.
 flick the auto-target uses, set by `aim_flick_ms` and `aim_flick_light`) up,
 down, left or right:
 
+- **In the game menu** (Start) and its submenus: a push of the circle pad up
+  or down (half way out, back to the centre between two) is the game's own
+  Up or Down arrow key, and the cursor follows the lit row, so **A** takes
+  it; left and right change a choice or a slider.
 - **Before the game** (main menu, character select, class screen, difficulty,
   multiplayer screens): the cursor jumps to the next enabled button, text
   field, list, character slot or hero. On the character screen with more than
@@ -38,6 +42,7 @@ branch.
 | --- | --- | --- |
 | Circle pad flick, before the game | Moves the free cursor a little | Moves the cursor one cell or option |
 | Circle pad slow tilt | Moves the free cursor | Unchanged |
+| B, game submenu | Right mouse button | **Previous** (one menu back); in the top menu, Escape |
 | B, before the game (character select, class screen, difficulty, multiplayer screens) | Right mouse button | **Escape**: back to the screen before; on the main menu B does nothing |
 
 The flick itself uses the auto-target's `aim_flick_ms` and `aim_flick_light`.
@@ -50,8 +55,8 @@ It reads the game's memory to know where things are and never writes it.
 | File | What it does |
 | --- | --- |
 | `src/game/menu_nav.h`, `.cpp` | The rules, as pure geometry: which cell a flick goes to, between windows, round the edges, the scroll column; tested with made-up windows |
-| `src/game/d2_menus.h`, `.cpp` | Reads D2Win's control list before the game |
-| `src/game/controls.cpp` | Runs it: flicks to cells on the screens before the game, B as Escape there |
+| `src/game/d2_menus.h`, `.cpp` | Reads D2Win's control list before the game, and the game menu's rows and lit row |
+| `src/game/controls.cpp` | Runs it: flicks to cells on the screens before the game, the arrow keys in the game menu, B as Escape or Previous |
 
 `game.log` gets `menu:` lines saying where each flick went.
 

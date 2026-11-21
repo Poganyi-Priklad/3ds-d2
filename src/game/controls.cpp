@@ -43,7 +43,7 @@ constexpr float kStopAheadPx = 20.0f;     // the click this far ahead of it, the
 constexpr int kStopWaitMs = 0;            // the cursor there first; the click on the next frame
 constexpr int kStopHoldMs = 0;            // ...held for one frame
 constexpr int kHoverKeepOutMs = 1000;     // a spot the game showed a unit at is kept off this long
-constexpr uint64_t kUiConfigure = 1ull << 0x0B;
+constexpr uint64_t kUiGameMenu = 1ull << 0x09, kUiConfigure = 1ull << 0x0B;
 
 struct Binding {
     Button button;
@@ -196,8 +196,9 @@ void Controls::stick_cursor(int sx, int sy, float speed_800, float &acc_x, float
 // the bit the flick itself moved it doesn't count.
 void Controls::menu_flick(const Pad &pad)
 {
-    // Out of the game: D2Win's screens (in-game panels come in a later commit).
-    const bool open = menu_world_ && !in_game_;
+    // In the game with a panel open (the game menu, Configure Controls; other
+    // panels' windows are filled in a later commit); out of it, D2Win's screens.
+    const bool open = menu_world_ && (in_game_ ? panel_open_ : true);
     if (!open) {
         if (menu_was_open_)
             menu_nav_.forget();
@@ -618,12 +619,27 @@ void Controls::update(const Pad &pad, uint64_t now_ms)
     const bool r_layer = (held & kR) != 0;
     const bool zr_layer = (held & kZR) != 0;
 
-    // Menu navigation's clock (the walk's keep-off uses it too).
+    // ---- the game menu's rows, while it is open (menu_nav.h) ----
     menu_now_ms_ = now_ms;
     if (menu_key_ && now_ms >= menu_key_up_ms_) {
         key(menu_key_, false);
         menu_key_ = 0;
     }
+    const GameMenu was = game_menu_;
+    const bool was_on = game_menu_on_;
+    game_menu_on_ = menu_world_ && in_game_ && (ui_ & kUiGameMenu) && !(ui_ & kUiConfigure) &&
+                    menu_world_->game_menu(ui_, w_, h_, game_menu_) && !game_menu_.rows.empty() &&
+                    !game_menu_.free_cursor;
+    if (game_menu_on_ &&
+        (!was_on || was.rows.size() != game_menu_.rows.size() || was.previous != game_menu_.previous ||
+         was.rows[0].rect.top != game_menu_.rows[0].rect.top)) {
+        // A menu opened (or another in its place): the cursor onto its lit
+        // row (once a click for B is over).
+        menu_snap_ = true;
+        menu_snap_from_ = -2;
+    }
+    if (!game_menu_on_)
+        menu_snap_ = false;
 
     // ---- Select / Start: zoom, keyboard, Escape, Enter ----
     if (pressed & kSelect) {
@@ -670,6 +686,14 @@ void Controls::update(const Pad &pad, uint64_t now_ms)
             bound_[i] = 0;   // ZR + D-pad: a loot command for the auto-target (below)
             loot_button_ = b.button;
             loot_pressed_ = true;
+        } else if ((pressed & b.button) && b.button == kB && !r_layer && !zr_layer && menu_world_ && in_game_ &&
+                   panel_open_ && game_menu_on_ && game_menu_.previous >= 0) {
+            bound_[i] = 0;   // a game menu's submenu: B is its "Previous", one menu back
+            game_menu_click(game_menu_.previous, now_ms);
+        } else if ((pressed & b.button) && b.button == kB && !r_layer && !zr_layer && menu_world_ && in_game_ &&
+                   panel_open_ && (game_menu_on_ || (ui_ & kUiConfigure))) {
+            bound_[i] = VK_ESCAPE;   // the top game menu, or Configure Controls
+            key(bound_[i], true);
         } else if ((pressed & b.button) && b.button == kB && !r_layer && !zr_layer && menu_world_ && !in_game_) {
             // Out of the game (character select, the class screen, a
             // difficulty or a message box): B is Escape, the screen's own
@@ -829,8 +853,9 @@ void Controls::update(const Pad &pad, uint64_t now_ms)
             walking_ = walk_press_pending_ = walk_left_ = false;
             walk_stop_ = 0;
         }
-        // A flick's cell step: the stick moves the cursor again once centred.
-        if (!flick_held_)
+        // A flick's cell step: the stick moves the cursor again once
+        // centred. The game menu: never (game_menu_flick).
+        if (!flick_held_ && !game_menu_on_)
             stick_cursor(pad.circle_x, pad.circle_y, kCircleCursorSpeed, circle_acc_x_, circle_acc_y_);
         menu_flick(pad);
         scroll_button_check(held);

@@ -654,6 +654,117 @@ static void test_weapon_tabs()
     CHECK(at(s, left_arm.centre_x(), left_arm.centre_y()));
 }
 
+static void test_game_menu_rows()
+{
+    GameMenu m;
+    game_menu_rows(3, 50, nullptr, 640, 480, m);
+    CHECK(m.rows.size() == 3 && m.rows[0].rect.centre_y() == 149 && m.rows[1].rect.centre_y() == 199 &&
+          m.rows[2].rect.centre_y() == 249 && m.rows[1].rect.centre_x() == 320);
+    game_menu_rows(3, 50, nullptr, 800, 600, m);
+    CHECK(m.rows[0].rect.centre_y() == 209 && m.rows[0].rect.centre_x() == 400);
+    // Sound options: eight rows 45 apart, a title first.
+    const int8_t kinds[8] = {GameMenu::kTitle, GameMenu::kSlider, GameMenu::kSlider, GameMenu::kChoice,
+                             GameMenu::kChoice, GameMenu::kChoice, GameMenu::kChoice, GameMenu::kButton};
+    game_menu_rows(8, 45, kinds, 640, 480, m);
+    CHECK(m.rows.size() == 8 && m.rows[0].kind == GameMenu::kTitle && m.rows[1].kind == GameMenu::kSlider);
+    CHECK(std::abs(m.rows[0].rect.centre_y() - 41) <= 1 && std::abs(m.rows[7].rect.centre_y() - 356) <= 1);
+    CHECK(m.rows[0].rect.bottom <= m.rows[1].rect.top);   // rows don't overlap
+    game_menu_rows(0, 50, nullptr, 640, 480, m);
+    CHECK(m.rows.empty());
+}
+
+// The controls in the game menu: a tilt is the arrow key, the cursor
+// follows the game's lit row; Left/Right on a choice; B is "Previous" in a
+// submenu, Escape at the top; Configure Controls a free cursor.
+static void test_controls_game_menu()
+{
+    FakeMenus menus;
+    menus.menu_on = true;
+    const int8_t kinds[5] = {GameMenu::kButton, GameMenu::kChoice, GameMenu::kSlider, GameMenu::kButton,
+                             GameMenu::kButton};
+    game_menu_rows(5, 50, kinds, 640, 480, menus.menu);
+    menus.menu.lit = 4;
+    menus.menu.previous = 4;
+    Controls c;
+    c.set_frame(640, 480);
+    c.set_menu_nav(&menus);
+    const uint64_t ui = 1ull | 1ull << 0x09;
+    c.set_context(true, true, ui, false);
+    c.warp_cursor(600, 420);
+    uint64_t t = 1000;
+    // Opened: the cursor onto the lit row (the last).
+    c.update(pad_with(0), t);
+    CHECK(c.cursor_x() == 320 && c.cursor_y() == menus.menu.rows[4].rect.centre_y());
+    // A tilt down: Down, and the stick doesn't move the cursor.
+    c.update(pad_with(0, 0, -156), t += 16);
+    CHECK(g_keys[VK_DOWN] && c.cursor_y() == menus.menu.rows[4].rect.centre_y());
+    for (int i = 0; i < 6; i++)
+        c.update(pad_with(0, 0, -156), t += 16);   // held out: one key only, up after 80 ms
+    CHECK(!g_keys[VK_DOWN]);
+    menus.menu.lit = 0;   // the game moved its light, round to the top
+    c.update(pad_with(0), t += 16);
+    CHECK(c.cursor_x() == 320 && c.cursor_y() == menus.menu.rows[0].rect.centre_y());
+    // Left on a button: nothing to change.
+    c.update(pad_with(0, -156, 0), t += 16);
+    CHECK(!g_keys[VK_LEFT]);
+    c.update(pad_with(0), t += 16);
+    // Down again, the game lights the choice; Right changes it.
+    c.update(pad_with(0, 0, -156), t += 16);
+    CHECK(g_keys[VK_DOWN]);
+    c.update(pad_with(0), t += 100);
+    menus.menu.lit = 1;
+    c.update(pad_with(0), t += 16);
+    CHECK(c.cursor_y() == menus.menu.rows[1].rect.centre_y() && !g_keys[VK_DOWN]);
+    c.update(pad_with(0, 156, 0), t += 16);
+    CHECK(g_keys[VK_RIGHT] && c.cursor_y() == menus.menu.rows[1].rect.centre_y());
+    c.update(pad_with(0), t += 100);
+    CHECK(!g_keys[VK_RIGHT]);
+    // Up with a light the game didn't move: the cursor goes onto it anyway
+    // after a moment.
+    c.update(pad_with(0, 0, 156), t += 16);
+    CHECK(g_keys[VK_UP]);
+    c.update(pad_with(0), t += 400);
+    c.update(pad_with(0), t += 16);
+    CHECK(c.cursor_y() == menus.menu.rows[1].rect.centre_y());
+    // B: a click on Previous, not Escape: the cursor there, the button a
+    // frame later, up again after a moment.
+    c.update(pad_with(kB), t += 16);
+    CHECK(!g_keys[VK_ESCAPE] && !g_right && !g_left && c.cursor_y() == menus.menu.rows[4].rect.centre_y());
+    c.update(pad_with(kB), t += 50);
+    CHECK(g_left && !g_right);
+    c.update(pad_with(0), t += 50);
+    CHECK(g_left);
+    c.update(pad_with(0), t += 100);
+    CHECK(!g_left && !g_keys[VK_ESCAPE]);
+    // The top menu (no Previous): B is Escape.
+    game_menu_rows(3, 50, nullptr, 640, 480, menus.menu);
+    menus.menu.previous = -1;
+    menus.menu.lit = 2;
+    c.update(pad_with(0), t += 16);
+    CHECK(c.cursor_y() == 249);   // another menu: onto its lit row
+    c.update(pad_with(kB), t += 16);
+    CHECK(g_keys[VK_ESCAPE] && !g_left);
+    c.update(pad_with(0), t += 16);
+    CHECK(!g_keys[VK_ESCAPE]);
+    // Configure Controls (0x0B, 0x09 off): the stick moves the cursor
+    // freely, no keys, no steps; B is Escape (back to Options).
+    c.set_context(true, true, 1ull | 1ull << 0x0B, false);
+    const int asked = menus.asked, x0 = c.cursor_x();
+    for (int i = 0; i < 20; i++)
+        c.update(pad_with(0, 156, 0), t += 16);
+    c.update(pad_with(0), t += 16);
+    CHECK(c.cursor_x() > x0 + 40 && menus.asked == asked && !g_keys[VK_RIGHT]);
+    c.update(pad_with(kB), t += 16);
+    CHECK(g_keys[VK_ESCAPE]);
+    c.update(pad_with(0), t += 16);
+    // The game menu's rows don't read: the fixed windows' flicks, as before.
+    menus.menu_on = false;
+    c.set_context(true, true, ui, false);
+    c.update(pad_with(0, 0, -156), t += 16);
+    c.update(pad_with(0), t += 16);
+    CHECK(!g_keys[VK_DOWN] && menus.asked == asked + 1);
+}
+
 int main()
 {
     test_direction();
@@ -668,6 +779,8 @@ int main()
     test_char_screen_scroll();
     test_controls_scroll_button();
     test_b_out_of_game();
+    test_game_menu_rows();
+    test_controls_game_menu();
     test_weapon_tabs();
     test_keyboard_pass_through();
     if (g_fail) {
