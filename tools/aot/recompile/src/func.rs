@@ -124,7 +124,11 @@ impl Func {
                 if m == "jmp" {
                     if ops[0].is_imm() {
                         let t = imm_addr(ops[0].imm());
-                        if t != self.entry && starts.contains(&t) {
+                        if img.native_slots.contains(&t) {
+                            // A native's site (issue #138): a tail call to it, as through an import.
+                            self.tails.insert(va, Tgt::Import(t));
+                            self.succ.insert(va, vec![]);
+                        } else if t != self.entry && starts.contains(&t) {
                             self.tails.insert(va, Tgt::Direct(t));
                             self.succ.insert(va, vec![]);
                         } else {

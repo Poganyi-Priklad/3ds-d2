@@ -205,8 +205,11 @@ impl Image {
         self.mem[va.wrapping_sub(self.base) as usize]
     }
 
+    /// In .text, or in a natives' site applied past .text's virtual size (a
+    /// stub in the section's zero slack, issue #138).
     pub fn in_text(&self, va: u32) -> bool {
-        self.text_lo <= va && va < self.text_hi
+        (self.text_lo <= va && va < self.text_hi)
+            || self.sites.iter().any(|&(_, s, n)| s <= va && va < s + n as u32)
     }
 
     /// The instruction at va; `rep ret` (F3 C3) is a ret (issue #135).

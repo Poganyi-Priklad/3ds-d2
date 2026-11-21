@@ -528,6 +528,7 @@ The goal is a build without Box86, so the measure is how much of the game's x86 
 | Code pointers in immediates | 0.39% |
 | Trampolines that move a branch | 0.22% |
 | The natives' site table, its first two rows (`60bff0`), with `M4_LAYOUT=ctr` | 0.19% (0.24% without them, in that layout) |
+| `d2_memory`'s patches as rows (pools, sprite frames, cache counter, fatal exit), with `M4_LAYOUT=ctr` | 0.18% (36.3M bytes against 39.4M) |
 
 - **A callout's pushed arguments:** the walk back from a callout counted the pushes before it as its arguments. It also counted `push ebp` before `mov ebp, esp`, so `renderer_line` (4f6380) looked like it passed 20 bytes for 16. Its calls through the renderer's table became plain exits, and Box86 ran the rest of its callers' loops. A frame's `mov ebp, esp` now ends the walk.
 - **Return-site entries:** a function that may exit has one more entry, `reent_<va>(R, at)`, with all eight registers. It is a `switch` on the site, over the function's own code. The sites are the return addresses of its callouts and of its calls to compiled functions that may exit: 48,651 sites in 9,509 functions. Its signature entry `sig_<va>` calls it at the function's entry, so the code exists once and the check covers it. Then a shim yields at a callout, with the registers and esp as the caller has them. The callout exits to a trap (`aot:reenter`), with the site kept by esp. When the thread runs again, the trap runs the function from the site to its ret, then each caller from its return site, until one isn't a site. Before this, each wait left the frame to Box86. One example is the main loop's `Sleep(0)` at 44c713: Box86 ran from 44c715 up, 19.9k times a fight window. This answers the open question below: the entries are needed where a call may exit, not at every call. The lane build's AOT code is 21.5 MiB, about 13 MiB without the entries. `AOT_NO_REENT=1` (recompiler) and `D2_AOT_REENT=0` (runtime) turn them off.
@@ -558,13 +559,22 @@ Done so far, in `src/game/native_sites_table.h`:
 | Group | Native | Site | Bytes |
 | --- | --- | --- | --- |
 | `dcc` | DccDecode | `60c10a`, `60bff0`'s per-direction loop | 21 |
-| `sprite_frames_alloc` | SpriteFramesAlloc | `60c103`, `60bff0`'s call to `40b430` | 5 |
+| `sprite_frames` | SpriteFramesAlloc, SpriteFramesFree, SpriteFramesPoolGone, SpriteFramesHeld | `60c103`, `60bff0`'s call to `40b430`; jumps at `409ab0`, `409c80`, `5ff72d`, `60002d` to four stubs in slack | 150 |
+| `pool_release` | PoolReleaseNext | `40a080` to a stub in slack | 66 |
+| `pool_block_size` | none | `409fa8` to a stub in slack | 21 |
+| `sprite_cache_counter` | SpriteCacheInsert | `5ff476` to a stub in slack | 30 |
+| `fatal_exit` | FatalExit | `681e09`, its body moved to two runs of `int3` padding | 38 |
 
+- **Stubs in slack:** the recompiler takes an applied site's bytes as code even past `.text`'s virtual size, where the stubs are. Otherwise a function that jumps to one is refused ("code outside .text"), as `409ab0` and `40a080` were in the first run of these rows.
+- **What the run chooses** (the frames' granules, the pools' block size) goes in data dwords the stubs read, so the bytes written are the same on every run. The pool-release stub saves `eax`, `ecx` and `edx` itself, since the recompiler doesn't compile `pushad`.
+- **Not yet rows:** `d2_memory`'s decode timer (its stub calls into itself, which the recompiler would take for an exit) and the sprite cache's floor (it needs a new stub, and its slack is taken).
 - **At run time:** `apply_sites` (`native_sites.cpp`) checks every row's game bytes, then writes them with the native's real entry. The code hash reads each site as compiled, so a function changed only by applied rows still matches its compiled code.
-- **In the recompiler:** native k is an import at `0xfee00000 + 16k`, with its pops. `aot_call_out` and `aot_exit` map that address to the native's entry.
+- **In the recompiler:** native k is an import at `0xfee00000 + 16k`, with its pops. `aot_call_out` and `aot_exit` map that address to the native's entry. A `jmp` to a native is a tail call to that import.
 - **A group compiled but not applied** leaves its functions changed since compiled, so Box86 runs them as before. The runtime names such groups after the changed list. The lane runs the PC layout by default, which doesn't install the sprite-frames allocator (only the 3DS layouts do, as the app always does). So `60bff0` stayed with Box86 there. The lane's checks of the table run with `M4_LAYOUT=ctr`.
 - **The check lane with `M4_LAYOUT=ctr`:** 0 differ (town-walk 13.7M calls, fight 113.1M, Act II 49.2M), and `60bff0` is off the changed list on all three scripts. A call that reaches a native counts as unchecked: the compiled run's result is kept, so the native doesn't run twice.
 - **Profiled production with `M4_LAYOUT=ctr`:** Box86 ran 0.19% of its own lane's x86 bytes, against 0.24% for the same build with both groups at `compiled 0`, where `60bff0` was 18.16% of what Box86 still ran. In the state lines, reads, files, heap, va and free are the same on the three scripts. `peeks` is 44 to 59 higher from the load window on, and Act II has one frame more at 50 s (1501, the same again by 60 s). The lane runs the DCC native off, so `60bff0` decodes with the game's code. In Box86 that work counts toward a thread's slice, compiled it doesn't: the load window had 39,904 thread switches against 39,912. The virtual clock moves 250 us a switch, so the game's idle loop peeks a few more times.
+- **`d2_memory`'s rows, the check lane with `M4_LAYOUT=ctr`:** 0 differ (town-walk 13.3M calls, fight 112.3M, Act II 48.5M). 12,889 functions hooked, 6 more than before. `409ab0`, `409c80`, `409dd0`, `40a080`, `5ff3f0` and `681e09` are off the changed list. `5ff6e0` is on it now that it compiles, because the decode timer, not yet a row, still changes it.
+- **`d2_memory`'s rows, profiled production with `M4_LAYOUT=ctr`:** Box86 ran 36,312,337 x86 bytes, against 39,408,605 with the first two rows (0.18% of its own lane's, against 0.19%), in 459 hooked functions against 646. The state lines' frames, files and heap are the same on the three scripts. `peeks` differs by 3 to 25. In the fight, reads and va at 90 s and 100 s are ahead by up to 53 KiB and 192 KiB, and the same again by 110 s: the same reads, at other times on the virtual clock.
 
 ## Open questions
 
