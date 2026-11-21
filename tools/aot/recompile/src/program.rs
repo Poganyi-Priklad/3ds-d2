@@ -57,6 +57,12 @@ pub fn intrinsics() -> HashMap<u32, &'static str> {
     let mut m = HashMap::new();
     m.insert(0x00681ef0, "memset");
     m.insert(0x006829c0, "memcpy");
+    m.insert(0x00683840, "memcpy");   // memmove: the same glue (aot_memmove)
+    // The C runtime's sine and cosine of st0, in st0 (issue #138): hand-written
+    // code that passes flags and the stack between its pieces (688590 into
+    // 6885e8, 6987d8, 6987fb), refused. 61bb80 calls them.
+    m.insert(0x00688590, "fsin");
+    m.insert(0x006886c0, "fcos");
     m.insert(0x006831b0, "alloca_probe");
     m
 }

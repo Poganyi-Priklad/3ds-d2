@@ -338,6 +338,11 @@ impl<'p, 'a> Analysis<'p, 'a> {
                 regs[ECX as usize] = Some(Val::Clob);
                 regs[EDX as usize] = Some(Val::Clob);
             }
+            if matches!(intr, Some("fsin") | Some("fcos")) {
+                regs[EAX as usize] = Some(Val::Clob);
+                regs[ECX as usize] = Some(Val::Clob);
+                regs[EDX as usize] = Some(Val::Clob);
+            }
             if let Some(d) = t.direct() {
                 if let Some(&g) = p.garbage.get(&d) {
                     for r in regs_of(g) {
