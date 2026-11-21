@@ -765,6 +765,217 @@ static void test_controls_game_menu()
     CHECK(!g_keys[VK_DOWN] && menus.asked == asked + 1);
 }
 
+struct FakeAim : AimWorld {
+    std::vector<AimUnit> monsters, ground;
+    AimView v;
+    bool view(AimView &out) override
+    {
+        out = v;
+        return true;
+    }
+    void units(std::vector<AimUnit> &out) override { out.insert(out.end(), monsters.begin(), monsters.end()); }
+    bool unit(uint32_t id, AimUnit &out) override
+    {
+        for (const AimUnit &u : monsters)
+            if (u.id == id) {
+                out = u;
+                return true;
+            }
+        return false;
+    }
+    void ground_units(std::vector<AimUnit> &out) override { out.insert(out.end(), ground.begin(), ground.end()); }
+    // Warp classes with a known click rectangle (LvlWarp.txt's): class 7 only.
+    bool warp_area(uint32_t cls, int &left, int &top, int &width, int &height) override
+    {
+        if (cls != 7)
+            return false;
+        left = -60, top = -60, width = 40, height = 60;
+        return true;
+    }
+};
+
+static AimUnit npc_at(uint32_t id, int x, int y)
+{
+    AimUnit u;
+    u.type = 1, u.id = id, u.mode = 1, u.feet_x = x, u.feet_y = y;
+    return u;
+}
+
+// ---- a panel on one side: a flick steps, the stick held walks ----
+static void test_control_panel_plain_click()
+{
+    CHECK(control_panel_at(182, 461, 640, 480));    // run / walk
+    CHECK(control_panel_at(320, 470, 640, 480));    // the bar
+    CHECK(control_panel_at(60, 400, 640, 480));     // the life globe
+    CHECK(control_panel_at(600, 400, 640, 480));    // the mana globe
+    CHECK(control_panel_at(300, 420, 640, 480));    // the mini-panel
+    CHECK(!control_panel_at(320, 240, 640, 480));   // the world
+    CHECK(!control_panel_at(320, 400, 640, 480));
+    CHECK(control_panel_at(400, 580, 800, 600) && control_panel_at(30, 520, 800, 600) &&
+          control_panel_at(250, 540, 800, 600) && !control_panel_at(400, 500, 800, 600));
+    FakeAim world;
+    world.v.width = 640, world.v.height = 480, world.v.hero_x = 320, world.v.hero_y = 240;
+    AimUnit enemy = npc_at(21, 320, 300);   // a monster, as tests/aim makes one
+    enemy.cls = 19, enemy.flags_a = 0x0000000F, enemy.flags_b = 0x80;
+    enemy.monstats2_flags = aim_bits::kMon2CorpseSelect;
+    enemy.distance = 3;
+    world.monsters = {enemy};
+    world.v.hero_mode = 1;   // standing
+    FakeMenus menus;
+    Controls c;
+    c.set_frame(640, 480);
+    c.set_auto_target(AimSettings(), &world);
+    c.set_menu_nav(&menus);
+    c.set_context(true, false, 1, false);
+    uint64_t t = 1000;
+    // In the world the auto-target has A: the cursor goes onto the enemy.
+    c.warp_cursor(320, 200);
+    c.update(pad_with(0), t);
+    for (int i = 0; i < 3; i++)
+        c.update(pad_with(kA), t += 16);
+    CHECK(c.cursor_x() != 320 || c.cursor_y() != 200);
+    c.update(pad_with(0), t += 16);
+    t += 5000;
+    c.warp_cursor(182, 461);
+    c.update(pad_with(0), t);
+    for (int i = 0; i < 5; i++) {
+        c.update(pad_with(kA), t += 16);
+        CHECK(g_left && c.cursor_x() == 182 && c.cursor_y() == 461);
+    }
+    c.update(pad_with(0), t += 16);
+    CHECK(!g_left);
+    // B too.
+    c.update(pad_with(kB), t += 16);
+    CHECK(g_right && c.cursor_x() == 182 && c.cursor_y() == 461);
+    c.update(pad_with(0), t += 16);
+}
+static void test_controls()
+{
+    FakeMenus menus;
+    menus.open = {inventory()};
+    Controls c;
+    c.set_frame(640, 480);
+    c.set_menu_nav(&menus);
+    c.set_context(true, true, 1ull << 0x01, false);
+    int x, y, ex, ey;
+    inv_cell(3, 1, x, y);
+    c.warp_cursor(x, y);
+    uint64_t t = 1000;
+    c.update(pad_with(0), t);
+    // A flick right (out at full tilt, back): one cell right.
+    c.update(pad_with(0, 156, 0), t += 16);
+    c.update(pad_with(0, 156, 0), t += 16);
+    c.update(pad_with(0), t += 16);
+    inv_cell(4, 1, ex, ey);
+    CHECK(c.cursor_x() == ex && c.cursor_y() == ey);
+    // A flick held out: one cell, and the cursor stays there until the
+    // stick is back in the centre.
+    c.update(pad_with(0, 156, 0), t += 16);
+    for (int i = 0; i < 10; i++)
+        c.update(pad_with(0, 156, 0), t += 16);
+    c.update(pad_with(0), t += 16);
+    inv_cell(5, 1, ex, ey);
+    CHECK(c.cursor_x() == ex && c.cursor_y() == ey);
+    inv_cell(4, 1, ex, ey);
+    c.update(pad_with(0, -156, 0), t += 16);
+    c.update(pad_with(0), t += 16);
+    CHECK(c.cursor_x() == ex && c.cursor_y() == ey);
+    // A flick up (the pad's y up): one cell up.
+    c.update(pad_with(0, 0, 156), t += 16);
+    c.update(pad_with(0), t += 16);
+    inv_cell(4, 0, x, y);
+    CHECK(c.cursor_x() == x && c.cursor_y() == y);
+    // A slow tilt: the cursor moves freely, no cell steps.
+    c.set_auto_target(AimSettings(), nullptr);
+    const int asked = menus.asked;
+    for (int i = 1; i <= 70; i++)   // from 20% of the tilt to 40% in 190 ms: slower than a flick (150)
+        c.update(pad_with(0, 156 * (i < 60 ? i : 60) / 60, 0), t += 16);
+    c.update(pad_with(0), t += 16);
+    CHECK(menus.asked == asked && c.cursor_x() > x + 40 && c.cursor_y() == y && !g_left);
+    // B: Escape, not the right button.
+    c.update(pad_with(kB), t += 16);
+    CHECK(g_keys[VK_ESCAPE] && !g_right);
+    c.update(pad_with(0), t += 16);
+    CHECK(!g_keys[VK_ESCAPE]);
+    // A: the left button, where the cursor is.
+    const int cx = c.cursor_x();
+    c.update(pad_with(kA), t += 16);
+    CHECK(g_left && c.cursor_x() == cx);
+    c.update(pad_with(0), t += 16);
+    CHECK(!g_left);
+    // ZR + B: still F2; R + B: still the skill tree (T).
+    c.update(pad_with(kZR | kB), t += 16);
+    CHECK(g_keys[VK_F2] && !g_keys[VK_ESCAPE]);
+    c.update(pad_with(0), t += 16);
+    c.update(pad_with(kR | kB), t += 16);
+    CHECK(g_keys['T'] && !g_keys[VK_ESCAPE]);
+    c.update(pad_with(0), t += 16);
+    // X: still the inventory (I).
+    c.update(pad_with(kX), t += 16);
+    CHECK(g_keys['I']);
+    c.update(pad_with(0), t += 16);
+    // Y with the inventory open: still sells or drops (the item picked up
+    // first: the left button), not Alt.
+    c.update(pad_with(kY), t += 16);
+    c.update(pad_with(kY), t += 100);
+    CHECK(!g_keys[VK_MENU]);
+    c.update(pad_with(0), t += 100);
+    for (int i = 0; i < 20; i++)
+        c.update(pad_with(0), t += 100);
+    // No panel: B is the right button again, and the stick walks.
+    c.set_context(true, false, 0, false);
+    c.update(pad_with(kB), t += 16);
+    CHECK(g_right && !g_keys[VK_ESCAPE]);
+    c.update(pad_with(0), t += 16);
+    CHECK(!g_right);
+    // Out of the game (D2Win's screens): B is Escape (one screen back,
+    // test_b_out_of_game); a flick steps over the screen's controls.
+    c.set_context(false, true, 0, false);
+    c.update(pad_with(kB), t += 16);
+    CHECK(!g_right && g_keys[VK_ESCAPE]);
+    c.update(pad_with(0), t += 16);
+    const int before = menus.asked;
+    c.update(pad_with(0, 156, 0), t += 16);
+    c.update(pad_with(0), t += 16);
+    CHECK(menus.asked == before + 1);
+    // No menu world (the default): B is the right button with a panel open.
+    Controls plain;
+    plain.set_frame(640, 480);
+    plain.set_context(true, true, 1ull << 0x01, false);
+    plain.update(pad_with(kB), 0);
+    CHECK(g_right && !g_keys[VK_ESCAPE]);
+    plain.update(pad_with(0), 16);
+}
+
+static void test_controls_holding()
+{
+    FakeMenus menus;
+    menus.open = {inventory()};
+    Controls c;
+    c.set_frame(640, 480);
+    c.set_menu_nav(&menus);
+    c.set_context(true, true, 1ull << 0x01, true);
+    int x, y;
+    inv_cell(0, 2, x, y);
+    c.warp_cursor(x, y);
+    uint64_t t = 1000;
+    c.update(pad_with(0), t);
+    c.update(pad_with(0, -156, 0), t += 16);
+    c.update(pad_with(0), t += 16);
+    CHECK(c.cursor_x() == 160 && c.cursor_y() == 240);
+    c.update(pad_with(0, 156, 0), t += 16);
+    c.update(pad_with(0), t += 16);
+    CHECK(c.cursor_x() == x && c.cursor_y() == y);
+    // Nowhere to go (no windows): the cursor stays where the flick began.
+    menus.open.clear();
+    c.update(pad_with(0, 156, 0), t += 16);
+    c.update(pad_with(0, 156, 0), t += 16);
+    c.update(pad_with(0), t += 16);
+    CHECK(c.cursor_x() == x && c.cursor_y() == y);
+}
+
+// ---- B out of the game: Escape (one screen back), not on the main menu ----
+
 int main()
 {
     test_direction();
@@ -783,6 +994,9 @@ int main()
     test_controls_game_menu();
     test_weapon_tabs();
     test_keyboard_pass_through();
+    test_controls();
+    test_controls_holding();
+    test_control_panel_plain_click();
     if (g_fail) {
         std::printf("%d checks FAILED\n", g_fail);
         return 1;

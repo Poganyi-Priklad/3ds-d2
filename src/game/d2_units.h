@@ -104,6 +104,14 @@ void set_aim_clock(uint64_t (*clock_us)());
 // 4 Barbarian, 5 Druid, 6 Assassin), -1 when not in a game.
 int player_class();
 
+// One of the player's own stats (itemstatcost.txt's number: 4 the stat
+// points left to spend, 5 the skill points, 12 the level), from the base
+// stat list; 0 if it has none, or not in a game. 1.14d, checked on the
+// Linux lane: unit +0x5C the stat list, whose +0x24 points to its entries
+// and +0x28 (low 16 bits) counts them; an entry is 8 bytes: the stat's
+// number << 16 | its parameter, then its value.
+int player_stat(int stat);
+
 }  // namespace game
 
 #endif

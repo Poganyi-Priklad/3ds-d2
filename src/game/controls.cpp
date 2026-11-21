@@ -196,8 +196,7 @@ void Controls::stick_cursor(int sx, int sy, float speed_800, float &acc_x, float
 // the bit the flick itself moved it doesn't count.
 void Controls::menu_flick(const Pad &pad)
 {
-    // In the game with a panel open (the game menu, Configure Controls; other
-    // panels' windows are filled in a later commit); out of it, D2Win's screens.
+    // In the game with a panel open; out of it, D2Win's screens.
     const bool open = menu_world_ && (in_game_ ? panel_open_ : true);
     if (!open) {
         if (menu_was_open_)
@@ -691,8 +690,8 @@ void Controls::update(const Pad &pad, uint64_t now_ms)
             bound_[i] = 0;   // a game menu's submenu: B is its "Previous", one menu back
             game_menu_click(game_menu_.previous, now_ms);
         } else if ((pressed & b.button) && b.button == kB && !r_layer && !zr_layer && menu_world_ && in_game_ &&
-                   panel_open_ && (game_menu_on_ || (ui_ & kUiConfigure))) {
-            bound_[i] = VK_ESCAPE;   // the top game menu, or Configure Controls
+                   panel_open_) {
+            bound_[i] = VK_ESCAPE;   // menu navigation: B is the panel's back or close
             key(bound_[i], true);
         } else if ((pressed & b.button) && b.button == kB && !r_layer && !zr_layer && menu_world_ && !in_game_) {
             // Out of the game (character select, the class screen, a
@@ -784,10 +783,23 @@ void Controls::update(const Pad &pad, uint64_t now_ms)
             walk_dir_x_ = vx / m;
             walk_dir_y_ = -vy / m;
         }
+        // A or B pressed with the cursor on the game's own interface (the
+        // control panel, the open belt): a plain click there for the whole
+        // press, no auto-target.
+        if ((pressed & (kA | kB)) && !aiming_) {
+            aim_on_interface_ = in_game_ && !panel_open_ &&
+                                (menu_world_ ? menu_world_->on_interface(ui_, cx_, cy_, w_, h_)
+                                             : control_panel_at(cx_, cy_, w_, h_));
+            if (aim_on_interface_)
+                rt::logf("aim: %s on the game's interface at %d,%d: a plain click", (pressed & kA) ? "A" : "B", cx_,
+                         cy_);
+        }
+        if (!(held & (kA | kB)))
+            aim_on_interface_ = false;
         AimPoll poll;
         poll.now_ms = now_ms;
         poll.allowed = in_game_ && !panel_open_ && !holding_ && !item_step_ && !(held & kL) && !pad.aim_off &&
-                       !pad.pointing && !select_layer;
+                       !pad.pointing && !select_layer && !aim_on_interface_;
         poll.a_held = (held & kA) && bound_[0] == kMouseLeft;
         poll.b_held = (held & kB) && bound_[1] == kMouseRight;
         poll.a_pressed = poll.a_held && (pressed & kA);

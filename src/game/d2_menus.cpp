@@ -2,10 +2,11 @@
 //
 // This file is menu navigation's only contact with the game: it reads (never
 // writes) Diablo II 1.14d's memory to find which windows are open and where
-// their cells are, and hands them to menu_nav.cpp as NavWindow lists.
-// This commit covers D2Win's screens before the game (main menu, character
-// select, class screen, difficulty, multiplayer). Later commits add the
-// game menu, in-game panels, and the NPC menu box found in the frame.
+// their cells are (inventory.txt and belts.txt rows, the NPC menu, the game
+// menu, D2Win's control list before the game), and hands them to
+// menu_nav.cpp as NavWindow lists. When the game's memory says nothing
+// useful (an NPC menu drawn without its record), menus_frame finds the box
+// in the frame's pixels instead.
 #include "game/d2_menus.h"
 
 #include "game/d2_units.h"
@@ -14,17 +15,220 @@
 #include <algorithm>
 #include <cstring>
 
+
 namespace game {
 namespace {
 
-constexpr uint64_t ui_bit(int id) { return 1ull << id; }
+constexpr uint32_t kInventoryTxtVa = 0x0096D4F4;
+constexpr uint32_t kInventoryRowSize = 0xF0;
+constexpr uint32_t kBeltsTxtVa = 0x0096D4F8;
+constexpr uint32_t kBeltsRowSize = 0x108;
+constexpr int kDefaultBeltRow = 2;      // no belt worn: the one row of four
+constexpr int kBeltRows800 = 7;         // belts.txt's rows at 800x600 start here
+constexpr int kBeltRowsPerSize = 7;     // belts.txt's rows at one size (0-6)
+constexpr uint32_t kWornBeltVa = 0x00722354;   // the worn belt's belts.txt row (0-6), 2 with none
+constexpr uint32_t kBeltOpenVa = 0x007BEFA0;   // non-zero while the belt's upper rows are shown
+constexpr uint32_t kNpcMenuVa = 0x007C0E54;
+constexpr uint32_t kUiTableVa = 0x007A27C0;
+constexpr int kUiNpcMenu = 0x08;
+constexpr int kStatPoints = 4;          // itemstatcost.txt: the stat points left
 
+// One 32-bit word of guest memory (0 when it can't be read).
 uint32_t rd32(uint32_t va)
 {
     uint32_t v = 0;
     rt::guest_read(va, &v, 4);
     return v;
 }
+
+constexpr uint64_t ui_bit(int id) { return 1ull << id; }
+
+// inventory.txt's rows, by what they are (at 640x480; +16 at 800x600).
+enum Row : int { kShopRow = 5, kTheirTradeRow = 6, kMyTradeRow = 7, kCubeRow = 9, kStashRow = 12,
+                 kMercenaryRow = 13, kDruidRow = 14, kAssassinRow = 15 };
+
+// A left, right, top, bottom rectangle as the table keeps it.
+bool read_rect(uint32_t va, NavRect &out)
+{
+    int32_t r[4] = {};
+    if (!rt::guest_read(va, r, sizeof r))
+        return false;
+    out = NavRect{r[0], r[2], r[1], r[3]};
+    return !out.empty() && out.left >= 0 && out.top >= 0 && out.right <= 2048 && out.bottom <= 2048;
+}
+
+struct InventoryRow {
+    NavRect panel, grid;
+    int columns = 0, rows = 0;
+    NavRect slots[10];
+    bool slot_used[10] = {};
+};
+
+// A row of inventory.txt as it is numbered (0-31).
+bool read_table_row(int row, InventoryRow &out)
+{
+    const uint32_t rows = rd32(kInventoryTxtVa);
+    if (!rows || row < 0 || row > 31)
+        return false;
+    const uint32_t at = rows + (uint32_t)row * kInventoryRowSize;
+    if (!read_rect(at, out.panel))
+        return false;
+    uint8_t size[2] = {};
+    rt::guest_read(at + 0x10, size, 2);
+    out.columns = size[0];
+    out.rows = size[1];
+    if (out.columns > 16 || out.rows > 16 || !read_rect(at + 0x14, out.grid))
+        out.columns = out.rows = 0;
+    for (int i = 0; i < 10; i++)
+        out.slot_used[i] = read_rect(at + 0x28 + 0x14 * i, out.slots[i]);
+    return true;
+}
+
+// A row by what it is, for the frame's width (rows 16-31 at 800x600).
+bool read_row(int row, int width, InventoryRow &out)
+{
+    return read_table_row(row + (width >= 800 ? 16 : 0), out);
+}
+
+int inventory_row(int cls) { return cls <= 4 ? cls : cls == 5 ? kDruidRow : kAssassinRow; }
+
+// How far this width moves the left and right halves' panels from where
+// they are at 640x480: a shop's row and the class's row against the same
+// rows at 640x480. What inventory.txt can't tell keeps the centred guess.
+PanelShift read_shift(int cls, int width, int height)
+{
+    PanelShift s = panel_shift(width, height);
+    InventoryRow small, big;
+    if (read_table_row(kShopRow, small) && read_row(kShopRow, width, big)) {
+        s.left_x = big.panel.left - small.panel.left;
+        s.left_y = big.panel.top - small.panel.top;
+    }
+    if (read_table_row(inventory_row(cls), small) && read_row(inventory_row(cls), width, big)) {
+        s.right_x = big.panel.left - small.panel.left;
+        s.right_y = big.panel.top - small.panel.top;
+    }
+    return s;
+}
+
+// The belt's boxes under the screen, from belts.txt (rows of 0x108 bytes:
+// +0x04 the number of boxes, +0x08 sixteen boxes of left, right, top,
+// bottom; rows 0-6 at 640x480, 7-13 at 800x600). Its first four boxes are
+// the row always shown; the rest, the worn belt's upper rows, only while the
+// game shows them (kBeltOpenVa, which the game sets each frame from the belt
+// being open - the cursor on it, or it clicked - and the worn belt having
+// more than one row; kWornBeltVa, the worn belt's row, the game keeps from
+// the item). So a flick up from the row of four opens the rest, and one off
+// the belt closes it again.
+void add_belt(int width, std::vector<NavWindow> &out)
+{
+    const uint32_t rows = rd32(kBeltsTxtVa);
+    if (!rows)
+        return;
+    uint32_t worn = rd32(kWornBeltVa);
+    if (worn >= (uint32_t)kBeltRowsPerSize)
+        worn = kDefaultBeltRow;
+    const uint32_t at = rows + (worn + (uint32_t)(width >= 800 ? kBeltRows800 : 0)) * kBeltsRowSize;
+    const uint32_t boxes = rd32(at + 0x04);
+    if (boxes < 4 || boxes > 16)
+        return;
+    const uint32_t shown = rd32(kBeltOpenVa) ? boxes : 4;
+    NavWindow w;
+    w.name = "belt";
+    for (uint32_t i = 0; i < shown; i++) {
+        NavRect box;
+        if (!read_rect(at + 0x08 + 0x10 * i, box))
+            return;
+        w.cells.push_back(box);
+        w.area = i ? NavRect{std::min(w.area.left, box.left), std::min(w.area.top, box.top),
+                             std::max(w.area.right, box.right), std::max(w.area.bottom, box.bottom)}
+                   : box;
+    }
+    if (shown > 4) {
+        // Open, the belt's upper rows are drawn over the inventory's bottom
+        // rows: the cells under them are hidden, and the belt's boxes join
+        // the panel they sit on, so a flick goes between the two as between
+        // any two neighbouring cells.
+        const NavRect &top = w.cells[shown - 1];
+        for (NavWindow &other : out)
+            other.cells.erase(std::remove_if(other.cells.begin(), other.cells.end(),
+                                             [&](const NavRect &cell) {
+                                                 return w.area.contains(cell.centre_x(), cell.centre_y());
+                                             }),
+                              other.cells.end());
+        for (NavWindow &other : out)
+            if (!other.up_down_only && other.area.contains(top.centre_x(), top.centre_y())) {
+                other.cells.insert(other.cells.end(), w.cells.begin(), w.cells.end());
+                return;
+            }
+    }
+    out.push_back(w);
+}
+
+// An NPC's menu as the game keeps it: a pointer to it while its box is
+// shown (0 during a talk's text and once closed); +0x2C its box's left,
+// +0x30 top, +0x34 width, +0x38 height, +0x4C its options, Cancel too.
+bool read_npc_menu(NavRect &box, int &options)
+{
+    const uint32_t menu = rd32(kNpcMenuVa);
+    if (!menu)
+        return false;
+    int32_t r[4] = {};
+    if (!rt::guest_read(menu + 0x2C, r, sizeof r))
+        return false;
+    options = (int)rd32(menu + 0x4C);
+    box = NavRect{r[0], r[1], r[0] + r[2], r[1] + r[3]};
+    return r[0] >= 0 && r[1] >= 0 && r[2] >= 40 && r[2] <= 400 && r[3] > 0 && r[3] <= 200 && options >= 1 &&
+           options <= 8;
+}
+
+// inventory.txt's equipment boxes, in its order: the right arm (the weapon
+// drawn on the left), the torso, the left arm (the weapon or shield drawn
+// on the right), the head, the neck, two rings, the belt, the feet, the hands.
+constexpr int kRightArmSlot = 0, kLeftArmSlot = 2;
+
+// One open panel as a NavWindow, from its inventory.txt row: its grid's
+// cells (grid), its equipment slots in use (slots), or both; the hero's
+// own inventory also its two weapon swap tabs (tabs). A panel with no
+// cells is left out.
+void add_window(const char *name, int row, int width, bool grid, bool slots, std::vector<NavWindow> &out,
+                bool tabs = false)
+{
+    InventoryRow r;
+    if (!read_row(row, width, r))
+        return;
+    NavWindow w;
+    w.name = name;
+    w.area = r.panel;
+    if (grid)
+        add_grid(w, r.grid, r.columns, r.rows);
+    if (slots)
+        for (int i = 0; i < 10; i++)
+            if (r.slot_used[i])
+                w.cells.push_back(r.slots[i]);
+    if (tabs)
+        for (int i : {kRightArmSlot, kLeftArmSlot})
+            if (r.slot_used[i])
+                w.cells.push_back(weapon_tab(r.slots[i]));
+    if (!w.cells.empty())
+        out.push_back(w);
+}
+
+// ---- the NPC menu's box in the frame ----
+
+NavRect g_box;
+bool g_box_valid = false;
+NavRect g_said;   // the game's menu box last logged
+
+// Whether the frame's pixel at x, y is bright enough to be the NPC menu
+// box's border against the darker scene (find_box follows it to measure
+// the box).
+bool border(const uint8_t *pixels, const uint32_t *palette, int32_t stride, int x, int y)
+{
+    const uint32_t c = palette[pixels[(ptrdiff_t)y * stride + x]];
+    return ((c >> 16) & 0xFF) + ((c >> 8) & 0xFF) + (c & 0xFF) > 120;
+}
+
+// ---- D2Win's screens (out of the game) ----
 
 constexpr uint32_t kD2WinFirstVa = 0x007D55BC;   // the screen's first control; +0x3C the next
 constexpr uint32_t kAnimatedDrawFn = 0x005005B0;  // an animated image's draw function (+0x1C)
@@ -72,6 +276,11 @@ bool read_control(uint32_t va, D2WinControl &c, uint32_t &next)
     return true;
 }
 
+// Out of the game (main menu, character select, class screen...): one
+// window, "screen", with a cell for every D2Win control the player can
+// use, walked from the screen's control list; and the character list's
+// scroll column, when it has one.
+// The current screen's controls, walked from its list (out of the game only).
 void d2win_controls(std::vector<D2WinControl> &controls)
 {
     controls.clear();
@@ -153,6 +362,22 @@ bool read_game_menu(int width, int height, GameMenu &out)
 // The MenuWorld the console and the Linux lane use (tests/menu has its own).
 class GameMenuWorld : public MenuWorld {
 public:
+    bool on_interface(uint64_t ui, int x, int y, int width, int height) override
+    {
+        (void)ui;
+        if (control_panel_at(x, y, width, height))
+            return true;
+        if (!rd32(kBeltOpenVa))
+            return false;
+        std::vector<NavWindow> belt;   // the belt's open rows, over the world
+        add_belt(width, belt);
+        for (const NavWindow &w : belt)
+            for (const NavRect &cell : w.cells)
+                if (cell.contains(x, y))
+                    return true;
+        return false;
+    }
+
     bool main_menu() override
     {
         if (player_class() >= 0)
@@ -171,18 +396,142 @@ public:
 
     void windows(uint64_t ui, int width, int height, std::vector<NavWindow> &out) override
     {
-        (void)ui;
         out.clear();
-        if (player_class() < 0)   // out of the game: D2Win's screen
+        const int cls = player_class();
+        if (cls < 0) {   // out of the game: D2Win's screen
             d2win_windows(width, height, out);
+            return;
+        }
+        const PanelShift shift = read_shift(cls, width, height);
+        if (ui & ui_bit(0x09)) {   // the game menu, over everything
+            fixed_windows(ui, shift, false, out);
+            return;
+        }
+        // The right half: the inventory, also beside a shop, the stash, the
+        // cube and a trade.
+        const bool inventory = ui & (ui_bit(0x01) | ui_bit(0x0C) | ui_bit(0x17) | ui_bit(0x19) | ui_bit(0x1A));
+        if (inventory)
+            add_window("inventory", inventory_row(cls), width, true, true, out, true);
+        if (ui & ui_bit(0x0C))
+            add_window("shop", kShopRow, width, true, false, out);
+        if (ui & ui_bit(0x19))
+            add_window("stash", kStashRow, width, true, false, out);
+        if (ui & ui_bit(0x1A))
+            add_window("cube", kCubeRow, width, true, false, out);
+        if (ui & ui_bit(0x17)) {
+            add_window("their trade", kTheirTradeRow, width, true, false, out);
+            add_window("my trade", kMyTradeRow, width, true, false, out);
+        }
+        if (ui & ui_bit(0x24))
+            add_window("mercenary", kMercenaryRow, width, false, true, out);
+        if (inventory)   // the belt under it, to move potions
+            add_belt(width, out);
+        fixed_windows(ui, shift, ui & ui_bit(0x02) ? player_stat(kStatPoints) > 0 : false, out);
+        NavWindow menu;
+        NavRect box;
+        int options = 0;
+        if (ui & ui_bit(kUiNpcMenu)) {
+            if (read_npc_menu(box, options) ? npc_menu_window(box, options, menu)
+                                            : g_box_valid && npc_menu_window(g_box, menu))
+                out.push_back(menu);
+        }
     }
 };
 
 }  // namespace
 
+namespace {
+void find_box(const uint8_t *pixels, const uint32_t *palette, uint32_t width, uint32_t height, int32_t stride);
+}
+
 void menus_frame(const uint8_t *pixels, const uint32_t *palette, uint32_t width, uint32_t height, int32_t stride)
 {
-    (void)pixels, (void)palette, (void)width, (void)height, (void)stride;
+    const bool was = g_box_valid;
+    const NavRect before = g_box;
+    NavRect box;
+    int options = 0;
+    if (read_npc_menu(box, options)) {
+        // The game's own menu: the frame isn't needed.
+        g_box_valid = false;
+        if (box.left != g_said.left || box.top != g_said.top || box.right != g_said.right ||
+            box.bottom != g_said.bottom)
+            rt::logf("menu: an NPC's menu of %d options at %d..%d by %d..%d (the game's)", options, box.left,
+                     box.right - 1, box.top, box.bottom - 1);
+        g_said = box;
+        return;
+    }
+    g_said = NavRect();
+    find_box(pixels, palette, width, height, stride);
+    if (g_box_valid && (!was || before.left != g_box.left || before.top != g_box.top ||
+                        before.right != g_box.right || before.bottom != g_box.bottom))
+        rt::logf("menu: an NPC's menu at %d..%d by %d..%d", g_box.left, g_box.right - 1, g_box.top, g_box.bottom - 1);
+}
+
+namespace {
+void find_box(const uint8_t *pixels, const uint32_t *palette, uint32_t width, uint32_t height, int32_t stride)
+{
+    g_box_valid = false;
+    if (!pixels || !palette || width < 320 || height < 240 || !rd32(kUiTableVa + kUiNpcMenu * 4))
+        return;
+    // A shop, the inventory or another panel over it (the menu is gone).
+    for (int id : {0x01, 0x0C, 0x17, 0x19, 0x1A})
+        if (rd32(kUiTableVa + id * 4))
+            return;
+    const int w = (int)width, h = (int)height;
+    auto lit = [&](int x, int y) { return border(pixels, palette, stride, x, y); };
+    // The border is two pixels wide: either of two rows (or columns).
+    auto across = [&](int x, int y) { return lit(x, y) || lit(x, y + 1); };
+    auto down = [&](int x, int y, int inward) { return lit(x, y) || lit(x + inward, y); };
+    // The box's top: a row of border pixels, not lit above it, whose two
+    // ends go down as far as each other with the inside dark under the top.
+    for (int y = 1; y < h * 2 / 3; y++) {
+        for (int x = 8; x < w - 8; x += 8) {
+            if (!lit(x, y) || lit(x, y - 1))
+                continue;
+            int left = x, right = x;
+            while (left > 0 && across(left - 1, y))
+                left--;
+            while (right < w - 1 && across(right + 1, y))
+                right++;
+            x = right;   // the next look after this run
+            // (A talk's text box across the top is wider: 328 pixels.)
+            if (right - left < 50 || right - left > 300)
+                continue;
+            int bottom = y, bottom_right = y;
+            while (bottom < h - 1 && down(left, bottom + 1, 1))
+                bottom++;
+            while (bottom_right < h - 1 && down(right, bottom_right + 1, -1))
+                bottom_right++;
+            // (Something bright under a corner may make one side look longer.)
+            bottom = bottom_right < bottom ? bottom_right : bottom;
+            if (bottom - y < 40 || bottom - y > 200)
+                continue;
+            int closed = 0;   // the bottom edge across
+            for (int i = left; i <= right; i++)
+                closed += lit(i, bottom) || lit(i, bottom - 1) || lit(i, bottom - 2);
+            if (closed * 10 < (right - left + 1) * 9)
+                continue;
+            int dark = 0;
+            for (int i = left + 4; i < right - 4; i++)
+                dark += !lit(i, y + 5);
+            if (dark * 4 < (right - left - 8) * 3)
+                continue;
+            g_box = NavRect{left, y, right + 1, bottom + 1};
+            g_box_valid = true;
+            return;
+        }
+    }
+}
+}  // namespace
+
+bool npc_menu_box(NavRect &out)
+{
+    int options = 0;
+    if (read_npc_menu(out, options))
+        return true;
+    if (g_box_valid)
+        out = g_box;
+    return g_box_valid;
 }
 
 MenuWorld &game_menu_world()

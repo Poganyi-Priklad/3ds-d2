@@ -667,4 +667,20 @@ int player_class()
     return player ? (int)rd32(player + 0x04) : -1;
 }
 
+int player_stat(int stat)
+{
+    const uint32_t player = rd32(kPlayerUnitVa);
+    const uint32_t list = player ? rd32(player + 0x5C) : 0;
+    if (!list)
+        return 0;
+    const uint32_t entries = rd32(list + 0x24);
+    const uint32_t count = rd32(list + 0x28) & 0xFFFF;
+    if (!entries || count > 512)
+        return 0;
+    for (uint32_t i = 0; i < count; i++)
+        if (rd32(entries + i * 8) == (uint32_t)stat << 16)
+            return (int)rd32(entries + i * 8 + 4);
+    return 0;
+}
+
 }  // namespace game

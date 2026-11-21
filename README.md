@@ -23,7 +23,7 @@ The main thanks go to exsilium, the author of the original port. Everything here
 What this fork adds:
 
 - **Auto-target** on A and B: the cursor goes onto the enemy the circle pad points at before the button is pressed; flicks of the pad switch targets; ZR + D-pad picks up items; a new AIM tab on the bottom screen with settings and an FAQ. In the game world the circle pad's walk keeps off units and warps, and letting go stops the hero where he stands. See [docs/fork-auto-target.md](docs/fork-auto-target.md).
-- **Menu navigation**: quick flicks of the circle pad move the cursor one cell or option at a time through the game menu and the screens before the game; B closes and goes back. See [docs/fork-menu-nav.md](docs/fork-menu-nav.md).
+- **Menu navigation**: quick flicks of the circle pad move the cursor one cell or option at a time through panels, NPC menus, the game menu and the screens before the game; B closes and goes back. See [docs/fork-menu-nav.md](docs/fork-menu-nav.md).
 
 If you try the auto-aim, I would be really glad to hear how it feels: what works, what gets in the way, and any ideas for making it better. Please open an issue on this fork.
 

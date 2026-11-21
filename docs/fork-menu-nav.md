@@ -20,6 +20,16 @@ the later parts use.
 flick the auto-target uses, set by `aim_flick_ms` and `aim_flick_light`) up,
 down, left or right:
 
+- **In open panels** (inventory and equipment, stash, shop, Horadric Cube,
+  trade, the mercenary, the belt, the character screen and its "+" buttons,
+  the skill tree, the quest log, the waypoints): the cursor moves one cell.
+  At a window's edge it goes into the window next to it at the same relative
+  place, or comes round to the far side. With an item on the cursor, a flick
+  off the window puts the cursor on the free half of the screen to drop it.
+  In the inventory, the weapon swap tabs drawn as "I" and "II" over each
+  weapon are one button per weapon (either swaps the weapons, as W does): a
+  flick up from a weapon reaches the tab over it.
+- **In an NPC's menu**: up and down move between its options.
 - **In the game menu** (Start) and its submenus: a push of the circle pad up
   or down (half way out, back to the centre between two) is the game's own
   Up or Down arrow key, and the cursor follows the lit row, so **A** takes
@@ -30,19 +40,15 @@ down, left or right:
   eight heroes, a flick right from the right column reaches the scroll bar's
   up and down buttons, and A scrolls one row a press.
 
-The same core also steps one cell at a time in a grid of cells, goes into the
-window next to it at the same relative place, comes round a window's edge, and
-(with an item on the cursor) puts the cursor on the free half of the screen.
-Those rules are used once in-game panels are wired in a later commit on this
-branch.
-
 ## Button mapping (what this commit changes)
 
 | Button | Before | With menu navigation |
 | --- | --- | --- |
-| Circle pad flick, before the game | Moves the free cursor a little | Moves the cursor one cell or option |
-| Circle pad slow tilt | Moves the free cursor | Unchanged |
+| Circle pad flick, panel or menu open | Moves the free cursor a little | Moves the cursor one cell or option |
+| Circle pad slow tilt, panel or menu open | Moves the free cursor | Unchanged |
+| B, panel or NPC menu open | Right mouse button | **Escape**: closes the panel or the NPC menu, goes one menu back |
 | B, game submenu | Right mouse button | **Previous** (one menu back); in the top menu, Escape |
+| A, the game's interface (bottom bar, globes, mini-panel) | Left button, possibly aimed | A plain click where the cursor is |
 | B, before the game (character select, class screen, difficulty, multiplayer screens) | Right mouse button | **Escape**: back to the screen before; on the main menu B does nothing |
 
 The flick itself uses the auto-target's `aim_flick_ms` and `aim_flick_light`.
@@ -55,8 +61,8 @@ It reads the game's memory to know where things are and never writes it.
 | File | What it does |
 | --- | --- |
 | `src/game/menu_nav.h`, `.cpp` | The rules, as pure geometry: which cell a flick goes to, between windows, round the edges, the scroll column; tested with made-up windows |
-| `src/game/d2_menus.h`, `.cpp` | Reads D2Win's control list before the game, and the game menu's rows and lit row |
-| `src/game/controls.cpp` | Runs it: flicks to cells on the screens before the game, the arrow keys in the game menu, B as Escape or Previous |
+| `src/game/d2_menus.h`, `.cpp` | Reads where the open windows and their cells are: `inventory.txt` and `belts.txt` rows, the NPC menu, the game menu's rows and lit row, D2Win's control list before the game (with the frame's pixels as a fallback for the NPC menu box) |
+| `src/game/controls.cpp` | Runs it: flicks to cells, B as Escape or Previous, the arrow keys in the game menu, plain clicks on the interface |
 
 `game.log` gets `menu:` lines saying where each flick went.
 

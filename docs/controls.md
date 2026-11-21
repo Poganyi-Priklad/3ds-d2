@@ -16,11 +16,11 @@ The mapping lives in `src/game/controls.cpp`. It follows the ideas D2Vita proved
 
 | Input | Action |
 | --- | --- |
-| Circle pad | In menus and with a panel open: move the cursor; a flick moves it one cell, option or button on the screens before the game (see [Menu navigation](#menu-navigation)). In the game world: walk. The cursor orbits the character in the stick's direction, the left button is held while the pad is pushed, and a fuller push reaches further. The walk never acts on anything: its point keeps off NPCs, monsters, objects, items and level warps (cave entrances, stairs, passages: the walk never takes the hero to another level; standing by one, he can walk away from it but not onto it). Let go, and the hero stops where he stands (a one-frame click on the next subtile ahead of him, so he stops facing the way he walked, mostly one or two subtiles on; none beside a warp; "Walk stop" off in AIM > SETTINGS, or `aim_walk_stop=0`, leaves the click out). |
+| Circle pad | In menus and with a panel open: move the cursor; a flick moves it one cell, option or button, also on the screens before the game (see [Menu navigation](#menu-navigation)). In the game world: walk. The cursor orbits the character in the stick's direction, the left button is held while the pad is pushed, and a fuller push reaches further. The walk never acts on anything: its point keeps off NPCs, monsters, objects, items and level warps (cave entrances, stairs, passages: the walk never takes the hero to another level; standing by one, he can walk away from it but not onto it). Let go, and the hero stops where he stands (a one-frame click on the next subtile ahead of him, so he stops facing the way he walked, mostly one or two subtiles on; none beside a warp; "Walk stop" off in AIM > SETTINGS, or `aim_walk_stop=0`, leaves the click out). |
 | C-stick (New 3DS) | Move the cursor |
 | Touch (bottom screen) | Depends on the tab (see [Bottom screen](#bottom-screen)). On MAP and INFO, a touchpad: drag moves the cursor (one drag across the pad crosses the frame); a short tap clicks where the cursor is |
 | A | Left mouse button (held). In the game world it aims first: see [Auto-target](#auto-target-a-and-b) |
-| B | Right mouse button (held): cast the right skill. In the game world it aims first, like A. In a submenu of the game menu, its Previous; before the game, Escape (back one screen; nothing on the main menu) (see [Menu navigation](#menu-navigation)) |
+| B | Right mouse button (held): cast the right skill. In the game world it aims first, like A. With a panel open in the game: Escape, the panel's back or close; in a submenu of the game menu, its Previous; before the game, Escape (back one screen; nothing on the main menu) (see [Menu navigation](#menu-navigation)) |
 | X | Inventory (I) |
 | Y | Show items on the ground (Alt, held). With a shop open: sells the item under the cursor. With the inventory open (and no other panel on the left): drops it on the ground. If the cursor isn't on an item, nothing happens. |
 | L | Stand still (Shift, held) |
@@ -113,9 +113,17 @@ game.log's `aim:` lines say what it chose and why it let go, and every 30 s of u
 
 ## Menu navigation
 
-On the screens before the game (the main menu, character select, the class screen, difficulty, multiplayer), a **flick** of the circle pad (the auto-target's flick: `aim_flick_ms`, `aim_flick_light`) moves the cursor one cell or control up, down, left or right (`src/game/menu_nav.cpp`). A slow tilt moves the cursor freely, as before. After a flick the cursor stays on its cell until the pad is back in the centre.
+In the game with a panel or an NPC's menu open, a **flick** of the circle pad (the auto-target's flick: `aim_flick_ms`, `aim_flick_light`) moves the cursor one cell or option up, down, left or right (`src/game/menu_nav.cpp`). A slow tilt moves the cursor freely, as before. After a flick the cursor stays on its cell until the pad is back in the centre.
 
-On the character screen with more than eight heroes, a flick right from the right column reaches the scroll bar's up and down buttons, and A scrolls one row a press. A scroll button that has reached the end of the list sends the cursor back to the nearest slot.
+- One cell a flick, also over an item that covers several cells.
+- The inventory's weapon swap tabs ("I" and "II" over each weapon) are one cell per weapon, over it: a flick up from a weapon reaches its tab, and A there swaps the weapons (either tab does, as W does).
+- At a window's edge, a flick goes into the open window next to it, at the same relative place: the inventory and the stash, a shop or the Horadric Cube.
+- With an item on the cursor, a flick past a window's edge puts the cursor in the middle of the free half of the screen (to drop it there with A). A flick back towards the window puts it back on the cell it left.
+- Otherwise a flick past the edge comes round to the far side of the window, in the same row or column.
+- An NPC's menu (and a menu under it, such as Talk's) only goes up and down; off the menu, a flick goes onto its nearest option.
+- A is the left button as before. **B is Escape**: it closes the panel, goes back from a menu under an NPC's menu, or closes the NPC's menu or a talk. R + B and ZR + B are as before.
+
+On the screens before the game (the main menu, character select, the class screen, difficulty, multiplayer), the same flick moves the cursor one cell or control. On the character screen with more than eight heroes, a flick right from the right column reaches the scroll bar's up and down buttons, and A scrolls one row a press. A scroll button that has reached the end of the list sends the cursor back to the nearest slot.
 
 The game menu (Start) and its submenus (Options, Sound, Video, Automap) use the game's own keyboard navigation: a push of the circle pad up or down (half way out; back to the centre between two) is the Up or Down arrow key, which moves the game's light past titles and disabled rows and round at the ends, and the cursor then goes onto the lit row, so A takes it. Left and right are the Left and Right keys on a choice or a slider (they do nothing on a button). The circle pad doesn't move the cursor there (the C-stick and touch still do). When a menu opens, the cursor goes onto its lit row. **B in a submenu is its Previous** (one menu back); in the top menu it is Escape (the menu closes). Configure Controls keeps a free cursor: the circle pad moves it, B is Escape (back to Options).
 
