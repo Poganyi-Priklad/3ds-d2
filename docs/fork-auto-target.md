@@ -1,10 +1,11 @@
 # Fork: auto-target (A and B)
 
-This branch of the fork adds an auto-target to the two attack buttons. On a
+This branch of the fork adds an auto-target to the two attack buttons, and
+makes the circle pad's walk in the game world keep off units. On a
 console there is no mouse to point at a monster, so in the game world **A** and
 **B** first put the cursor on the unit the circle pad points at, and only then
-press the left or right mouse button. Everything else about the controls stays
-as in the original port.
+press the left or right mouse button. A stick walk never talks, opens, picks
+up, attacks or takes a level warp; let go, and the hero stops where he stands.
 
 ![Auto-target: hero, circle-pad direction, a cone, the nearest enemy highlighted, adjacent-enemy priority, and flick switching](images/fork-auto-target.png)
 
@@ -40,6 +41,16 @@ this page is the short version and a map of the code.
    cursor goes just below the corpse's feet, where the game shows a corpse
    under the cursor; once the skill has been cast on it, that corpse is
    skipped for 10 minutes and B goes on to the next one.
+8. Tilt the circle pad with no panel open to walk. The cursor orbits the
+   hero in the stick's direction and the left button is held; the point
+   keeps off NPCs, monsters, objects, items and level warps (cave
+   entrances, stairs, passages: the walk never takes the hero to another
+   level; standing by one, he can walk away from it but not onto it). Let
+   go, and the hero stops where he stands (a one-frame click just ahead of
+   him, so he stops facing the way he walked). Turn "Walk stop" off in
+   AIM > SETTINGS, or set `aim_walk_stop=0`, to leave that click out. A
+   later branch can call this same walk with one side panel open, on the
+   free half of the screen.
 
 An enemy right next to the hero always comes first, so a ranged attack never
 ignores the monster hitting you. The mercenary, summons and other players are
@@ -51,6 +62,7 @@ never targets. **L** (stand still), **R + A/B** and **ZR + A/B** never aim.
 | --- | --- | --- |
 | A | Left mouse button at the cursor | Aims at the enemy (or object, NPC, item) in the circle pad's direction, then left button |
 | B | Right mouse button at the cursor | Aims at the enemy (or NPC, or a corpse for a corpse skill), then right button |
+| Circle pad (in the game world) | Walk: the cursor orbits the character, the left button is held | The same walk, but the point keeps off units and warps; let go, the hero stops where he is ("Walk stop") |
 | Circle pad flick (A or B held) | - | Switches to another enemy |
 | ZR + D-pad up (held) | Free | Picks up unique and set items, then runes |
 | ZR + D-pad right (held) | Free | Picks up gold |
@@ -64,6 +76,8 @@ first start with their defaults (`aim=1`, `aim_a_mode=enemies`,
 `aim_a_cone=45`, `aim_a_range=20`, ...; the full table is in
 [controls.md](controls.md#auto-target-a-and-b)). `aim=0` turns the auto-target
 off and A and B click where the cursor is, exactly as in the original port.
+`aim_walk_stop=1` (default) is the stop click when the pad is let go after a
+walk; `0` leaves it out.
 
 Most settings can also be changed while playing on the bottom screen's new
 **AIM** tab: its **SETTINGS** page has a row per setting with **-** and **+**
@@ -86,8 +100,8 @@ writes the game's memory.
 | `src/game/auto_target.h`, `.cpp` | The rules: what a unit counts as, which one a press or a flick picks, and the state machine that moves the cursor, waits for the game's hover to confirm it and then presses the button |
 | `src/game/aim_settings.h` | The `aim*` keys in `settings.txt`, their ranges, and the AIM tab's rows |
 | `src/game/aim_faq.h` | The text of the AIM tab's FAQ page |
-| `src/game/d2_units.cpp` (`GameAimWorld`) | Reads the hero, the camera, the hover and the nearby units from Diablo II 1.14d's memory (read only) |
-| `src/game/controls.cpp` | Runs the auto-target on every poll for plain A and B, and the ZR + D-pad loot commands |
+| `src/game/d2_units.cpp` (`GameAimWorld`) | Reads the hero, the camera, the hover and the nearby units from Diablo II 1.14d's memory (read only), and a warp's click rectangle from LvlWarp.txt |
+| `src/game/controls.cpp` | Runs the auto-target on every poll for plain A and B, the ZR + D-pad loot commands, and the stick walk (keep off units and warps, the stop click) |
 | `src/game/second_screen.cpp` | The AIM tab (SETTINGS and FAQ pages) |
 | `src/game/settings_file.h` | Rewrites `settings.txt` keeping the lines the port doesn't own, and the delayed save |
 | `src/app/ctr_game.cpp` | Loads and saves the `aim*` keys, and logs what the auto-target runs with |
@@ -98,7 +112,7 @@ and every 30 s of use an `aim: stats:` summary.
 ## Tests
 
 ```
-scripts/docker.sh test aim        # the rules against made-up units (tests/aim)
+scripts/docker.sh test aim        # the rules, and the walk's keep-off and stop, against made-up units (tests/aim)
 scripts/docker.sh test settings   # settings.txt rewritten keeping foreign lines (tests/settings)
 scripts/docker.sh test pad        # the pad's existing test, now linking the auto-target too
 ```
