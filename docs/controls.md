@@ -154,6 +154,16 @@ The windows: the inventory with its equipment slots, a shop, the stash, the Hora
 
 PANEL appears when a panel opens and is shown by itself. Choosing another tab hides it until another panel opens. When the panels close, the bottom screen goes back to your tab.
 
+**What switches by itself, and how to stop it**: INFO → **options** → **screen switches** (the OPTIONS page's second page, SCREEN; **engine options** goes back). A box per automatic switch, all on by default, applied at once and saved in settings.txt as `screenauto=` (`-name` for one that is off, `src/game/screen_auto.h`):
+
+| Row | settings.txt | On (the default) | Off |
+| --- | --- | --- | --- |
+| PANEL when a panel opens | `panels` | A panel opening on either half shows PANEL | PANEL is offered on the bar; the tab shown stays |
+| PANEL for an NPC's menu | `npcmenu` | An NPC's menu or talk shows PANEL, centred | The same, for the NPC's menu |
+| PANEL follows the cursor | `panelside` | With panels on both halves, PANEL shows the cursor's half | It stays on its half until PANEL is tapped again |
+| keyboard for a text field | `keyboard` | A text field getting the focus (a hero's or a game's name) opens the on-screen keyboard | R + Select opens it |
+| cinematic panel | `video` | A cinematic shows its own panel (title, time, how to skip) | The tab stays |
+
 **Pointing** (ZOOM and PANEL): the cursor goes to the touched spot and follows the finger. A short tap is a left click there; it picks up or drops an item, buys, or walks. Holding still for half a second is a right click; it drinks or uses an item, or casts. Dragging near the edge of the area scrolls it.
 
 The panels are found from the UI table at `0x7A27C0` (see [Telling menus from the game world](#telling-menus-from-the-game-world)): inventory and skill tree on the right; character sheet, shop, socketing, quest log, waypoints, party, trade, stash, cube and mercenary on the left; NPC dialogue in the centre. The game menu (Start) is not offered: it is readable on the top screen as it is.

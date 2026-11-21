@@ -4,6 +4,7 @@
 // one SD card write for a run of taps. Run through
 // `scripts/docker.sh test settings`.
 #include "game/aim_settings.h"
+#include "game/screen_auto.h"
 #include "game/settings_file.h"
 
 #include <cstdio>
@@ -188,6 +189,26 @@ static void test_aim_lines_written_and_read_back()
     CHECK(merge_settings_text(text2, again) == text2);
 }
 
+// "screenauto=": every switch on by default (as the port always behaved),
+// "-name" turns one off, an unknown name or a missing one changes nothing,
+// and the names written read back to the same switches.
+static void test_screen_auto_line()
+{
+    using namespace game;
+    CHECK(screen_auto_bits("") == kScreenAutoDefault);
+    CHECK(kScreenAutoDefault == (kAutoPanel | kAutoNpcMenu | kAutoPanelSide | kAutoKeyboard | kAutoVideo));
+    CHECK(screen_auto_bits("-panels") == (kScreenAutoDefault & ~kAutoPanel));
+    CHECK(screen_auto_bits("panels,-npcmenu,-video,bogus") == (kScreenAutoDefault & ~(kAutoNpcMenu | kAutoVideo)));
+    CHECK(screen_auto_bits("-keyboard\r\n") == (kScreenAutoDefault & ~kAutoKeyboard));
+    CHECK_TEXT(screen_auto_names(kScreenAutoDefault), "panels,npcmenu,panelside,keyboard,video");
+    const uint32_t some = kAutoPanelSide | kAutoVideo;
+    CHECK_TEXT(screen_auto_names(some), "-panels,-npcmenu,panelside,-keyboard,video");
+    CHECK(screen_auto_bits(screen_auto_names(some).c_str()) == some);
+    CHECK(screen_auto_bits(screen_auto_names(0).c_str()) == 0);
+    // The longest line fits load_settings' 64-byte line buffer.
+    CHECK(std::string("screenauto=" + screen_auto_names(0) + "\n").size() < 64);
+}
+
 int main()
 {
     test_new_file();
@@ -203,6 +224,7 @@ int main()
     test_save_delay_longest_wait();
     test_save_delay_pending_for_a_flush();
     test_aim_lines_written_and_read_back();
+    test_screen_auto_line();
     std::printf("RESULT settings %s (%d failures)\n", g_fail ? "FAIL" : "PASS", g_fail);
     return g_fail ? 1 : 0;
 }

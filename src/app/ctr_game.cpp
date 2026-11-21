@@ -1732,6 +1732,8 @@ void load_settings()
             g_storm_direct = std::atoi(line + 12) != 0;
         else if (std::strncmp(line, "port=", 5) == 0)   // the OPTIONS page's ticks (port_options.h)
             g_ss.set_port_options(game::port_bits(line + 5));
+        else if (std::strncmp(line, "screenauto=", 11) == 0)   // the SCREEN page's ticks (screen_auto.h)
+            g_ss.set_screen_auto(game::screen_auto_bits(line + 11));
         else if (std::strncmp(line, "floorqueue=", 11) == 0)   // its first form (issue #80)
             g_ss.set_port_options(std::atoi(line + 11) ? g_ss.port_options() | game::kPortCore2Draw
                                                        : g_ss.port_options() & ~game::kPortCore2Draw);
@@ -1783,6 +1785,7 @@ std::vector<game::SettingLine> port_settings_lines()
         {"profile", game::profile_names(g_ss.profile_choice())},
         {"tracewrites", game::trace_writes_info(g_ss.trace_writes()).name},
         {"port", game::port_names(g_ss.port_options())},
+        {"screenauto", game::screen_auto_names(g_ss.screen_auto())},
     };
     game::aim_settings_lines(g_aim_settings, lines);
     return lines;
@@ -2156,9 +2159,11 @@ void apply_pad(game::Pad pad, uint64_t now, bool last)
         }
     }
     // A newly focused text field (the hero name box, a game name) opens the
-    // keyboard. It closes by itself once that field loses the focus (the
-    // screen left, another control clicked).
-    if (gs.edit_focus && gs.edit_focus != g_last_focus && !g_osk.is_open()) {
+    // keyboard, unless the OPTIONS page's SCREEN switch says not to.
+    // It closes by itself once that field loses the focus (the screen
+    // left, another control clicked).
+    if (gs.edit_focus && gs.edit_focus != g_last_focus && !g_osk.is_open() &&
+        (g_ss.screen_auto() & game::kAutoKeyboard)) {
         g_osk.open();
         g_osk_focus = gs.edit_focus;
     } else if (g_osk.is_open() && g_osk_focus && gs.edit_focus != g_osk_focus) {

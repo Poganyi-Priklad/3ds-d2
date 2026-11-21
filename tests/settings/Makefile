@@ -11,7 +11,8 @@ CXXFLAGS := -std=gnu++17 -O1 -g -Wall -Wextra -Werror -Wno-psabi -march=armv6k -
 run: $(OUT)/settings-tests
 	$(QEMU) $(OUT)/settings-tests
 
-$(OUT)/settings-tests: settings_test.cpp $(ROOT)/src/game/settings_file.h $(ROOT)/src/game/aim_settings.h $(ROOT)/src/game/auto_target.h
+$(OUT)/settings-tests: settings_test.cpp $(ROOT)/src/game/settings_file.h $(ROOT)/src/game/aim_settings.h $(ROOT)/src/game/auto_target.h \
+                         $(ROOT)/src/game/screen_auto.h $(ROOT)/src/game/port_options.h
 	@mkdir -p $(OUT)
 	$(CXX) $(CXXFLAGS) -o $@ settings_test.cpp -static
 

@@ -157,7 +157,7 @@ BottomView::Kind SecondScreen::shown_kind() const
 {
     if (osk_ && osk_->is_open())
         return BottomView::kKeyboard;
-    if (video_)
+    if (video_ && (screen_auto_ & kAutoVideo))
         return BottomView::kVideo;
     switch (shown_tab()) {
     case BottomTab::Map: return help_ ? BottomView::kHelp : BottomView::kMap;
@@ -226,6 +226,15 @@ void SecondScreen::set_port_options(uint32_t bits)
     if (bits != port_)
         settings_changed_ = true;
     port_ = bits;
+    dirty_ = true;
+}
+
+void SecondScreen::set_screen_auto(uint32_t bits)
+{
+    bits &= kScreenAutoAll;
+    if (bits != screen_auto_)
+        settings_changed_ = true;
+    screen_auto_ = bits;
     dirty_ = true;
 }
 
@@ -299,9 +308,16 @@ void SecondScreen::panel_geometry()
         sides |= 4;
     const uint64_t panels = ui & (kLeftPanels | kRightPanels | kCentrePanels);
     if (panels != panel_ui_) {
-        // A panel opened or closed: show the panels again (unless all closed).
-        if ((panels & ~panel_ui_) != 0)
+        // A panel opened or closed: show the panels again (unless all closed),
+        // as far as the OPTIONS page's SCREEN switches allow; one they don't
+        // leaves the tab shown as it was (PANEL offered on the bar).
+        const uint64_t opened = panels & ~panel_ui_;
+        const bool side_opened = (opened & (kLeftPanels | kRightPanels)) != 0;
+        const bool menu_opened = (opened & kCentrePanels) != 0;
+        if ((side_opened && (screen_auto_ & kAutoPanel)) || (menu_opened && (screen_auto_ & kAutoNpcMenu)))
             panel_dismissed_ = false;
+        else if (opened && !panel_ui_)
+            panel_dismissed_ = true;
         panel_ui_ = panels;
         dirty_ = true;
     }
@@ -315,8 +331,8 @@ void SecondScreen::panel_geometry()
         side_ = 0;
     else if (sides == 2)
         side_ = 1;
-    else if (sides == 3 && grip_ != Grip::Point)
-        side_ = cx_ < fw_ / 2 ? 0 : 1;   // both: the cursor's half
+    else if (sides == 3 && grip_ != Grip::Point && ((screen_auto_ & kAutoPanelSide) || side_ == 2))
+        side_ = cx_ < fw_ / 2 ? 0 : 1;   // both: the cursor's half (or kept, the SCREEN switch off)
 }
 
 // The viewport, while nothing holds it: ZOOM centres the cursor; PANEL keeps
@@ -451,9 +467,9 @@ void SecondScreen::update(Pad &pad, const GameState &gs, int cursor_x, int curso
                 grip_ = Grip::MapButton;
                 key_ = 5 + (pad.touch_y - kProfRowY) / kProfRowH;   // a row of the checklist
             } else if (kind == BottomView::kInfo && options_ && pad.touch_y >= kOptRowY &&
-                       pad.touch_y < kOptRowY + kPortOptionCount * kOptRowH) {
+                       pad.touch_y < kOptRowY + (options_screen_ ? kScreenAutoCount : kPortOptionCount) * kOptRowH) {
                 grip_ = Grip::MapButton;
-                key_ = 100 + (pad.touch_y - kOptRowY) / kOptRowH;   // a row of the OPTIONS page
+                key_ = 100 + (pad.touch_y - kOptRowY) / kOptRowH;   // a row of the OPTIONS page (or SCREEN)
             } else {
                 grip_ = Grip::Pad;
             }
@@ -523,15 +539,18 @@ void SecondScreen::update(Pad &pad, const GameState &gs, int cursor_x, int curso
                     dirty_ = true;
                 }
             } else if (key_ == 3 && (checklist_ || options_)) {
-                checklist_ = options_ = false;
+                checklist_ = options_ = options_screen_ = false;
                 dirty_ = true;
             } else if (key_ == kKeyOptions) {
                 options_ = true;
                 dirty_ = true;
+            } else if (key_ >= 100 && options_screen_) {
+                set_screen_auto(screen_auto_ ^ kScreenAutos[key_ - 100].bit);   // at once
             } else if (key_ >= 100) {
                 set_port_options(port_option_tap(port_, kPortOptions[key_ - 100]));   // at once
             } else if (key_ == 4 && options_) {
-                // the OPTIONS page has no left-hand button
+                options_screen_ = !options_screen_;   // the left-hand button: OPTIONS <-> SCREEN
+                dirty_ = true;
             } else if (key_ == 3) {
                 report_ = !report_;
                 dirty_ = true;
@@ -723,6 +742,8 @@ bool SecondScreen::stage(BottomView &v, uint64_t now_ms)
             v.trace_writes = trace_writes_;
             v.options = options_;
             v.port = port_;
+            v.options_screen = options_screen_;
+            v.screen_auto = screen_auto_;
             const int rows = (kAreaH - kMapBtnH) / 8 - (int)stats_.size();
             const uint32_t n = log_head_ < (uint32_t)kLogLines ? log_head_ : (uint32_t)kLogLines;
             const uint32_t show = rows > 0 ? ((uint32_t)rows < n ? (uint32_t)rows : n) : 0;
@@ -1018,6 +1039,18 @@ void draw_bottom(uint16_t *fb, const BottomView &v, const uint8_t *frame, int fw
                 cv.text(32, y + 3, w.label, w.mode == TraceWrites::Buffered ? rgb(230, 220, 200) : kGold);
                 cv.text(32, y + 15, w.note, kHint);
             }
+        } else if (v.options && v.options_screen) {
+            // The bottom screen's automatic switches: a box each, the same rows.
+            cv.text(4, kBarH + 6, "SCREEN: what switches by itself", kGold);
+            for (int i = 0; i < kScreenAutoCount; i++) {
+                const ScreenAutoInfo &o = kScreenAutos[i];
+                const int y = SecondScreen::kOptRowY + i * SecondScreen::kOptRowH + 3;
+                const uint16_t ink = rgb(230, 220, 200);
+                cv.fill(8, y, 14, 14, ink);
+                cv.fill(10, y + 2, 10, 10, (v.screen_auto & o.bit) ? kGold : kBg);
+                cv.text(32, y + 3, o.label, ink);
+                cv.text(32, y + 15, o.note, kHint);
+            }
         } else if (v.options) {
             // The port's options: a box, its name, and under it what it
             // does; never greyed (a profiler run can compare them).
@@ -1038,6 +1071,9 @@ void draw_bottom(uint16_t *fb, const BottomView &v, const uint8_t *frame, int fw
         }
         if (v.checklist || v.options) {
             draw_map_button(cv, SecondScreen::kReportBtnX, SecondScreen::kReportBtnW, "back to INFO");
+            if (v.options)
+                draw_map_button(cv, SecondScreen::kProfBtnX, SecondScreen::kProfBtnW,
+                                v.options_screen ? "engine options" : "screen switches");
             if (v.checklist && v.profiling) {
                 const int x = SecondScreen::kProfBtnX, w = SecondScreen::kProfBtnW, y = SecondScreen::kMapBtnY;
                 cv.fill(x + 1, y + 1, w - 2, SecondScreen::kMapBtnH - 2, kGold);

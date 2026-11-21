@@ -49,6 +49,7 @@
 #include "game/osk.h"
 #include "game/port_options.h"
 #include "game/profiler.h"
+#include "game/screen_auto.h"
 
 #include <cstdint>
 #include <string>
@@ -90,6 +91,8 @@ struct BottomView {
     TraceWrites trace_writes = TraceWrites::Buffered;   // the checklist's last row
     bool options = false;             // kInfo: the OPTIONS page instead of the lines (port_options.h)
     uint32_t port = 0;                // its ticks
+    bool options_screen = false;      // ...its second page, SCREEN (screen_auto.h)
+    uint32_t screen_auto = 0;         // that page's ticks
     // kAim: the settings shown, and the page: SETTINGS, or FAQ from its
     // line aim_faq_top on.
     AimSettings aim;
@@ -162,6 +165,11 @@ public:
     static constexpr int kOptRowY = kBarH + 20, kOptRowH = 26;
     static_assert(kOptRowY + kPortOptionCount * kOptRowH <= kMapBtnY,
                   "the OPTIONS page's rows run into the buttons under them");
+    // The OPTIONS page's second page, SCREEN: the bottom screen's automatic
+    // switches (screen_auto.h), a box each, in the same rows. The left-hand
+    // button steps between the two pages.
+    static_assert(kOptRowY + kScreenAutoCount * kOptRowH <= kMapBtnY,
+                  "the SCREEN page's rows run into the buttons under them");
     // AIM: its two pages' buttons in the strip at the bottom, and the
     // SETTINGS rows (aim_settings.h's aim_setting_*): the label, then "-",
     // the value and "+" to tap.
@@ -190,6 +198,9 @@ public:
     void set_trace_writes(TraceWrites m);
     uint32_t port_options() const { return port_; }
     void set_port_options(uint32_t bits);
+    // The automatic switches that are on (screen_auto.h's bits).
+    uint32_t screen_auto() const { return screen_auto_; }
+    void set_screen_auto(uint32_t bits);
     // The buttons' shortcuts (Select + D-pad): the next or previous tab
     // along the bar (PANEL too while a panel is open), MAP, and MAP's size
     // (both showing the map, not HELP). Not while the keyboard is open.
@@ -246,6 +257,8 @@ private:
     TraceWrites trace_writes_ = TraceWrites::Buffered;
     bool options_ = false;            // INFO shows the OPTIONS page
     uint32_t port_ = kPortDefault;    // port_options.h's bits
+    bool options_screen_ = false;     // OPTIONS shows its SCREEN page
+    uint32_t screen_auto_ = kScreenAutoDefault;   // screen_auto.h's bits
     // AIM.
     AimSettings aim_;
     bool aim_changed_ = false;
