@@ -300,6 +300,10 @@ constexpr uint32_t kWarp = 5;   // a level's warp ("tile" units): cave entrances
 // Items.txt (weapons, armour and misc in one table): the rows and their
 // count, 0x1A8 bytes a row, the four-character code at +0x80.
 constexpr uint32_t kItemRowsVa = 0x0096CA5C, kItemCountVa = 0x0096CA58;
+// LvlWarp.txt as the game loaded it: the rows (0x30 bytes each: Id, then
+// SelectX, SelectY, SelectDX, SelectDY, ...) and their count (88 in 1.14d),
+// found on the lane next to the other tables' pointers.
+constexpr uint32_t kLvlWarpRowsVa = 0x0096CA00, kLvlWarpCountVa = 0x0096CA04, kLvlWarpRowSize = 0x30;
 constexpr uint32_t kItemRowSize = 0x1A8, kItemCode = 0x80;
 // objects.txt's record (the object's data +0x14 points at a pointer to
 // it): OperateFn at +0x1B3.
@@ -427,6 +431,33 @@ public:
         g_aim_cost.units += read;
         g_aim_cost.total_us += took;
         g_aim_cost.longest_us = took > g_aim_cost.longest_us ? took : g_aim_cost.longest_us;
+    }
+
+    // A warp class's click rectangle from LvlWarp.txt, read once per class.
+    bool warp_area(uint32_t cls, int &left, int &top, int &width, int &height) override
+    {
+        if (cls >= 256)
+            return false;
+        if (!warp_known_[cls]) {
+            const uint32_t rows = rd32(kLvlWarpRowsVa), count = rd32(kLvlWarpCountVa);
+            for (uint32_t i = 0; rows && count <= 1024 && i < count; i++) {
+                int32_t row[5] = {};
+                if (rt::guest_read(rows + i * kLvlWarpRowSize, row, sizeof row) && (uint32_t)row[0] == cls) {
+                    for (int k = 0; k < 4; k++)
+                        warp_select_[cls][k] = row[1 + k];
+                    warp_found_[cls] = true;
+                    break;
+                }
+            }
+            warp_known_[cls] = rows != 0;   // tables not loaded yet: asked again later
+        }
+        if (!warp_found_[cls])
+            return false;
+        left = warp_select_[cls][0];
+        top = warp_select_[cls][1];
+        width = warp_select_[cls][2];
+        height = warp_select_[cls][3];
+        return true;
     }
 
     // One object, item or warp again, by id (its bucket only).
@@ -594,6 +625,9 @@ private:
     int camera_x_ = 0, camera_y_ = 0;
     std::vector<uint32_t> pets_;
     MonsterFlags flags_;
+    // warp_area's cache: looked up, found, and SelectX, SelectY, SelectDX, SelectDY.
+    bool warp_known_[256] = {}, warp_found_[256] = {};
+    int warp_select_[256][4] = {};
 };
 
 }  // namespace

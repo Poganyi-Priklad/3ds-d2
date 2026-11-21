@@ -23,6 +23,8 @@
 //   aim_forget_ms=2500    no attack for this long: the target is forgotten
 //   aim_height=30         pixels above the target's feet for the cursor
 //   aim_confirm=4         frames to wait for the game to show the target under the cursor
+//   aim_walk_stop=1       the circle pad let go after a walk: a click just ahead of the
+//                         hero stops him there (0: no click, he finishes the walk's last step)
 //
 // Out-of-range numbers are clamped to sensible limits. aim_turn (an older
 // file's: the stick turned away from the target dropped it) is read and
@@ -104,6 +106,7 @@ inline const SwitchKey *switch_keys(int &count)
         {"aim_objects", &AimSettings::objects},
         {"aim_loot", &AimSettings::loot},
         {"aim_gold_first", &AimSettings::gold_first},
+        {"aim_walk_stop", &AimSettings::walk_stop},
     };
     count = (int)(sizeof keys / sizeof keys[0]);
     return keys;
@@ -198,13 +201,14 @@ inline void aim_settings_lines(const AimSettings &s, std::vector<SettingLine> &o
 
 // The rows of the bottom screen's AIM > SETTINGS page: a label, the value
 // as text, and "-" and "+" to change it (aim_setting_step).
-constexpr int kAimSettingRows = 14;
+constexpr int kAimSettingRows = 15;
 
 inline const char *aim_setting_label(int row)
 {
     static const char *const labels[kAimSettingRows] = {
         "Auto-target", "A aims at", "A cone", "A range", "B aims at", "B cone", "B range",
         "Flick cone", "Flick time", "Light flick", "Strong flick", "Objects", "Loot", "Gold first",
+        "Walk stop",
     };
     return row >= 0 && row < kAimSettingRows ? labels[row] : "";
 }
@@ -227,6 +231,7 @@ inline std::string aim_setting_value(const AimSettings &s, int row)
     case 11: return on_off(s.objects);
     case 12: return on_off(s.loot);
     case 13: return on_off(s.gold_first);
+    case 14: return on_off(s.walk_stop);
     default: return "";
     }
 }
@@ -263,6 +268,7 @@ inline bool aim_setting_step(AimSettings &s, int row, int direction)
     case 11: s.objects = !s.objects; return true;
     case 12: s.loot = !s.loot; return true;
     case 13: s.gold_first = !s.gold_first; return true;
+    case 14: s.walk_stop = !s.walk_stop; return true;
     default: return false;
     }
 }

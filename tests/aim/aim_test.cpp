@@ -5,7 +5,8 @@
 // picking up items (ZR + D-pad, the order, the ones with no room), the
 // settings.txt keys and the AIM tab's rows (src/game/aim_settings.h), and
 // the controls around it (src/game/controls.cpp: the stick aims instead of
-// walking, the cursor goes back). Made-up units stand in for the game. Run through
+// walking, the cursor goes back; a walk's point keeps off units and warps,
+// and letting go stops the hero just ahead). Made-up units stand in for the game. Run through
 // `scripts/docker.sh test aim`.
 #include "game/aim_settings.h"
 #include "game/auto_target.h"
@@ -759,7 +760,7 @@ static void test_settings()
                   "aim_b_cone=45\naim_b_range=20\naim_near=4\naim_near_cone=90\naim_flick_cone=30\n"
                   "aim_flick_ms=150\naim_flick_light=40\naim_flick_strong=80\naim_lost_ms=1500\n"
                   "aim_forget_ms=2500\naim_height=30\naim_confirm=4\naim_objects=1\naim_loot=1\n"
-                  "aim_gold_first=0\n");
+                  "aim_gold_first=0\naim_walk_stop=1\n");
     // An older file (Stage 2: aim_turn, A's range of 10, its default then):
     // read, its A range moved to the new default 20, and its aim_turn line
     // dropped when the file is written again.
@@ -787,6 +788,7 @@ static void test_settings()
     CHECK(parse_aim_setting("aim_objects=0", n) && !n.objects);
     CHECK(parse_aim_setting("aim_loot=0", n) && !n.loot);
     CHECK(parse_aim_setting("aim_gold_first=1", n) && n.gold_first);
+    CHECK(parse_aim_setting("aim_walk_stop=0", n) && !n.walk_stop);
     AimSettings r;
     CHECK(parse_aim_setting("aim=0\n", r) && !r.enabled);
     CHECK(parse_aim_setting("aim_b_mode=corpses\r\n", r) && r.b.mode == AimMode::kCorpses);
@@ -834,6 +836,8 @@ static void test_setting_rows()
     // On/off rows.
     CHECK(aim_setting_step(s, 13, 1) && s.gold_first && aim_setting_value(s, 13) == "on");
     CHECK(aim_setting_step(s, 12, -1) && !s.loot);
+    CHECK(std::string(aim_setting_label(14)) == "Walk stop" && aim_setting_value(s, 14) == "on");
+    CHECK(aim_setting_step(s, 14, 1) && !s.walk_stop && aim_setting_value(s, 14) == "off");
     CHECK(aim_setting_step(s, 0, 1) && !s.enabled);
     CHECK(!aim_setting_step(s, kAimSettingRows, 1));
     // Every row has a label and a value that fit the bottom screen's
@@ -1563,6 +1567,238 @@ static void test_controls_loot()
     }
 }
 
+// A box in game pixels; right and bottom are outside it (as WalkBox / NavRect).
+struct TestBox {
+    int left = 0, top = 0, right = 0, bottom = 0;
+    bool contains(int x, int y) const { return x >= left && x < right && y >= top && y < bottom; }
+};
+
+// ---- walking: the point keeps off units, and let go the hero stops ----
+struct FakeAim : AimWorld {
+    std::vector<AimUnit> monsters, ground;
+    AimView v;
+    bool view(AimView &out) override
+    {
+        out = v;
+        return true;
+    }
+    void units(std::vector<AimUnit> &out) override { out.insert(out.end(), monsters.begin(), monsters.end()); }
+    bool unit(uint32_t id, AimUnit &out) override
+    {
+        for (const AimUnit &u : monsters)
+            if (u.id == id) {
+                out = u;
+                return true;
+            }
+        return false;
+    }
+    void ground_units(std::vector<AimUnit> &out) override { out.insert(out.end(), ground.begin(), ground.end()); }
+    // Warp classes with a known click rectangle (LvlWarp.txt's): class 7 only.
+    bool warp_area(uint32_t cls, int &left, int &top, int &width, int &height) override
+    {
+        if (cls != 7)
+            return false;
+        left = -60, top = -60, width = 40, height = 60;
+        return true;
+    }
+};
+
+static AimUnit npc_at(uint32_t id, int x, int y)
+{
+    AimUnit u;
+    u.type = 1, u.id = id, u.mode = 1, u.feet_x = x, u.feet_y = y;
+    return u;
+}
+
+static void test_walk_keeps_off_units()
+{
+    FakeAim world;
+    world.v.width = 640, world.v.height = 480, world.v.hero_x = 320, world.v.hero_y = 240;
+    Controls c;
+    c.set_frame(640, 480);
+    c.set_auto_target(AimSettings(), &world);
+    c.set_context(true, false, 1, false);
+    uint64_t t = 1000;
+    c.update(pad_with(0), t);
+    // Nothing in the way: the point straight right, the button held.
+    c.update(pad_with(0, 156, 0), t += 16);
+    c.update(pad_with(0, 156, 0), t += 16);
+    CHECK(g_left && c.cursor_x() == 320 + 88 && c.cursor_y() == 225);
+    // An NPC standing on that point: the point moves off it, still held.
+    world.monsters = {npc_at(7, 410, 280)};
+    const TestBox box{382, 185, 438, 292};
+    for (int i = 0; i < 5; i++) {
+        c.update(pad_with(0, 156, 0), t += 16);
+        CHECK(!box.contains(c.cursor_x(), c.cursor_y()));
+    }
+    CHECK(g_left);
+    // A corpse and the mercenary don't count.
+    AimUnit dead = npc_at(8, 444, 240);
+    dead.mode = 12;
+    AimUnit merc = npc_at(9, 444, 240);
+    merc.owned = true;
+    world.monsters = {dead, merc};
+    c.update(pad_with(0, 156, 0), t += 16);
+    CHECK(g_left && c.cursor_x() == 408);
+    // An item and a chest on the way: off them too.
+    AimUnit item;
+    item.type = 4, item.id = 3, item.feet_x = 408, item.feet_y = 230;
+    world.monsters.clear();
+    world.ground = {item};
+    c.update(pad_with(0, 156, 0), t += 16);
+    CHECK(g_left && !(c.cursor_x() >= 386 && c.cursor_x() < 430 && c.cursor_y() >= 212 && c.cursor_y() < 242));
+    world.ground.clear();
+    // The game shows a unit under the cursor anyway (a warp, say): the
+    // button up at once, and that spot kept off.
+    c.update(pad_with(0, 156, 0), t += 16);
+    CHECK(g_left && c.cursor_x() == 408);
+    world.v.hover_on = true, world.v.hover_type = 5, world.v.hover_id = 1;
+    c.update(pad_with(0, 156, 0), t += 16);
+    CHECK(!g_left && c.cursor_x() != 408);
+    world.v.hover_on = false;
+    c.update(pad_with(0, 156, 0), t += 16);
+    c.update(pad_with(0, 156, 0), t += 16);
+    CHECK(g_left && c.cursor_x() != 408);   // walking again, off the spot for a moment
+    for (int i = 0; i < 70; i++)
+        c.update(pad_with(0, 156, 0), t += 16);
+    CHECK(g_left && c.cursor_x() == 408);   // the moment over
+    // Every point taken: the button up, the hero stops by them.
+    for (int y = 150; y <= 300; y += 40)
+        for (int x = 300; x <= 500; x += 40)
+            world.monsters.push_back(npc_at(100 + x + y, x, y + 60));
+    c.update(pad_with(0, 156, 0), t += 16);
+    CHECK(!g_left);
+    world.monsters.clear();
+    c.update(pad_with(0, 156, 0), t += 16);
+    c.update(pad_with(0, 156, 0), t += 16);
+    CHECK(g_left);
+    // Let go: the cursor 20 pixels ahead of the hero's middle (8 above his
+    // feet) the way he walked (right), a click there for one frame (with no
+    // pumps, at once and up on the next poll), then up.
+    c.update(pad_with(0), t += 16);
+    CHECK(g_left && c.cursor_x() == 340 && c.cursor_y() == 232);
+    c.update(pad_with(0), t += 16);
+    CHECK(!g_left);
+    c.update(pad_with(0), t += 40);
+    CHECK(!g_left);
+    // With a unit at his feet: no stop click, the button up at once.
+    c.update(pad_with(0, 156, 0), t += 16);
+    c.update(pad_with(0, 156, 0), t += 16);
+    CHECK(g_left);
+    world.monsters = {npc_at(11, 320, 270)};
+    c.update(pad_with(0), t += 16);
+    CHECK(!g_left);
+    c.update(pad_with(0), t += 40);
+    CHECK(!g_left);
+    world.monsters.clear();
+    // A panel opening mid-stop: the button up.
+    c.update(pad_with(0, 156, 0), t += 16);
+    c.update(pad_with(0, 156, 0), t += 16);
+    c.update(pad_with(0), t += 16);
+    CHECK(g_left);
+    c.set_context(true, true, 1ull | 1ull << 0x01 | 1ull << 0x19, false);   // the stash: both halves
+    c.update(pad_with(0), t += 16);
+    CHECK(!g_left);
+    // aim_walk_stop=0 (the AIM tab's "Walk stop" off): let go, the button
+    // up and no stop click.
+    AimSettings no_stop;
+    no_stop.walk_stop = false;
+    c.set_context(true, false, 1, false);
+    c.set_auto_target(no_stop, &world);
+    c.update(pad_with(0, 156, 0), t += 16);
+    c.update(pad_with(0, 156, 0), t += 16);
+    CHECK(g_left);
+    c.update(pad_with(0), t += 16);
+    CHECK(!g_left);
+    for (int i = 0; i < 5; i++) {
+        c.update(pad_with(0), t += 40);
+        CHECK(!g_left);
+    }
+    // With the game's pumps: up when let go, down on the next pump, up on
+    // the one after; walking up, the point is above his middle.
+    Controls p;
+    p.set_frame(640, 480);
+    p.set_auto_target(AimSettings(), &world);
+    p.set_context(true, false, 1, false);
+    p.begin_pump();
+    p.update(pad_with(0), t += 16);
+    p.update(pad_with(0, 0, 156), t += 16);
+    p.update(pad_with(0, 0, 156), t += 16);
+    CHECK(g_left);
+    p.begin_pump();
+    p.update(pad_with(0), t += 16);
+    CHECK(!g_left && p.cursor_x() == 320 && p.cursor_y() == 212);
+    p.update(pad_with(0), t += 16);
+    CHECK(!g_left);
+    p.begin_pump();
+    p.update(pad_with(0), t += 16);
+    CHECK(g_left && p.cursor_x() == 320 && p.cursor_y() == 212);
+    p.update(pad_with(0), t += 16);
+    CHECK(g_left);   // a down and up in one pump would be no click
+    p.begin_pump();
+    p.update(pad_with(0), t += 16);
+    CHECK(!g_left);
+}
+
+// ---- walking: the point keeps off a level's warps too ----
+static void test_walk_keeps_off_warps()
+{
+    FakeAim world;
+    world.v.width = 640, world.v.height = 480, world.v.hero_x = 320, world.v.hero_y = 240;
+    Controls c;
+    c.set_frame(640, 480);
+    c.set_auto_target(AimSettings(), &world);
+    c.set_context(true, false, 1, false);
+    uint64_t t = 1000;
+    c.update(pad_with(0), t);
+    c.update(pad_with(0, 156, 0), t += 16);
+    c.update(pad_with(0, 156, 0), t += 16);
+    CHECK(g_left && c.cursor_x() == 408 && c.cursor_y() == 225);   // nothing in the way
+    // A warp whose click rectangle (class 7: 60 left and up, 40 x 60) covers
+    // that point: the point moves off it (8 pixels round it, 24 below).
+    AimUnit warp;
+    warp.type = 5, warp.id = 2, warp.cls = 7, warp.feet_x = 440, warp.feet_y = 260;
+    world.ground = {warp};
+    const TestBox box{372, 192, 428, 284};
+    for (int i = 0; i < 4; i++) {
+        c.update(pad_with(0, 156, 0), t += 16);
+        CHECK(!box.contains(c.cursor_x(), c.cursor_y()));
+    }
+    CHECK(g_left);
+    // A warp of a class with no known rectangle: a cave exit's sized box
+    // (38 left, 128 up, 98 right, 54 down).
+    warp.cls = 99, warp.feet_x = 420, warp.feet_y = 280;
+    world.ground = {warp};
+    TestBox big{382, 152, 518, 334};
+    for (int i = 0; i < 4; i++) {
+        c.update(pad_with(0, 156, 0), t += 16);
+        CHECK(!big.contains(c.cursor_x(), c.cursor_y()));
+    }
+    // The hero stands in a warp's box (he came by it): he can walk away
+    // (left), not towards its spot (down); let go, no stop click at his
+    // feet (it would take him to the other level), only the button up.
+    warp.feet_x = 350, warp.feet_y = 300;
+    world.ground = {warp};
+    big = TestBox{312, 172, 448, 354};
+    c.update(pad_with(0), t += 16);
+    for (int i = 0; i < 6; i++)
+        c.update(pad_with(0), t += 40);
+    c.update(pad_with(0, -156, 0), t += 16);
+    c.update(pad_with(0, -156, 0), t += 16);
+    CHECK(g_left && c.cursor_x() == 232 && c.cursor_y() == 225);
+    for (int i = 0; i < 4; i++) {
+        c.update(pad_with(0, 0, -156), t += 16);
+        const int dx = c.cursor_x() - 350, dy = c.cursor_y() - 300;
+        CHECK(!big.contains(c.cursor_x(), c.cursor_y()) || dx * dx + dy * dy >= 30 * 30 + 60 * 60);
+    }
+    c.update(pad_with(0), t += 16);
+    CHECK(!g_left);
+    for (int i = 0; i < 4; i++) {
+        c.update(pad_with(0), t += 40);
+        CHECK(!g_left);
+    }
+}
+
 int main()
 {
     test_classify();
@@ -1597,10 +1833,12 @@ int main()
     test_controls_loot();
     test_warps();
     test_panel_area();
+    test_walk_keeps_off_units();
+    test_walk_keeps_off_warps();
     if (g_fail) {
         std::printf("aim: %d check(s) failed\n", g_fail);
         return 1;
     }
-    std::printf("aim: all checks passed (32 tests)\n");
+    std::printf("aim: all checks passed (34 tests)\n");
     return 0;
 }

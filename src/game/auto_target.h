@@ -92,6 +92,10 @@ struct AimSettings {
     int forget_ms = 2500;       // no button held for this long: the target is forgotten
     int height_px = 30;         // the cursor goes this far above the target's feet
     int confirm_polls = 4;      // frames to wait for the game to show the target under the cursor
+    // The circle pad let go after a walk: a click just ahead of the hero so
+    // he stops where he stands rather than walking on to the walk's last point.
+    // Off: no click; the hero finishes that last step (up to a few subtiles).
+    bool walk_stop = true;
 };
 
 // One unit as the game's memory has it: a monster or NPC (type 1), an
@@ -151,6 +155,14 @@ public:
     virtual bool ground_unit(uint32_t type, uint32_t id, AimUnit &out)
     {
         (void)type, (void)id, (void)out;
+        return false;
+    }
+    // Where the game takes clicks on a level warp of class `cls` (its
+    // LvlWarp.txt row's SelectX, SelectY, SelectDX, SelectDY): a rectangle
+    // in screen pixels from the warp's feet point. False if not known.
+    virtual bool warp_area(uint32_t cls, int &left, int &top, int &width, int &height)
+    {
+        (void)cls, (void)left, (void)top, (void)width, (void)height;
         return false;
     }
 };

@@ -5,7 +5,9 @@
 //
 // Default mapping (docs/controls.md):
 //   Circle pad   in the game world: walk (the cursor orbits the character and
-//                the left button is held); in menus and open panels: move the cursor
+//                the left button is held; the point keeps off units, so a
+//                walk never talks, opens, picks up or attacks; let go, the
+//                hero stops where he is); in menus and open panels: move the cursor
 //   C-stick      move the cursor (New 3DS)
 //   Touch        a touchpad: drag moves the cursor, a short tap is a left click
 //                at the cursor
@@ -34,8 +36,15 @@
 #include "game/auto_target.h"
 
 #include <cstdint>
+#include <vector>
 
 namespace game {
+
+// A rectangle in game pixels; right and bottom are outside it.
+struct WalkBox {
+    int left = 0, top = 0, right = 0, bottom = 0;
+    bool contains(int x, int y) const { return x >= left && x < right && y >= top && y < bottom; }
+};
 
 enum Button : uint32_t {
     kA = 1u << 0, kB = 1u << 1, kX = 1u << 2, kY = 1u << 3,
@@ -115,7 +124,32 @@ private:
     int cx_ = 400, cy_ = 300;     // cursor, game pixels
     uint32_t prev_ = 0;           // buttons held at the previous poll
     // Walking with the circle pad.
+    int hero_screen_x(const AimView *v) const;   // where the game draws the hero across
+    void walk(float vx, float vy, float m, bool aiming, uint64_t now_ms);
+    bool walk_blocked(int x, int y) const;   // a unit a click there would act on
+    void walk_read_units(int hero_x, int hero_y);
+    struct KeepOut {
+        WalkBox box;
+        // A warp whose box the hero stands in (he arrived by it): only the
+        // points nearer its spot than he is are kept off, so he can walk away.
+        bool warp_round_hero = false;
+        int spot_x = 0, spot_y = 0;
+    };
+    int walk_hero_x_ = 0, walk_hero_y_ = 0;   // the hero's feet when the units were read
+    bool walk_on_warp_ = false;               // ...inside a warp's box: no stop click there
+    std::vector<KeepOut> walk_units_;   // where units take clicks, this frame
+    uint32_t walk_units_pump_ = 0;
+    bool walk_units_read_ = false;
+    WalkBox walk_hover_box_;      // a spot the game showed a unit at, kept off until walk_hover_until_ms_
+    uint64_t walk_hover_until_ms_ = 0;
+    int walk_x_min_ = 0, walk_x_max_ = 1 << 20;   // the game's frame until a panel walk clips it
+    uint64_t walk_now_ms_ = 0;
     bool walking_ = false;
+    int walk_stop_ = 0;           // let go: 1 the cursor just ahead of the hero, 2 a click there, until walk_stop_ms_
+    float walk_nx_ = 0, walk_ny_ = 1;   // the walk's last direction (y up)
+    uint64_t walk_stop_ms_ = 0;
+    uint32_t walk_stop_pump_ = 0;
+    uint32_t walk_dodges_ = 0, walk_hover_releases_ = 0, walk_blocked_polls_ = 0;
     bool walk_press_pending_ = false;   // cursor moved first; press on the next poll
     bool walk_left_ = false;      // walking holds the left button (A and taps are other sources)
     bool select_used_ = false;    // Select was used with R or the D-pad: no zoom toggle on release

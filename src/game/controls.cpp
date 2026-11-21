@@ -4,6 +4,7 @@
 #include "runtime/rt_host.h"
 
 #include <cmath>
+#include <vector>
 
 namespace game {
 namespace {
@@ -20,6 +21,25 @@ constexpr int kTapHoldMs = 120;                               // how long a tap 
 constexpr float kTouchGain = 3.0f;                            // touchpad: frame pixels per touch pixel (800 wide)
 constexpr float kCstickSpeed = 18.0f;                         // pixels per poll at full tilt (800 wide)
 constexpr float kCircleCursorSpeed = 12.0f;                   // circle pad as a cursor (menus)
+// Let go of a walk: a click just ahead of the hero stops him there. The
+// numbers were measured on the lane (walks in every direction, with no
+// panel and with one on either side):
+// - the game moves the hero from 8 pixels above the feet point the view
+//   gives (the middle of his subtile on the screen), at any frame size;
+// - it ignores a click on the subtile he is on (he walks on to the walk's
+//   last point, 4 to 8 subtiles), which a click 1 to 8 pixels ahead
+//   mostly is; from 12 pixels on it takes it, and 20 lands on the next
+//   subtile in every direction (a subtile is 32 x 16 pixels);
+// - held longer than a frame, the click becomes a walk after the cursor
+//   (the camera keeps the hero in the middle), so it is one frame.
+// Drift after letting go, 26 walks: 3.2 subtiles on average (up to 6.8,
+// one in three turning back) at the feet, 1.4 (up to 2.1, none turning
+// back) this way.
+constexpr int kStopCentreDy = -8;         // the hero's middle: his feet point's y plus this
+constexpr float kStopAheadPx = 20.0f;     // the click this far ahead of it, the way he walked
+constexpr int kStopWaitMs = 0;            // the cursor there first; the click on the next frame
+constexpr int kStopHoldMs = 0;            // ...held for one frame
+constexpr int kHoverKeepOutMs = 1000;     // a spot the game showed a unit at is kept off this long
 
 struct Binding {
     Button button;
@@ -183,6 +203,235 @@ void Controls::key(uint8_t vk, bool down)
     keys_[vk] = down;
     rt::input_key(vk, down);
 }
+
+// ---- walking: the point keeps off units ----
+//
+// A click (or the held button) on a unit is the game's action on it: a talk,
+// a chest or door opened, an item picked up, an attack. The walk's point
+// keeps off the places units take clicks at (a box over each one's feet,
+// from the auto-target's world); should the game still show a unit under
+// it (a box too small, a warp), the button goes up at once and that spot is
+// kept off for a moment. Picking up and talking stay on A.
+namespace {
+
+// Where a unit takes clicks, round its feet on the screen (game pixels).
+WalkBox unit_box(const AimUnit &u)
+{
+    switch (u.type) {
+    case 2: return WalkBox{u.feet_x - 36, u.feet_y - 80, u.feet_x + 36, u.feet_y + 20};   // an object
+    case 4: return WalkBox{u.feet_x - 22, u.feet_y - 18, u.feet_x + 22, u.feet_y + 12};   // an item
+    case 5: return WalkBox{u.feet_x - 38, u.feet_y - 128, u.feet_x + 98, u.feet_y + 54};  // a warp (warp_box)
+    default: return WalkBox{u.feet_x - 28, u.feet_y - 95, u.feet_x + 28, u.feet_y + 12};  // a monster, an NPC
+    }
+}
+
+// A level warp (a cave entrance, stairs, a passage): where the game takes
+// its clicks (LvlWarp.txt's select rectangle, read by the world), with 8
+// pixels round it and 24 more below, where a hover scan on the lane still
+// found it (the Act I cave exit: its rectangle says 30 below the spot, the
+// game showed it to about 50). Unknown, a box like that cave exit's (unit_box).
+WalkBox warp_box(const AimUnit &u, AimWorld *world)
+{
+    int left = 0, top = 0, width = 0, height = 0;
+    if (!world || !world->warp_area(u.cls, left, top, width, height) || width <= 0 || height <= 0)
+        return unit_box(u);
+    return WalkBox{u.feet_x + left - 8, u.feet_y + top - 8, u.feet_x + left + width + 8, u.feet_y + top + height + 24};
+}
+
+// A monster's modes: 0 dying, 12 dead (a corpse takes no plain click).
+bool alive_other(const AimUnit &u) { return !u.owned && u.mode != 0 && u.mode != 12; }
+
+}  // namespace
+
+void Controls::walk_read_units(int hero_x, int hero_y)
+{
+    walk_hero_x_ = hero_x;
+    walk_hero_y_ = hero_y;
+    if (walk_units_read_ && pumps_ && walk_units_pump_ == pump_)
+        return;   // once a frame
+    walk_units_read_ = true;
+    walk_units_pump_ = pump_;
+    walk_units_.clear();
+    walk_on_warp_ = false;
+    if (!aim_world_)
+        return;
+    static std::vector<AimUnit> units, ground;
+    units.clear();
+    ground.clear();
+    aim_world_->units(units);
+    aim_world_->ground_units(ground);
+    for (const AimUnit &u : units)
+        if (u.type == 1 && alive_other(u))
+            walk_units_.push_back(KeepOut{unit_box(u)});
+    for (const AimUnit &u : ground) {
+        if (u.type == 2 && object_kind(u) == AimObject::kNone && !u.operate_fn)
+            continue;   // scenery: no click does anything to it
+        if (u.type == 2 || u.type == 4)
+            walk_units_.push_back(KeepOut{unit_box(u)});
+        else if (u.type == 5) {   // a warp: the stick never takes the hero to another level
+            KeepOut k{warp_box(u, aim_world_)};
+            k.spot_x = u.feet_x, k.spot_y = u.feet_y;
+            k.warp_round_hero = k.box.contains(hero_x, hero_y);
+            walk_on_warp_ = walk_on_warp_ || k.warp_round_hero;
+            walk_units_.push_back(k);
+        }
+    }
+}
+
+bool Controls::walk_blocked(int x, int y) const
+{
+    auto d2 = [](int ax, int ay, int bx, int by) { return (ax - bx) * (ax - bx) + (ay - by) * (ay - by); };
+    for (const KeepOut &k : walk_units_)
+        if (k.box.contains(x, y) &&
+            (!k.warp_round_hero || d2(x, y, k.spot_x, k.spot_y) < d2(walk_hero_x_, walk_hero_y_, k.spot_x, k.spot_y)))
+            return true;
+    return walk_now_ms_ < walk_hover_until_ms_ && walk_hover_box_.contains(x, y);
+}
+
+// Where the game draws the hero across: the auto-target's view (his feet,
+// the camera moved by a panel open on one side), else the middle of the
+// free half (walk_x_min_ / walk_x_max_ while a panel is open), else the
+// frame's middle.
+int Controls::hero_screen_x(const AimView *v) const
+{
+    if (v && v->hero_x > 0 && v->hero_x < w_)
+        return v->hero_x;
+    if (walk_x_min_ > 0)
+        return (walk_x_min_ + w_) / 2;
+    if (walk_x_max_ < w_ - 1)
+        return walk_x_max_ / 2;
+    return w_ / 2;
+}
+
+void Controls::walk(float vx, float vy, float m, bool aiming, uint64_t now_ms)
+{
+    walk_now_ms_ = now_ms;
+    if (!walking_ && m > kWalkEngage) {
+        walking_ = true;
+        walk_press_pending_ = true;
+        walk_units_read_ = false;
+    } else if (walking_ && m < kWalkRelease) {
+        walking_ = false;
+        walk_press_pending_ = false;
+        // Let go: the hero stops where he stands, not where the point last
+        // was. The button goes up, the cursor just ahead of him (kStopAheadPx
+        // from his middle, the way he walked), and a frame later a one-frame
+        // click there: the walk's new goal is the next subtile.
+        bool stop = walk_left_ && !aiming && aim_.settings().walk_stop;   // aim_walk_stop=0: no click
+        int hx = hero_screen_x(nullptr), hy = (int)(h_ * 0.47f);   // no view: the walk's own middle
+        AimView v;
+        if (stop && aim_world_ && aim_world_->view(v)) {
+            hx = v.hero_x;
+            hy = v.hero_y + kStopCentreDy;
+        }
+        int fx = hx + (int)std::lround(walk_nx_ * kStopAheadPx), fy = hy - (int)std::lround(walk_ny_ * kStopAheadPx);
+        fx = fx < walk_x_min_ ? walk_x_min_ : fx > walk_x_max_ ? walk_x_max_ : fx;
+        if (stop) {
+            walk_read_units(hx, hy - kStopCentreDy);
+            stop = !walk_blocked(fx, fy) && !walk_on_warp_;   // no click on a unit, nor on a warp he stands by
+        }
+        walk_left_ = false;
+        if (stop) {
+            move_cursor(fx, fy);
+            walk_stop_ = 1;
+            walk_stop_ms_ = now_ms + kStopWaitMs;
+            walk_stop_pump_ = pump_;
+        }
+        if (walk_dodges_ || walk_hover_releases_ || walk_blocked_polls_)
+            rt::logf("walk: kept off units: %u polls on another point, %u button releases for the game's hover, %u "
+                     "polls with every point taken",
+                     walk_dodges_, walk_hover_releases_, walk_blocked_polls_);
+        walk_dodges_ = walk_hover_releases_ = walk_blocked_polls_ = 0;
+    }
+    if (walk_stop_ && (walking_ || aiming)) {
+        if (!walking_)
+            walk_left_ = false;
+        walk_stop_ = 0;   // the stick again, or A: no stop click
+    } else if (walk_stop_ == 1 && now_ms >= walk_stop_ms_ && (!pumps_ || pump_ != walk_stop_pump_)) {
+        walk_stop_ = 2;   // the click ahead of him
+        walk_left_ = true;
+        walk_stop_ms_ = now_ms + kStopHoldMs;
+    } else if (walk_stop_ == 2 && now_ms >= walk_stop_ms_) {
+        walk_stop_ = 0;
+        walk_left_ = false;
+    }
+    if (walking_ && aiming) {
+        // The auto-target has the cursor: the stick only aims, the hero
+        // doesn't walk. Once it lets go, the walk moves the cursor first
+        // and presses on the next poll, as at a new tilt.
+        walk_left_ = false;
+        walk_press_pending_ = true;
+        return;
+    }
+    if (!walking_)
+        return;
+    // The click point orbits the character (drawn a little above the
+    // frame's centre); a fuller tilt reaches further. Across, it orbits the
+    // hero where the game draws him: a panel open on one side moves him to
+    // the middle of the other half (the game's camera, read by the
+    // auto-target's world), else the frame's middle.
+    if (m > 1.0f)
+        m = 1.0f;
+    const float scale = h_ / 600.0f;
+    const float radius = (50.0f + 60.0f * m) * scale;
+    const float len = std::sqrt(vx * vx + vy * vy);
+    const float nx = len > 0 ? vx / len : 0.0f, ny = len > 0 ? vy / len : 1.0f;
+    walk_nx_ = nx, walk_ny_ = ny;   // the stop click's direction
+    AimView v;
+    const bool seen = aim_world_ && aim_world_->view(v);
+    const int ox = hero_screen_x(seen ? &v : nullptr), oy = (int)(h_ * 0.47f);
+
+    // The game shows a unit under the cursor (where the walk put it a frame
+    // ago): the button up before the game acts on it, and that spot kept off.
+    bool hovered = false;
+    if (seen && v.hover_on && v.hover_type != 0) {
+        hovered = true;
+        AimUnit u;
+        if (v.hover_type == 1 && aim_world_->unit(v.hover_id, u) && !alive_other(u))
+            hovered = false;   // a pet or a corpse: a click there walks
+    }
+    if (hovered) {
+        if (walk_left_)
+            walk_hover_releases_++;
+        walk_left_ = false;
+        walk_press_pending_ = true;
+        walk_hover_box_ = WalkBox{cx_ - 30, cy_ - 30, cx_ + 30, cy_ + 30};
+        walk_hover_until_ms_ = now_ms + kHoverKeepOutMs;
+    }
+    walk_read_units(seen ? v.hero_x : ox, seen ? v.hero_y : oy);
+    // The point the stick asks for, else the nearest free one round it.
+    static const struct {
+        float turn_deg, extra;
+    } kPoints[] = {{0, 0}, {0, 45}, {20, 0}, {-20, 0}, {20, 45}, {-20, 45}, {0, -25}, {40, 0}, {-40, 0}, {40, 45}, {-40, 45}};
+    for (size_t k = 0; k < sizeof kPoints / sizeof kPoints[0]; k++) {
+        const float a = kPoints[k].turn_deg * 3.14159265f / 180.0f;
+        const float rx = nx * std::cos(a) - ny * std::sin(a), ry = nx * std::sin(a) + ny * std::cos(a);
+        float r = radius + kPoints[k].extra * scale;
+        r = r < 35.0f * scale ? 35.0f * scale : r;
+        int x = ox + (int)(rx * r);
+        const int y = oy - (int)(ry * r);
+        x = x < walk_x_min_ ? walk_x_min_ : x > walk_x_max_ ? walk_x_max_ : x;   // a panel's half: off it
+        if (walk_blocked(x, y) || x < 0 || y < 0 || x >= w_ || y >= h_)
+            continue;
+        if (k)
+            walk_dodges_++;
+        move_cursor(x, y);
+        // Move first, press on the next poll: the game resolves a click
+        // against what the cursor hovered in the previous frame.
+        if (walk_press_pending_) {
+            if (!hovered)
+                walk_press_pending_ = false;
+        } else {
+            walk_left_ = true;
+        }
+        return;
+    }
+    // Every point is on a unit: the button up, the hero stops by it.
+    walk_blocked_polls_++;
+    walk_left_ = false;
+    walk_press_pending_ = true;
+}
+
 
 void Controls::update(const Pad &pad, uint64_t now_ms)
 {
@@ -375,45 +624,16 @@ void Controls::update(const Pad &pad, uint64_t now_ms)
     // ---- circle pad: walk in the game world; elsewhere (menus, open
     // panels) it moves the cursor like the C-stick ----
     const bool walk_mode = in_game_ && !panel_open_;
+    const float cvx = pad.circle_x / kStickMax, cvy = pad.circle_y / kStickMax;
+    const float cm = std::sqrt(cvx * cvx + cvy * cvy);
     if (!walk_mode) {
-        if (walking_) {   // the context changed under a held stick: stop walking
+        if (walking_ || walk_stop_) {   // the context changed under a held stick: stop walking
             walking_ = walk_press_pending_ = walk_left_ = false;
+            walk_stop_ = 0;
         }
         stick_cursor(pad.circle_x, pad.circle_y, kCircleCursorSpeed, circle_acc_x_, circle_acc_y_);
     } else {
-        const float vx = pad.circle_x / kStickMax, vy = pad.circle_y / kStickMax;
-        float m = std::sqrt(vx * vx + vy * vy);
-        if (!walking_ && m > kWalkEngage) {
-            walking_ = true;
-            walk_press_pending_ = true;
-        } else if (walking_ && m < kWalkRelease) {
-            walking_ = false;
-            walk_press_pending_ = false;
-            walk_left_ = false;
-        }
-        if (walking_ && aim.aiming) {
-            // The auto-target has the cursor: the stick only aims, the hero
-            // doesn't walk. Once it lets go, the walk moves the cursor first
-            // and presses on the next poll, as at a new tilt.
-            walk_left_ = false;
-            walk_press_pending_ = true;
-        } else if (walking_) {
-            // The click point orbits the character (drawn a little above the
-            // frame's centre); a fuller tilt reaches further.
-            if (m > 1.0f)
-                m = 1.0f;
-            const float scale = h_ / 600.0f;
-            const float radius = (50.0f + 60.0f * m) * scale;
-            const float nx = vx / (m > 0 ? std::sqrt(vx * vx + vy * vy) : 1.0f);
-            const float ny = vy / (m > 0 ? std::sqrt(vx * vx + vy * vy) : 1.0f);
-            move_cursor(w_ / 2 + (int)(nx * radius), (int)(h_ * 0.47f) - (int)(ny * radius));
-            // Move first, press on the next poll: the game resolves a click
-            // against what the cursor hovered in the previous frame.
-            if (walk_press_pending_)
-                walk_press_pending_ = false;
-            else
-                walk_left_ = true;
-        }
+        walk(cvx, cvy, cm, aim.aiming, now_ms);
     }
 
     // ---- the mouse buttons, from all their sources ----
