@@ -538,7 +538,7 @@ pub fn compile_set<'a>(
     let full_outs = set_of(&[EAX, ECX, EDX, EBX, EBP, ESI, EDI]);
     for (n, &va) in screen.iter().enumerate() {
         progress.tick("screened", n, screen.len());
-        for attempt in 0..2 {
+        for attempt in 0..3 {
             let res: Result<(Regs, Option<Summary>), Refused> = (|| {
                 let a = Analysis::new(&prog, prog.func(va), Some(full_outs), true)?;
                 if !a.esp_ok {
@@ -546,7 +546,7 @@ pub fn compile_set<'a>(
                 }
                 Flags::new(&prog.func(va))?;
                 let g = a.garbage;
-                let s2 = if attempt == 1 {
+                let s2 = if attempt >= 1 {
                     let s2 = Analysis::new(&prog, prog.func(va), None, true)?;
                     Some(Summary {
                         reads: s2.live_in,
@@ -568,7 +568,7 @@ pub fn compile_set<'a>(
                     break;
                 }
                 Err(e) => {
-                    if attempt == 0 && e.0.starts_with("esp at a ret") && prog.make_plain(va, &e.0) {
+                    if attempt < 2 && e.0.starts_with("esp at a ret") && prog.make_plain(va, &e.0) {
                         continue;
                     }
                     refused.insert(va, e.0);

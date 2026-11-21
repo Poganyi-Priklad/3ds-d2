@@ -114,6 +114,8 @@ pub fn kind(m: &str) -> Option<u8> {
         "imul" | "mul" => 9,
         "adc" => 10,
         "sbb" => 11,
+        // ZF alone, as a logic result is read: 0 where it stored (emit.rs).
+        "cmpxchg8b" | "lock cmpxchg8b" => 2,
         _ => return None,
     })
 }

@@ -29,6 +29,9 @@ pub fn kind_of(f: &Func, va: u32) -> Option<(u8, u8)> {
     if (m == "imul" || m == "mul") && i.ops.len() == 1 && i.ops[0].size != 4 {
         return None;
     }
+    if m.ends_with("cmpxchg8b") {
+        return Some((k, 4));
+    }
     Some((k, i.ops[0].size))
 }
 

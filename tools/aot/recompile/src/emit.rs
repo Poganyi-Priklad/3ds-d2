@@ -676,6 +676,19 @@ impl<'p, 'a> Emitter<'p, 'a> {
         if m == "imul" {
             return self.imul(i);
         }
+        if m.ends_with("cmpxchg8b") {
+            // edx:eax against the 8 bytes: equal, ecx:ebx stored and ZF set;
+            // else they are loaded and ZF cleared. The lock prefix is nothing
+            // here: one guest thread runs at a time (issue #138: 4107b0 and
+            // 4107d0, the 64-bit counters' compare and swap).
+            let a = self.addr(i, &ops[0])?;
+            return Ok(format!(
+                "{{ uint32_t a = {}, lo = LD32(a), hi = LD32(a + 4u), r = !(lo == eax && hi == edx); \
+if (!r) {{ ST32(a, ebx); ST32(a + 4u, ecx); }} else {{ eax = lo; edx = hi; }} {}}}",
+                a,
+                self.flag_store(va, "0u", "0u", "r", "0")
+            ));
+        }
         if m == "mul" && ops[0].size == 4 {
             let v = self.get(i, &ops[0], None)?;
             return Ok(format!(
@@ -994,6 +1007,15 @@ impl<'p, 'a> Emitter<'p, 'a> {
         let va = i.address;
         let ops = &i.ops;
         if ops.len() == 1 {
+            if ops[0].size == 1 {
+                // ax = al * the byte, signed; its flags aren't modelled (flags.rs
+                // gives it no kind, so a function that reads them is refused).
+                let v = self.get(i, &ops[0], None)?;
+                return Ok(format!(
+                    "{{ int32_t p = (int32_t)(int8_t)eax * (int32_t)(int8_t)({}); eax = (eax & 0xffff0000u) | ((uint32_t)p & 0xffffu); }}",
+                    v
+                ));
+            }
             if ops[0].size != 4 {
                 return refused(format!("imul of {} bytes at {:08x}", ops[0].size, va));
             }

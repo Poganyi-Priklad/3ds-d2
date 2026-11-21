@@ -208,6 +208,8 @@ pub struct Program<'a> {
     pub may_exit: HashSet<u32>,
     pub may_hard: HashSet<u32>,
     pub plain: HashSet<u32>,
+    /// ... and those whose calls to imports are plain exits too.
+    pub plain_all: HashSet<u32>,
     /// Why each of plain's was made plain: the refusal its callouts gave.
     pub plain_why: HashMap<u32, String>,
     pub noreturn_funcs: HashSet<u32>,
@@ -241,6 +243,7 @@ impl<'a> Program<'a> {
             may_exit: HashSet::new(),
             may_hard: HashSet::new(),
             plain: HashSet::new(),
+            plain_all: HashSet::new(),
             plain_why: HashMap::new(),
             noreturn_funcs: HashSet::new(),
             why: HashMap::new(),
@@ -437,17 +440,23 @@ impl<'a> Program<'a> {
     }
 
     /// A function whose callouts' pops threw its stack off: its indirect
-    /// and import calls plain exits instead. False if they were already.
+    /// calls plain exits instead, its calls to imports whose pops are known
+    /// still callouts; a second time, those too. False if they all were
+    /// already.
     pub fn make_plain(&mut self, va: u32, why: &str) -> bool {
         let f = self.func(va);
-        if f.plain || f.callouts.is_empty() {
+        if f.plain_all || f.callouts.is_empty() {
             return false;
+        }
+        let level = if f.plain { 2 } else { 1 };
+        if level == 2 {
+            self.plain_all.insert(va);
         }
         self.plain.insert(va);
         self.plain_why.insert(va, why.to_string());
         let mut g = Func::new(self.img, va, &self.starts);
         let tp = self.thunk_pops.as_ref().and_then(|m| m.get(&va).copied());
-        g.set_exits(&f.exits, false, tp, self.img, self.callouts);
+        g.set_exits(&f.exits, level, tp, self.img, self.callouts);
         self.set_func(va, g);
         true
     }
@@ -472,13 +481,14 @@ impl<'a> Program<'a> {
             } else {
                 BTreeSet::new()
             };
-            if want == f.exits && f.plain == self.plain.contains(&va) {
+            if want == f.exits && f.plain == self.plain.contains(&va) && f.plain_all == self.plain_all.contains(&va) {
                 continue;
             }
             let mut g = Func::new(self.img, va, &self.starts);
             if !want.is_empty() {
                 let tp = self.thunk_pops.as_ref().and_then(|m| m.get(&va).copied());
-                g.set_exits(&want, !self.plain.contains(&va), tp, self.img, self.callouts);
+                let level = if self.plain_all.contains(&va) { 2 } else if self.plain.contains(&va) { 1 } else { 0 };
+                g.set_exits(&want, level, tp, self.img, self.callouts);
             }
             self.set_func(va, g);
             n += 1;

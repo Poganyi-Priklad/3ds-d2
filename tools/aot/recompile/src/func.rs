@@ -58,6 +58,8 @@ pub struct Func {
     pub exits: BTreeSet<u32>,
     pub callouts: OMap<u32, i64>,
     pub plain: bool,
+    /// ... its calls to imports too (the second fallback).
+    pub plain_all: bool,
     pub data: HashSet<u32>,
     pub refused: Option<String>,
     pub ret_pops: BTreeSet<i64>,
@@ -86,6 +88,7 @@ impl Func {
             exits: BTreeSet::new(),
             callouts: OMap::new(),
             plain: false,
+            plain_all: false,
             data: HashSet::new(),
             refused: None,
             ret_pops: BTreeSet::new(),
@@ -263,19 +266,29 @@ impl Func {
 
     /// The exits Box86 runs on from (issue #115); indirect and import calls
     /// callouts, and tail calls through a pointer where the pops are known.
-    pub fn set_exits(&mut self, sites: &BTreeSet<u32>, callouts: bool, tail_pops: Option<i64>, img: &Image, enabled: bool) {
+    ///
+    /// level 0: all of them callouts. 1 (a function whose callouts' pops
+    /// threw its stack off): only its calls to imports whose pops are known,
+    /// which are no guess (issue #138: HeapAlloc and GetLastError were plain
+    /// exits in such functions, 3,900 a script). 2: none.
+    pub fn set_exits(&mut self, sites: &BTreeSet<u32>, level: u8, tail_pops: Option<i64>, img: &Image, enabled: bool) {
         self.exits = sites.clone();
-        self.plain = !callouts;
-        if enabled && callouts {
+        self.plain = level > 0;
+        self.plain_all = level > 1;
+        let callouts = level == 0;
+        if enabled && level < 2 {
             let mut co = OMap::new();
             for &va in sites {
                 if let Some(t) = self.calls.get(&va) {
-                    if !self.noreturn.contains(&va) && t.is_pointer() {
+                    let known = matches!(t, Tgt::Import(slot) if img.import_pops.get(slot).copied().flatten().is_some());
+                    if !self.noreturn.contains(&va) && t.is_pointer() && (callouts || known) {
                         co.insert(va, self.callout_pops(va, img));
                     }
                 }
             }
             self.callouts = co;
+        }
+        if enabled && callouts {
             let pops = if self.ret_pops.len() == 1 {
                 self.ret_pops.iter().next().copied()
             } else if self.ret_pops.is_empty() {

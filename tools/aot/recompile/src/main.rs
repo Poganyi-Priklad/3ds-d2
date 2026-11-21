@@ -240,7 +240,10 @@ fn main() {
         for &(_, t) in &img.data_pointers {
             if t >= img.text_lo && t < img.text_hi && t % 16 == 0 && !have.contains(&t) && !inside.contains(&t) {
                 let pad = img.mem[(t - 1 - img.base) as usize];
-                if pad == 0xcc || pad == 0x90 {
+                // ... or right after a ret (6c9270, in the table at 0x74c56c,
+                // follows 6c9260's ret 4 with no pad).
+                let ret = pad == 0xc3 || img.mem[(t - 3 - img.base) as usize] == 0xc2;
+                if pad == 0xcc || pad == 0x90 || ret {
                     found.insert(t);
                 }
             }

@@ -586,6 +586,21 @@ Act II's 14,604, by cause:
 
 The waits are Sleep (434,429) and WaitForSingleObject (603): they go when a guest thread waits in place, on a stack of its own.
 
+The first of them closed (the check with `D2_AOT_STALE=1 M4_LAYOUT=ctr`: 0 differ, town-walk 12.4M calls, fight 12.3M, Act II 49.5M; 13,625 functions compiled, 248 refused against 253):
+
+- **`lock cmpxchg8b`** (4107b0 and 4107d0, the 64-bit counters' compare and swap): edx:eax against the 8 bytes; equal, ecx:ebx stored and ZF set, else they are loaded and ZF cleared. The lock prefix is nothing where one guest thread runs at a time. Its ZF is read as a logic result's.
+- **An 8-bit `imul`** with one operand (5ff760): ax from al and the byte. Its flags aren't modelled; a function that reads them is still refused.
+- **Code pointers in the game's data, right after a `ret`:** 6c9270 is in the table at 0x74c56c and follows 6c9260's `ret 4` with no pad. 799 functions from the data, against 749.
+- **A function with plain exits keeps its calls to imports as callouts** where the import's pops are known: they are no guess. A second failure makes those plain too.
+
+| Script | Left to Box86 before | After |
+| --- | --- | --- |
+| town-walk | 10,294 | 8,236 |
+| fight | 11,872 | 8,462 |
+| Act II | 14,604 | 10,244 |
+
+Act II's nested runs are 46 against 3,103, its callouts to code that isn't compiled 23 against 1,057. Box86 ran 2,524,958 x86 bytes against 2,610,752, with the state lines the same on the three scripts. HeapAlloc's 3,211 exits stayed: they are calls through a register loaded from the import's slot, in functions that aren't plain.
+
 ### The natives' site table (#138)
 
 The natives change the game's code at install time. They do it in their own `install_*` code: about 80 writes across `d2_native`, `d2_memory`, `storm_reads`, `sprite_trace`, `dcc_native`, `frame_reads`, `automap` and `cinematics`. The recompiler can't see those writes. So a function a native changed runs under Box86 at run time (47 functions in production, `60bff0`'s DccDecode loop among them), and compiled callers reach it through `aot_call_stale`. After the steps above, that is most of what Box86 still runs.
