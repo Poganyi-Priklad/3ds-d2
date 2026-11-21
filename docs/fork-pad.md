@@ -12,6 +12,8 @@ Nothing of the game is stored in this repository. The art is read at run time
 from **your own** MPQ files, the first time the tab opens, in your game's
 language (with LATIN as the fallback for the fonts).
 
+![PAD: a 3DS two-screen layout, with names and scrolling talk on the bottom screen](images/fork-pad.png)
+
 ## How to use it
 
 Tap **PAD** on the bottom screen's tab bar. The window covers the whole bottom
