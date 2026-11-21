@@ -264,6 +264,10 @@ std::vector<Fn> g_fns;           // sized once at install: entries keep their ad
 // exit to) leaves it to Box86.
 std::vector<uint8_t> g_stale_hard;
 std::unordered_map<uint32_t, uint32_t> g_fn_at;   // va -> index in g_fns
+// The compiled functions whose entry can't be hooked (a 1-byte ret, 6c8030,
+// in the renderer's table) but whose code is the game's, and reaches none
+// changed (issue #138): va -> index in aot_funcs, for a callout to one.
+std::unordered_map<uint32_t, uint32_t> g_unhooked_at;
 
 const char *tramp_name(uint32_t va)
 {
@@ -1265,6 +1269,10 @@ void set_aot_mode(Cpu &c, AotMode mode)
     uint32_t changed = 0;
     std::string names;
     const std::vector<uint8_t> bad = stale_funcs(c, changed, names);
+    g_unhooked_at.clear();
+    for (size_t k = 0; k < bad.size(); k++)
+        if (!aot_funcs[k].keep && !bad[k])
+            g_unhooked_at[aot_funcs[k].va] = (uint32_t)k;
     g_stale_slot.clear();
     uint32_t hooked = 0, left = 0, reaching = 0;
     g_dropped = 0;
@@ -1745,8 +1753,28 @@ void aot_call_out(uint32_t x, AotRegs *t, uint32_t pops)
             }
         } else {
             const auto it = g_fn_at.find(x);
-            if (it == g_fn_at.end())
-                aot_exit(x, r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7]);
+            if (it == g_fn_at.end()) {
+                // One that can't be hooked: its compiled code, as a hooked
+                // one's (the check's run, its journaled code), else an exit.
+                const auto u = g_unhooked_at.find(x);
+                const uint32_t k = u == g_unhooked_at.end() ? 0 : u->second;
+                const AotFunc *af = u == g_unhooked_at.end() ? nullptr
+                                    : !g_journaling       ? &aot_funcs[k]
+                                    : aotj_funcs && aotj_funcs[k].va == x ? &aotj_funcs[k]
+                                                                          : nullptr;
+                if (!af)
+                    aot_exit(x, r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7]);
+                af->sig(r);
+                r[4] = esp0 + 4u + aot_funcs[k].pops;
+                if (g_journaling)
+                    g_garbage |= (uint8_t)(0x07u & ~(aot_funcs[k].out | aot_funcs[k].preserved));
+                g_callout_fns++;
+                if (r[4] != want)
+                    call_out_back(x, ra, r);
+                if (r[3] != keep[0] || r[5] != keep[1] || r[6] != keep[2] || r[7] != keep[3])
+                    call_out_back(x, ra, r);
+                return;
+            }
             Fn &F = g_fns[it->second];
             const AotFunc *af = g_journaling ? F.fj : F.f;
             if (aot_stale[F.f - aot_funcs]) {   // changed by a native since it was compiled: the native's
