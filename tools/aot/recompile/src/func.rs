@@ -348,6 +348,7 @@ impl Func {
             false
         };
         let mut at = va.wrapping_add(i.size);
+        let mut popped = 0i64;
         for &(pa, p) in pushed.iter().rev() {
             let Some(j) = self.insns.get(&at) else { break };
             if j.mnemonic != "pop"
@@ -357,10 +358,60 @@ impl Func {
             {
                 break;
             }
-            n -= 1;
+            popped += 1;
             at = at.wrapping_add(j.size);
         }
-        4 * n
+        // The first pushes walked of ebx, esi, edi or ebp as the caller left
+        // them (no instruction names the register on some path from the entry
+        // to the push) are the prologue's saves: a function doesn't pass its
+        // caller's register (issue #138: 410a80's push esi, push edi before
+        // call edi, GetTickCount, counted 8 for 0; 476bc0's before its call
+        // to the thunk 4f65c0 made the thunk pop 8).
+        let mut kept = 0i64;
+        for &(pa, p) in pushed.iter().rev() {
+            if !self.as_entered(pa, p) {
+                break;
+            }
+            kept += 1;
+        }
+        4 * (n - popped.max(kept))
+    }
+
+    /// Whether `r` (ebx, esi, edi or ebp) can be at `at` as it was at the
+    /// entry: a path from the entry reaches `at` through no instruction that
+    /// names it or a part of it, but a push, cmp or test.
+    fn as_entered(&self, at: u32, r: &str) -> bool {
+        let parts: &[&str] = match r {
+            "ebx" => &["ebx", "bx", "bl", "bh"],
+            "esi" => &["esi", "si", "sil"],
+            "edi" => &["edi", "di", "dil"],
+            "ebp" => &["ebp", "bp", "bpl"],
+            _ => return false,
+        };
+        let names = |j: &Insn| {
+            !matches!(j.mnemonic.as_str(), "push" | "cmp" | "test")
+                && j.op_str
+                    .split(|c: char| !c.is_ascii_alphanumeric())
+                    .any(|w| parts.contains(&w))
+        };
+        let mut seen = HashSet::new();
+        let mut work = vec![self.entry];
+        while let Some(a) = work.pop() {
+            if a == at {
+                return true;
+            }
+            if !seen.insert(a) {
+                continue;
+            }
+            let Some(j) = self.insns.get(&a) else { continue };
+            if names(j) {
+                continue;
+            }
+            if let Some(s) = self.succ.get(&a) {
+                work.extend(s.iter().copied());
+            }
+        }
+        false
     }
 
     pub fn cut(&mut self, hit: &[u32]) {
