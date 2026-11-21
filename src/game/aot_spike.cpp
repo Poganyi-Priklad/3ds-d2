@@ -1841,8 +1841,11 @@ void aot_exit(uint32_t target, uint32_t eax, uint32_t ecx, uint32_t edx, uint32_
               uint32_t esi, uint32_t edi)
 {
     target = game::aot_site_target(target);
-    if (g_cpu_aot)
+    if (g_cpu_aot) {
+        rt::logf("cpu_aot: an exit in the compiled code to %08x, its return address %08x", target,
+                 aot_ld32(aot_mem, esp));
         d2rt::cpu_aot_stop("an exit in the compiled code (a call it can't make in C), to", target);
+    }
     game::left(game::g_cause, game::g_cause_at ? game::g_cause_at : target);
     game::g_cause = game::kLeftExit;
     game::g_cause_at = 0;

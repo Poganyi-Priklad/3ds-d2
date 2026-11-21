@@ -57,6 +57,8 @@ pub struct Func {
     pub noreturn: HashSet<u32>,
     pub exits: BTreeSet<u32>,
     pub callouts: OMap<u32, i64>,
+    /// Pops found for callouts whose count of pushes was a guess (Program::solve_pops).
+    pub pops_fix: Vec<(u32, i64)>,
     pub plain: bool,
     /// ... its calls to imports too (the second fallback).
     pub plain_all: bool,
@@ -89,6 +91,7 @@ impl Func {
             callouts: OMap::new(),
             plain: false,
             plain_all: false,
+            pops_fix: Vec::new(),
             data: HashSet::new(),
             refused: None,
             ret_pops: BTreeSet::new(),
@@ -280,10 +283,16 @@ impl Func {
             let mut co = OMap::new();
             for &va in sites {
                 if let Some(t) = self.calls.get(&va) {
-                    let known = matches!(t, Tgt::Import(slot) if img.import_pops.get(slot).copied().flatten().is_some());
+                    let known = matches!(t, Tgt::Import(slot) if img.import_pops.get(slot).copied().flatten().is_some())
+                        || self.reg_import_pops(&self.insns[&va], img).is_some();
                     if !self.noreturn.contains(&va) && t.is_pointer() && (callouts || known) {
                         co.insert(va, self.callout_pops(va, img));
                     }
+                }
+            }
+            for &(va, p) in &self.pops_fix {
+                if co.contains_key(&va) {
+                    co.insert(va, p);
                 }
             }
             self.callouts = co;
@@ -328,6 +337,11 @@ impl Func {
         }
         if let Some(n) = self.insns.get(&va.wrapping_add(i.size)) {
             if n.mnemonic == "add" && n.op_str.starts_with("esp, ") {
+                return 0;
+            }
+            // ... or with pop ecx, the compiler's way to drop one or two
+            // arguments (issue #138: 688fbb's pop ecx; pop ecx at 689122).
+            if n.mnemonic == "pop" && n.op_str == "ecx" {
                 return 0;
             }
         }
@@ -417,6 +431,20 @@ impl Func {
         4 * (n - popped.max(kept))
     }
 
+    /// The callouts whose pops are a count of pushes, not an import's.
+    pub fn guessed_callouts(&self, img: &Image) -> Vec<(u32, i64)> {
+        let mut out = Vec::new();
+        for (va, p) in self.callouts.iter() {
+            let Some(t) = self.calls.get(va) else { continue };
+            let known = matches!(t, Tgt::Import(slot) if img.import_pops.get(slot).copied().flatten().is_some())
+                || self.reg_import_pops(&self.insns[va], img).is_some();
+            if !known {
+                out.push((*va, *p));
+            }
+        }
+        out
+    }
+
     /// A call through a register that holds an import: every instruction of
     /// the function that writes the register, but a pop (the epilogue's),
     /// loads it from an import's slot, all with the same known pops (issue
@@ -428,6 +456,36 @@ impl Func {
             return None;
         }
         let r = reg_full(op.reg())?.0;
+        let slot_pops = |j: &Insn| -> Option<i64> {
+            if j.mnemonic != "mov" || j.ops.len() != 2 || !j.ops[0].is_reg() || !j.ops[1].is_mem() {
+                return None;
+            }
+            let m = j.ops[1].mem();
+            if m.base != 0 || m.index != 0 || !(0..=u32::MAX as i64).contains(&m.disp) {
+                return None;
+            }
+            img.import_pops.get(&(m.disp as u32)).copied().flatten()
+        };
+        // The write of the register nearest before the call, in a straight
+        // line no branch comes into (the C runtime's 688b46 loads one
+        // register from several imports' slots in turn, GetProcAddress among
+        // them): that import's.
+        let mut ends = std::collections::HashMap::new();
+        for (k, j) in self.insns.iter() {
+            ends.insert(k.wrapping_add(j.size), *k);
+        }
+        let mut cur = i.address;
+        while !self.leaders.contains(&cur) {
+            let Some(&k) = ends.get(&cur) else { break };
+            let j = &self.insns[&k];
+            if j.mnemonic == "call" && ![3u8, 5, 6, 7].contains(&r) {
+                break;   // the register may be the callee's to change (688fbb's esi isn't: 688ff0)
+            }
+            if regs_rw(j).1 & (1 << r) != 0 {
+                return slot_pops(j);
+            }
+            cur = k;
+        }
         let mut pops: Option<i64> = None;
         for j in self.insns.values() {
             if regs_rw(j).1 & (1 << r) == 0 || j.mnemonic == "pop" {

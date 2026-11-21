@@ -207,9 +207,11 @@ fn main() {
         let mut have: HashSet<u32> = extra.iter().chain(roots.iter()).copied().collect();
         let mut inside: HashSet<u32> = HashSet::new();
         let mut found: BTreeSet<u32> = BTreeSet::new();
+        let mut insn_at: std::collections::BTreeMap<u32, u32> = std::collections::BTreeMap::new();
         for &va in &extra {
             let f = prog.func(va);
             inside.extend(f.insns.keys().filter(|&&a| a != va).copied());
+            insn_at.extend(f.insns.iter().map(|(a, i)| (*a, i.size)));
             for i in f.insns.values() {
                 if i.mnemonic.starts_with("call") || i.mnemonic.starts_with('j') {
                     continue;
@@ -217,9 +219,15 @@ fn main() {
                 for op in &i.ops {
                     if let cs::OpKind::Imm(v) = op.kind {
                         let t = v as u32;
-                        if t >= img.text_lo && t < img.text_hi && t % 16 == 0 && !have.contains(&t) {
+                        if t >= img.text_lo && t < img.text_hi && !have.contains(&t) {
                             let pad = img.mem[(t - 1 - img.base) as usize];
-                            if pad == 0xcc || pad == 0x90 {
+                            // ... or, moved or pushed, right after a ret on any
+                            // byte: the C runtime's functions have no pads
+                            // (688c2b, its TlsAlloc wrapper, stored by 688fbb).
+                            let ret = pad == 0xc3 || img.mem[(t - 3 - img.base) as usize] == 0xc2;
+                            if (t % 16 == 0 && (pad == 0xcc || pad == 0x90))
+                                || (ret && matches!(i.mnemonic.as_str(), "mov" | "push"))
+                            {
                                 found.insert(t);
                             }
                         }
@@ -227,7 +235,10 @@ fn main() {
                 }
             }
         }
-        found.retain(|t| !inside.contains(t));
+        // Not at, nor inside, an instruction of a listed function.
+        found.retain(|t| {
+            !inside.contains(t) && !insn_at.range(..*t).next_back().is_some_and(|(a, n)| a.wrapping_add(*n) > *t)
+        });
         println!("aot: {} code pointers in the listed functions' immediates added", found.len());
         for t in found {
             have.insert(t);

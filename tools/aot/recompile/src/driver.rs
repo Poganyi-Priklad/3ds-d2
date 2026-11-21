@@ -250,6 +250,35 @@ pub fn leaves(prog: &Program, compiled: &BTreeSet<u32>) -> HashSet<u32> {
 }
 
 /// Of vas, those that may block their thread when Box86 runs them nested.
+/// See its use: true with the function rebuilt where some pops balance it.
+fn solve_pops(prog: &mut Program, va: u32, full_outs: Regs) -> bool {
+    let f = prog.func(va);
+    if f.plain || !prog.pops_fix.get(&va).map_or(true, |v| v.is_empty()) {
+        return false;
+    }
+    let guessed = f.guessed_callouts(prog.img);
+    if guessed.is_empty() || guessed.len() > 4 {
+        return false;
+    }
+    let n = guessed.len();
+    let mut combos: Vec<Vec<i64>> = vec![vec![]];
+    for _ in 0..n {
+        combos = combos.iter().flat_map(|c| (0..4).map(move |d| { let mut c = c.clone(); c.push(d); c })).collect();
+    }
+    combos.sort_by_key(|c| c.iter().sum::<i64>());
+    for c in combos.iter().skip(1) {
+        let fix: Vec<(u32, i64)> = guessed.iter().zip(c).map(|(&(site, p), &d)| (site, p + 4 * d)).collect();
+        prog.with_pops(va, fix);
+        if Analysis::new(prog, prog.func(va), Some(full_outs), true).is_ok_and(|a| a.esp_ok) {
+            return true;
+        }
+    }
+    prog.pops_fix.remove(&va);
+    prog.with_pops(va, Vec::new());
+    prog.pops_fix.remove(&va);
+    false
+}
+
 pub fn may_block(img: &Image, prog: &Program, vas: &HashSet<u32>) -> HashMap<u32, bool> {
     let mut out: HashMap<u32, bool> = HashMap::new();
     let skip = |f: &Func, site: &u32, t: &Tgt| -> bool {
@@ -538,7 +567,7 @@ pub fn compile_set<'a>(
     let full_outs = set_of(&[EAX, ECX, EDX, EBX, EBP, ESI, EDI]);
     for (n, &va) in screen.iter().enumerate() {
         progress.tick("screened", n, screen.len());
-        for attempt in 0..3 {
+        for attempt in 0..4 {
             let res: Result<(Regs, Option<Summary>), Refused> = (|| {
                 let a = Analysis::new(&prog, prog.func(va), Some(full_outs), true)?;
                 if !a.esp_ok {
@@ -568,7 +597,15 @@ pub fn compile_set<'a>(
                     break;
                 }
                 Err(e) => {
-                    if attempt < 2 && e.0.starts_with("esp at a ret") && prog.make_plain(va, &e.0) {
+                    // The pops of the callouts that are a count of pushes, by
+                    // what balances every ret (issue #138: 688fbb's call eax
+                    // of a decoded pointer, with one argument pushed before
+                    // the call that decodes it): each up to 12 more, the
+                    // least in all first, where there are at most four.
+                    if attempt == 0 && e.0.starts_with("esp at a ret") && solve_pops(&mut prog, va, full_outs) {
+                        continue;
+                    }
+                    if attempt < 3 && e.0.starts_with("esp at a ret") && prog.make_plain(va, &e.0) {
                         continue;
                     }
                     refused.insert(va, e.0);

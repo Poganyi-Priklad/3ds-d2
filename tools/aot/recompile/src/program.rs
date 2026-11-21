@@ -210,6 +210,8 @@ pub struct Program<'a> {
     pub plain: HashSet<u32>,
     /// ... and those whose calls to imports are plain exits too.
     pub plain_all: HashSet<u32>,
+    /// Pops found for a function's guessed callouts (solve_pops), kept across its rebuilds.
+    pub pops_fix: HashMap<u32, Vec<(u32, i64)>>,
     /// Why each of plain's was made plain: the refusal its callouts gave.
     pub plain_why: HashMap<u32, String>,
     pub noreturn_funcs: HashSet<u32>,
@@ -244,6 +246,7 @@ impl<'a> Program<'a> {
             may_hard: HashSet::new(),
             plain: HashSet::new(),
             plain_all: HashSet::new(),
+            pops_fix: HashMap::new(),
             plain_why: HashMap::new(),
             noreturn_funcs: HashSet::new(),
             why: HashMap::new(),
@@ -439,6 +442,17 @@ impl<'a> Program<'a> {
         out
     }
 
+    /// The function with `fix` as its guessed callouts' pops (solve_pops).
+    pub fn with_pops(&mut self, va: u32, fix: Vec<(u32, i64)>) {
+        let f = self.func(va);
+        let mut g = Func::new(self.img, va, &self.starts);
+        g.pops_fix = fix.clone();
+        let tp = self.thunk_pops.as_ref().and_then(|m| m.get(&va).copied());
+        g.set_exits(&f.exits, 0, tp, self.img, self.callouts);
+        self.pops_fix.insert(va, fix);
+        self.set_func(va, g);
+    }
+
     /// A function whose callouts' pops threw its stack off: its indirect
     /// calls plain exits instead, its calls to imports whose pops are known
     /// still callouts; a second time, those too. False if they all were
@@ -455,6 +469,7 @@ impl<'a> Program<'a> {
         self.plain.insert(va);
         self.plain_why.insert(va, why.to_string());
         let mut g = Func::new(self.img, va, &self.starts);
+        g.pops_fix = self.pops_fix.get(&va).cloned().unwrap_or_default();
         let tp = self.thunk_pops.as_ref().and_then(|m| m.get(&va).copied());
         g.set_exits(&f.exits, level, tp, self.img, self.callouts);
         self.set_func(va, g);
@@ -485,6 +500,7 @@ impl<'a> Program<'a> {
                 continue;
             }
             let mut g = Func::new(self.img, va, &self.starts);
+            g.pops_fix = self.pops_fix.get(&va).cloned().unwrap_or_default();
             if !want.is_empty() {
                 let tp = self.thunk_pops.as_ref().and_then(|m| m.get(&va).copied());
                 let level = if self.plain_all.contains(&va) { 2 } else if self.plain.contains(&va) { 1 } else { 0 };
