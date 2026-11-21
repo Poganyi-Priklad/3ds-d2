@@ -1,4 +1,5 @@
 // See rt_host.h.
+#include "runtime/rt_cpu_aot.h"
 #include "runtime/rt_host.h"
 #include "runtime/rt_layout.h"
 #include "runtime/pool_fit.h"
@@ -1585,7 +1586,16 @@ RunResult run_exe(std::vector<uint8_t> exe, const RunOptions &opt)
 
     if (g_opt.cpuid_edx)
         wx86_set_cpuid1_edx(g_opt.cpuid_edx);
-    Cpu *cpu = make_cpu_box86();
+    // D2_CPU=aot (the lane, issue #138): no Box86, the AOT recompiler's C on
+    // a host stack a guest thread (rt_cpu_aot.h); what it can't run stops the
+    // run with a report.
+    Cpu *cpu = nullptr;
+    if (const char *which = std::getenv("D2_CPU"); which && std::string(which) == "aot") {
+        cpu = make_cpu_aot();
+        logf(cpu ? "cpu: CpuAot, no Box86 (D2_CPU=aot)" : "cpu: D2_CPU=aot isn't available on this host; Box86");
+    }
+    if (!cpu)
+        cpu = make_cpu_box86();
     static std::unique_ptr<Bridge> br;
     br.reset(new Bridge(cpu));
     g_br = br.get();

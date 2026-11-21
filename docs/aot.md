@@ -641,6 +641,8 @@ How `CpuAot` runs code (from reading `cpu.h`, `sched_cooperative.cpp` and `aot_c
 - **Per fiber:** the eight registers at its last callout, its x87 state (`aot_fpu` points at the running one), its host stack. `aot_fs_base` is the thread's TEB, as now.
 - **Where it is chosen:** `rt_host.cpp` makes the CPU (`make_cpu_box86()` today): `D2_CPU=aot` on the lane. Box86 stays linked in the lane's binary for the other modes.
 
+**The first run** (`D2_CPU=aot` in `AOT_ENV`, town-walk, the build of `807ade1`): the game's entry point runs in compiled code on `CpuAot`, 13,951 compiled functions reached by their address, through the C runtime's start (GetStartupInfoA, GetProcessHeap, HeapCreate) to the first thing it can't do, and stops there with its report: `cpu_aot: STOP at 003000a0: an exit in the compiled code`, GetProcAddress, called through a register in a function with plain exits. A callout that comes back with another esp than its site counted (GetProcessHeap at 6827d0, whose two pushes are the next call's arguments) is named once and goes on: the code after takes esp as it comes back. The Box86 lanes weren't run again on this commit; its changes to them are behind `D2_CPU=aot`.
+
 Recommendations on the open points: fibers rather than host threads (one runs at a time anyway, and a switch costs nothing in the kernel); 256 KiB of host stack a thread at first, measured on the lane with a guard page and then cut (four threads in play); the placeholder-result contract kept, so no shim changes; a lane run compared with another run of the same build, since switch points move.
 
 ### The natives' site table (#138)

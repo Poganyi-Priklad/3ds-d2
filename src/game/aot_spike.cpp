@@ -3,6 +3,7 @@
 // user's Game.exe), linked only when the build is given them: their tables
 // are weak here.
 #include "game/aot_spike.h"
+#include "runtime/rt_cpu_aot.h"
 #include "game/native_sites.h"
 #include "game/aot_rt.h"
 
@@ -48,6 +49,15 @@ extern const AotTramp aot_tramps[] __attribute__((weak));
 }
 
 using d2rt::Cpu;
+
+// CpuAot (issue #138, rt_cpu_aot.h): the run has no Box86; the dispatcher and
+// a call from compiled code are below, by aot_call_out.
+static bool g_cpu_aot = false;
+static std::unordered_map<uint32_t, uint32_t> g_all_at;   // every compiled function: va -> its row
+extern "C" {   // defined among aot_rt.h's functions
+static bool cpuaot_dispatch(d2rt::Cpu &c, uint32_t eip, uint32_t until);
+static void cpuaot_call(uint32_t x, AotRegs *t);
+}
 
 namespace game {
 uint8_t *aot_guest_base();   // d2_native.cpp: its g_base
@@ -1089,6 +1099,16 @@ int install_aot(Cpu &c)
     }
     aot_mem = aot_guest_base();   // guest 0 in host memory, as the natives have it
     aot_fpu = static_cast<AotFpu *>(c.x87_state());   // issue #136: compiled x87 works on it
+    if (d2rt::cpu_is_aot(c)) {
+        // No Box86 (issue #138): every compiled function reached by its
+        // address, from the dispatcher. Nothing is hooked.
+        g_cpu_aot = true;
+        g_all_at.clear();
+        for (uint32_t k = 0; aot_funcs && aot_funcs[k].va; k++)
+            g_all_at[aot_funcs[k].va] = k;
+        d2rt::cpu_aot_set_dispatch(cpuaot_dispatch);
+        rt::logf("aot: CpuAot, %u compiled functions by their address, no Box86", (unsigned)g_all_at.size());
+    }
     if (!aot_fpu) {
         rt::logf("aot: the CPU backend doesn't give its x87 state: no compiled code");
         return 0;
@@ -1286,6 +1306,8 @@ void set_aot_mode(Cpu &c, AotMode mode)
     if (mode == AotMode::Check && (g_fns.empty() || !g_fns[0].fj))
         mode = AotMode::Sig;
     g_mode = mode;
+    if (g_cpu_aot)   // nothing runs the x86: no hooks; the dispatcher finds what natives changed
+        return;
     // Sig and Check hook every function they can (the roots among them); the
     // spike's other modes the roots alone.
     const bool fns = (mode == AotMode::Sig || mode == AotMode::Check) && !g_fns.empty();
@@ -1637,6 +1659,10 @@ void aot_guest_call(uint32_t va, AotRegs *r)
     game::g_nested++;
     game::g_nested_by[va]++;
     game::left(game::kLeftNested, va);
+    if (g_cpu_aot) {
+        cpuaot_call(va, r);
+        return;
+    }
     if (game::g_journaling)
         game::g_impure = true;   // the check (issue #114): Box86's writes aren't journaled
     if (aot_guest_hook) {
@@ -1647,6 +1673,82 @@ void aot_guest_call(uint32_t va, AotRegs *r)
     game::nested_run(*game::g_cpu, va, r->r);
     game::g_nested_ticks += game::ticks() - t0;
     game::g_nested_n++;
+}
+
+// ---- CpuAot (issue #138, rt_cpu_aot.h): no Box86 ----------------------------
+//
+// The code at eip run until control is at `until` (0: until the thread's
+// sentinel): a compiled function from its entry, then on at the return
+// address it popped; the Bridge's trap (a shim, with its redirects); a
+// native's hook at an entry, its shim. Anything else stops the run.
+static std::map<uint32_t, uint32_t> g_aot_esp_off;        // callouts that came back with another esp, by callee
+
+static void cpuaot_bind(d2rt::Cpu &c)
+{
+    game::g_cpu = &c;
+    aot_fpu = static_cast<AotFpu *>(d2rt::cpu_aot_fpu(c));
+}
+
+static bool cpuaot_dispatch(d2rt::Cpu &c, uint32_t eip, uint32_t until)
+{
+    using namespace game;
+    for (;;) {
+        if (until && eip == until)
+            return true;
+        if (d2rt::cpu_aot_is_trap(c, eip)) {
+            c.set_reg(d2rt::R_EIP, eip);
+            if (!d2rt::cpu_aot_trap(c, eip)) {
+                if (eip == rt::bridge().sentinel())
+                    return false;        // the thread's, or a nested run's, end
+                d2rt::cpu_aot_yield(c);  // a yield or a wait: here until the scheduler runs the thread again
+            }
+            cpuaot_bind(c);
+            eip = c.reg(d2rt::R_EIP);
+            continue;
+        }
+        if (d2rt::cpu_aot_take_code_changed(c) && aot_funcs && aot_funcs[0].va) {
+            uint32_t changed = 0;   // a native hooked: what it changed, for the compiled callers (AOT_STALE)
+            std::string names;
+            stale_funcs(c, changed, names);
+            g_stale_slot.clear();
+        }
+        if (aot_mem[eip] == 0xe9) {   // a native's hook at the entry: its shim's trap
+            int32_t rel;
+            std::memcpy(&rel, aot_mem + eip + 1, 4);
+            const uint32_t to = eip + 5u + (uint32_t)rel;
+            if (d2rt::cpu_aot_is_trap(c, to)) {
+                eip = to;
+                continue;
+            }
+        }
+        const auto it = g_all_at.find(eip);
+        if (it == g_all_at.end())
+            d2rt::cpu_aot_stop("no compiled code here", eip);
+        const AotFunc &f = aot_funcs[it->second];
+        uint32_t r[8];
+        c.regs_gp(r);
+        const uint32_t esp0 = r[4], ra = aot_ld32(aot_mem, esp0);
+        cpuaot_bind(c);
+        f.sig(r);
+        r[4] = esp0 + 4u + f.pops;
+        for (int k = 0; k < 8; k++)
+            c.set_reg(k, r[k]);
+        eip = ra;
+    }
+}
+
+// A call from compiled code to x, the return address at [esp]: until control
+// is back there, with the registers as the callee left them.
+static void cpuaot_call(uint32_t x, AotRegs *t)
+{
+    d2rt::Cpu &c = *game::g_cpu;
+    const uint32_t ra = aot_ld32(aot_mem, t->r[4]);
+    for (int k = 0; k < 8; k++)
+        c.set_reg(k, t->r[k]);
+    if (!cpuaot_dispatch(c, x, ra))
+        d2rt::cpu_aot_stop("a thread ended inside a call from compiled code to", x);
+    c.regs_gp(t->r);
+    cpuaot_bind(c);
 }
 
 [[noreturn]] static void call_out_back(uint32_t x, uint32_t to, const uint32_t *r, bool clean = false);
@@ -1669,6 +1771,10 @@ void aot_call_stale(uint32_t va, AotRegs *t)
 {
     using namespace game;
     g_stale_by[va]++;
+    if (g_cpu_aot) {
+        cpuaot_call(va, t);
+        return;
+    }
     const d2rt::Shim *sh = game::stale_shim(va);
     if (!sh && !g_no_exit) {
         // No shim at its entry (a patch in line): Box86 runs it from there and
@@ -1735,6 +1841,8 @@ void aot_exit(uint32_t target, uint32_t eax, uint32_t ecx, uint32_t edx, uint32_
               uint32_t esi, uint32_t edi)
 {
     target = game::aot_site_target(target);
+    if (g_cpu_aot)
+        d2rt::cpu_aot_stop("an exit in the compiled code (a call it can't make in C), to", target);
     game::left(game::g_cause, game::g_cause_at ? game::g_cause_at : target);
     game::g_cause = game::kLeftExit;
     game::g_cause_at = 0;
@@ -1793,6 +1901,16 @@ void aot_call_out(uint32_t x, AotRegs *t, uint32_t pops)
     x = aot_site_target(x);   // a native's call at one of its sites (native_sites_table.h)
     uint32_t *r = t->r;
     const uint32_t esp0 = r[4], ra = aot_ld32(aot_mem, esp0), want = esp0 + 4u + pops;
+    if (g_cpu_aot) {
+        // No trap to go back to: the callee where it is, whatever it is. One
+        // that pops other than the site counted is named once and goes on
+        // (the code after takes esp as it comes back).
+        cpuaot_call(x, t);
+        if (r[4] != want && !g_aot_esp_off[x]++)
+            rt::logf("cpu_aot: a callout to %08x (return %08x) came back with esp %08x, the site counted %08x", x, ra,
+                     r[4], want);
+        return;
+    }
     const uint32_t keep[4] = {r[3], r[5], r[6], r[7]};
     if (g_no_exit) {
         // No trap to exit to: a compiled callee in C if it can't exit
