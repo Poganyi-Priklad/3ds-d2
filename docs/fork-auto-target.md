@@ -6,6 +6,8 @@ console there is no mouse to point at a monster, so in the game world **A** and
 press the left or right mouse button. Everything else about the controls stays
 as in the original port.
 
+![Auto-target: hero, circle-pad direction, a cone, the nearest enemy highlighted, adjacent-enemy priority, and flick switching](images/fork-auto-target.png)
+
 The full rules and every setting are in [controls.md](controls.md#auto-target-a-and-b);
 this page is the short version and a map of the code.
 
