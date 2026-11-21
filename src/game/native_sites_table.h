@@ -96,6 +96,50 @@ SITE(fatal_exit, 0x006814d1, "cc cc cc cc cc cc cc cc cc cc cc cc cc", "6a 00 6a
 SITE(fatal_exit, 0x00681531, "cc cc cc cc cc cc cc cc cc", "e8 {=0x681d27} 83 c4 0c c3")
 SITE(fatal_exit, 0x00681e09, "6a 00 6a 00 ff 74 24 0c e8 11 ff ff ff 83 c4 0c", "83 7c 24 04 ff 0f 85 {=0x6814d1} e9 {FatalExit}")
 
+// automap.cpp, install_automap_capture: the UI pass's automap calls at
+// 0x456f93 (in 0x456ee0, 23 bytes) become a call to a stub in .text's slack:
+// a native decides (eax bit 0 the game's map, bit 1 the units), and the
+// units' pass (0x457520, 0x45ac90) runs between two natives that capture it.
+// 0x45a860 (one unit's cross and name) goes through a filter that skips the
+// player's unit while the flag byte at 0x6cb640 is set.
+NATIVE(AutomapDecide, 0)
+NATIVE(AutomapBegin, 0)
+NATIVE(AutomapEnd, 0)
+GROUP(automap, 1)
+SITE(automap, 0x006cb5b0, "00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00", "e8 {AutomapDecide} 85 c0 74 31 50 e8 {=0x45ae90} 83 f8 03 74 25 f6 04 24 02 74 14 e8 {=0x457520} e8 {AutomapBegin} e8 {=0x45ac90} e8 {AutomapEnd} f6 04 24 01 74 05 e8 {=0x45ad60} 58 c3")
+SITE(automap, 0x006cb600, "00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00", "80 3d 40 b6 6c 00 00 74 09 3b 05 70 6a 7a 00 75 01 c3 55 8b ec 83 ec 14 e9 {=0x45a866}")
+SITE(automap, 0x0045a860, "55 8b ec 83 ec 14", "e9 {=0x6cb600} 90")
+SITE(automap, 0x00456f93, "39 1d e8 27 7a 00 74 0f e8 f0 3e 00 00 83 f8 03 74 05 e8 b6 3d 00 00", "e8 {=0x6cb5b0} 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90")
+
+// storm_reads.cpp, install_storm_read_priority: SFileReadFile's deadline for
+// a queued read (push 0x7fffffff at 0x41aeb2) is 0 for a read without
+// OVERLAPPED ([ebp+0x18] 0), so it is taken next.
+GROUP(storm_priority, 1)
+SITE(storm_priority, 0x006cb780, "00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00", "83 7d 18 00 75 07 6a 00 e9 {=0x41aeb7} 68 ff ff ff 7f e9 {=0x41aeb7}")
+SITE(storm_priority, 0x0041aeb2, "68 ff ff ff 7f", "e9 {=0x6cb780}")
+
+// storm_reads.cpp, install_storm_direct_reads: the read thread sets a flag
+// byte before it leaves Storm's lock to read (0x41a66c) and clears it after
+// (0x41a725); SFileReadFile's check for an asynchronous archive (0x41ace2, 13
+// bytes) asks a native, which sets ecx: 1 queues. The flag is in scratch
+// memory the run allocates (a write to a page of code would throw its
+// translations away); its address is in the data dword at 0x6cb7dc.
+NATIVE(StormDirectRead, 0)
+GROUP(storm_direct, 1)
+SITE(storm_direct, 0x006cb7a0, "00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00", "8b 1d dc b7 6c 00 c6 03 01 8b 1d 14 c2 6c 00 e9 {=0x41a672}")
+SITE(storm_direct, 0x006cb7b8, "00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00", "50 a1 dc b7 6c 00 c6 00 00 58 83 7e 28 00 0f 84 {=0x41a763} e9 {=0x41a72b}")
+SITE(storm_direct, 0x0041a66c, "8b 1d 14 c2 6c 00", "e9 {=0x6cb7a0} 90")
+SITE(storm_direct, 0x0041a725, "83 7e 28 00 74 38", "e9 {=0x6cb7b8} 90")
+SITE(storm_direct, 0x0041ace2, "83 ba 10 01 00 00 00 0f 85 04 01 00 00", "e8 {StormDirectRead} 85 c9 0f 85 {=0x41adf3}")
+
+// frame_reads.cpp, install_frame_reads: SFileReadFile (0x41aad0) calls a
+// native first, which names the game thread's read and clears *read as the
+// 19 bytes replaced did (test eax, eax; je; mov dword [eax], 0), then makes
+// its frame.
+NATIVE(FrameRead, 0)
+GROUP(frame_reads, 1)
+SITE(frame_reads, 0x0041aad0, "55 8b ec 8b 45 14 83 ec 2c 85 c0 74 06 c7 00 00 00 00 00", "e8 {FrameRead} 55 8b ec 83 ec 2c 90 90 90 90 90 90 90 90")
+
 #ifdef NATIVE_SITES_TABLE_DEFAULTS
 #undef NATIVE
 #undef GROUP

@@ -1,5 +1,6 @@
 // See frame_reads.h.
 #include "game/frame_reads.h"
+#include "game/native_sites.h"
 #include "game/tiles_ahead.h"
 
 #include "runtime/cpu.h"
@@ -27,10 +28,7 @@ namespace {
 //   41aae3  ...                (eax is loaded again before it is read)
 // becomes a call to the native, which clears *read itself, and the frame:
 //   call native; push ebp; mov ebp, esp; sub esp, 0x2c; nops to 0x41aae3
-constexpr uint32_t kAt = 0x0041aad0, kNext = 0x0041aae3;
-constexpr uint8_t kOrig[] = {0x55, 0x8b, 0xec, 0x8b, 0x45, 0x14, 0x83, 0xec, 0x2c, 0x85,
-                             0xc0, 0x74, 0x06, 0xc7, 0x00, 0x00, 0x00, 0x00, 0x00};
-static_assert(kAt + sizeof kOrig == kNext, "the patch ends where the game's code goes on");
+constexpr uint32_t kAt = 0x0041aad0;
 
 // rt::frame_thread_us's kinds the game thread waits for a read in.
 constexpr size_t kCritsec = 4, kEvent = 5, kFileio = 6, kMulti = 7;
@@ -133,21 +131,11 @@ uint32_t on_read(d2rt::Cpu &c)
 
 bool install_frame_reads(d2rt::Cpu &c)
 {
-    uint8_t have[sizeof kOrig];
-    if (!c.read(kAt, have, sizeof have) || std::memcmp(have, kOrig, sizeof have) != 0)
-        return false;
     const uint32_t native = rt::native_entry("FrameRead", 0, on_read);
-    if (!native)
+    // native_sites_table.h's frame_reads row, which the AOT recompiler reads
+    // too (issue #138).
+    if (!native || !apply_sites(c, "frame_reads", {{"FrameRead", native}}))
         return false;
-    uint8_t p[sizeof kOrig];
-    std::memset(p, 0x90, sizeof p);
-    p[0] = 0xe8;
-    const uint32_t rel = native - (kAt + 5);
-    std::memcpy(p + 1, &rel, 4);
-    const uint8_t frame[] = {0x55, 0x8b, 0xec, 0x83, 0xec, 0x2c};
-    std::memcpy(p + 5, frame, sizeof frame);
-    c.write(kAt, p, sizeof p);
-    c.invalidate_code(kAt, sizeof p);
     rt::logf("frame reads: the game thread's reads named at %08x", kAt);
     return true;
 }

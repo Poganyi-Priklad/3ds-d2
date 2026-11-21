@@ -244,7 +244,11 @@ test)
             all=("${runs[@]}"); runs=()
             for r in "${all[@]}"; do [[ " $AOT_RUNS " == *" ${r% *} "* ]] && runs+=("$r"); done
         fi
-        out=build/m4-aot
+        # AOT_OUT=<dir under build/>: this run's folders and logs there (build/m4-aot); AOT_BIN=<dir>: the
+        # binary another run built there, not built again (a check and a timed run side by side:
+        # the second with AOT_OUT of its own, AOT_BIN the first's and D2_AOT_BUILD=keep).
+        out="${AOT_OUT:-build/m4-aot}"
+        bin="${AOT_BIN:-$out}"
         save="${3:-}"
         mkdir -p "$ROOT/$out"
         # One build for every script (AOT_JOBS, 2: two of the generated C's objects side by side; the C is
@@ -254,7 +258,7 @@ test)
         # time); a timed run (AOT_MODE) one at a time unless AOT_PARALLEL=1, so the runs don't share
         # the host's cores. Each run is cut after AOT_TIMEOUT seconds (3600: side by side, Act II's
         # took over 1800 with another lane on the host).
-        if ! run_in "$HOSTTEST_IMAGE" make -j"${AOT_JOBS:-2}" -C tests/m4 host OUT="/work/$out" "${AOT_MAKE[@]}" \
+        if [ -z "${AOT_BIN:-}" ] && ! run_in "$HOSTTEST_IMAGE" make -j"${AOT_JOBS:-2}" -C tests/m4 host OUT="/work/$out" "${AOT_MAKE[@]}" \
                 ${AOT_SPLIT:+AOT_SPLIT=1} > "$ROOT/$out/make.txt" 2>&1 < /dev/null; then
             echo "RESULT aot.build FAIL (see $out/make.txt)"
             grep -a "error" "$ROOT/$out/make.txt" | head -10 || true
@@ -269,7 +273,7 @@ test)
             local RUN_EXTRA=(-v "$game_mount:/game:ro" -e "D2_AOT=${AOT_MODE:-5}" -e "D2_AOT_FNS=${D2_AOT_FNS:-}" -e M4_VIRTUAL_CLOCK=1 -e WX86_FAKETSC=1
                        -e "M4_SCRIPT=$(cat "$ROOT/tests/m4/scripts/$name.txt")")
             for v in ${AOT_ENV:-}; do RUN_EXTRA+=(-e "$v"); done   # AOT_ENV="M4_ASYNCIO=1 D2_DCC=2": the console's ways
-            run_in "$HOSTTEST_IMAGE" make -C tests/m4 run-built MS="$ms" OUT="/work/$dir" BIN_OUT="/work/$out" TIMEOUT="${AOT_TIMEOUT:-3600}" \
+            run_in "$HOSTTEST_IMAGE" make -C tests/m4 run-built MS="$ms" OUT="/work/$dir" BIN_OUT="/work/$bin" TIMEOUT="${AOT_TIMEOUT:-3600}" \
                 "${AOT_MAKE[@]}" ${AOT_SPLIT:+AOT_SPLIT=1} > "$ROOT/$out/$name-make.txt" 2>&1 < /dev/null || true
             cp "$ROOT/$dir/err.txt" "$ROOT/$out/$name.txt" 2>/dev/null || : > "$ROOT/$out/$name.txt"
         }
