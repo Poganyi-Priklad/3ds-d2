@@ -23,6 +23,8 @@
 //   aim_forget_ms=2500    no attack for this long: the target is forgotten
 //   aim_height=30         pixels above the target's feet for the cursor
 //   aim_confirm=4         frames to wait for the game to show the target under the cursor
+//   aim_panel_walk_ms=280 a panel open on one side: the circle pad held out this long walks
+//                         the hero (a quick flick still moves the cursor a cell); 0: never
 //   aim_walk_stop=1       the circle pad let go after a walk: a click just ahead of the
 //                         hero stops him there (0: no click, he finishes the walk's last step)
 //
@@ -89,6 +91,7 @@ inline const NumberKey *number_keys(int &count)
         {"aim_forget_ms", &AimSettings::forget_ms, nullptr, 0, 0, 30000},
         {"aim_height", &AimSettings::height_px, nullptr, 0, 0, 120},
         {"aim_confirm", &AimSettings::confirm_polls, nullptr, 0, 1, 12},
+        {"aim_panel_walk_ms", &AimSettings::panel_walk_ms, nullptr, 0, 0, 3000},
     };
     count = (int)(sizeof keys / sizeof keys[0]);
     return keys;

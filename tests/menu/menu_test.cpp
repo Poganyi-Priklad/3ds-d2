@@ -1,7 +1,12 @@
 // Menu navigation (src/game/menu_nav.h): a flick moves the cursor one cell,
-// round a window's edge, into the next window, to the free half with an item,
-// and through D2Win's screens before the game; B is Escape there (nothing on
-// the main menu). Made-up windows stand in for the game. Run through
+// round a window's edge in the same row or column, into the window next to
+// it, to the free half with an item on the cursor and back, an NPC's menu
+// up and down only; the 640x480 windows and the NPC menu's options; and the
+// controls around it (src/game/controls.cpp): a slow tilt still moves the
+// cursor freely, B is Escape with a panel open, the other buttons as
+// before, and with one side panel open a held stick walks (the auto-target's
+// walk, on the free half). Made-up windows with the game's own numbers (inventory.txt's
+// rows as the lane read them) stand in for the game. Run through
 // `scripts/docker.sh test menu`.
 #include "game/controls.h"
 #include "game/menu_nav.h"
@@ -578,82 +583,6 @@ static void test_controls_scroll_button()
 }
 
 // ---- the game menu's rows ----
-static void test_keyboard_pass_through()
-{
-    Pad p;
-    p.held = kA | kB | kY | kStart | kSelect | kX | kUp;
-    p.circle_x = 100, p.circle_y = -50, p.cstick_x = 20, p.cstick_y = 30;
-    p.touching = true, p.touch_x = 10, p.touch_y = 20, p.pointing = true, p.point_left = true;
-    const Pad g = keyboard_pass_through(p);
-    CHECK(g.held == (kA | kX | kUp));
-    CHECK(g.circle_x == 100 && g.circle_y == -50 && g.cstick_x == 20 && g.cstick_y == 30);
-    CHECK(!g.touching && !g.pointing && !g.point_left && !g.touchpad);
-}
-
-static void test_b_out_of_game()
-{
-    const D2WinControl main_menu[] = {
-        {6, 5, 264, 324, 272, 35, true, 0, false, 0, 0, 0, 0},   // Single Player
-        {6, 5, 264, 433, 272, 35, true, 0, false, 0, 0, 0, 0},   // Other Multiplayer
-        {6, 5, 264, 568, 272, 35, true, 0, false, 0, 0, 0, 0},   // Exit
-    };
-    CHECK(d2win_main_menu(std::vector<D2WinControl>(main_menu, main_menu + 3)));
-    CHECK(!d2win_main_menu(std::vector<D2WinControl>(main_menu, main_menu + 2)));   // no Exit there
-    CHECK(!d2win_main_menu(char_screen(3, 0, 0)));   // character select
-    CHECK(!d2win_main_menu({}));
-    FakeMenus menus;
-    Controls c;
-    c.set_frame(800, 600);
-    c.set_menu_nav(&menus);
-    c.set_context(false, false, 0, false);
-    uint64_t t = 1000;
-    // Character select (or the class screen): B is Escape while held, never the right button.
-    c.update(pad_with(kB), t += 16);
-    CHECK(g_keys[VK_ESCAPE] && !g_right);
-    c.update(pad_with(0), t += 16);
-    CHECK(!g_keys[VK_ESCAPE]);
-    // The main menu: nothing (its Escape would quit the game).
-    menus.on_main_menu = true;
-    c.update(pad_with(kB), t += 16);
-    CHECK(!g_keys[VK_ESCAPE] && !g_right);
-    c.update(pad_with(0), t += 16);
-    // R + B is still R's: no Escape.
-    menus.on_main_menu = false;
-    c.update(pad_with(kR | kB), t += 16);
-    CHECK(!g_keys[VK_ESCAPE]);
-    c.update(pad_with(0), t += 16);
-    // In the game with no panel: B is the right button as before.
-    c.set_context(true, false, 0, false);
-    c.update(pad_with(kB), t += 16);
-    CHECK(!g_keys[VK_ESCAPE] && g_right);
-    c.update(pad_with(0), t += 16);
-}
-
-// ---- a panel on one side: the walk and the auto-target round the hero
-// where the game draws him (the free half's middle), not the frame's ----
-static void test_weapon_tabs()
-{
-    NavWindow w = inventory();
-    const NavRect right_arm = w.cells[40], left_arm = w.cells[42];   // the weapon boxes drawn left and right
-    const NavRect tab_l = weapon_tab(right_arm), tab_r = weapon_tab(left_arm);
-    CHECK(tab_l.left == 340 && tab_l.right == 395 && tab_l.top == 25 && tab_l.bottom == 44);
-    CHECK(tab_r.left == 571 && tab_r.right == 626);
-    w.cells.push_back(tab_l);
-    w.cells.push_back(tab_r);
-    std::vector<NavWindow> ws = {w};
-    MenuNav nav;
-    // Up from the left weapon: onto its tab; down from the tab: back.
-    MenuNav::Step s = flick_at(nav, ws, right_arm.centre_x(), right_arm.centre_y(), NavDirection::kUp);
-    CHECK(at(s, tab_l.centre_x(), tab_l.centre_y()));
-    s = flick_at(nav, ws, tab_l.centre_x(), tab_l.centre_y(), NavDirection::kDown);
-    CHECK(at(s, right_arm.centre_x(), right_arm.centre_y()));
-    // The right weapon's tab, the same way.
-    s = flick_at(nav, ws, left_arm.centre_x(), left_arm.centre_y(), NavDirection::kUp);
-    CHECK(at(s, tab_r.centre_x(), tab_r.centre_y()));
-    s = flick_at(nav, ws, tab_r.centre_x(), tab_r.centre_y(), NavDirection::kDown);
-    CHECK(at(s, left_arm.centre_x(), left_arm.centre_y()));
-}
-
 static void test_game_menu_rows()
 {
     GameMenu m;
@@ -765,6 +694,7 @@ static void test_controls_game_menu()
     CHECK(!g_keys[VK_DOWN] && menus.asked == asked + 1);
 }
 
+// ---- one-panel walk and related controls (FakeAim is the made-up world) ----
 struct FakeAim : AimWorld {
     std::vector<AimUnit> monsters, ground;
     AimView v;
@@ -802,6 +732,107 @@ static AimUnit npc_at(uint32_t id, int x, int y)
 }
 
 // ---- a panel on one side: a flick steps, the stick held walks ----
+static void test_panel_hold_walks()
+{
+    CHECK(one_side_panel(1ull | 1ull << 0x01) == 1 && one_side_panel(1ull << 0x04) == 1);   // inventory, skills
+    CHECK(one_side_panel(1ull << 0x02) == -1 && one_side_panel(1ull << 0x0F) == -1);        // character, quests
+    CHECK(one_side_panel(1ull << 0x02 | 1ull << 0x01) == 0);   // both halves
+    CHECK(one_side_panel(1ull << 0x01 | 1ull << 0x19) == 0 && one_side_panel(1ull << 0x01 | 1ull << 0x0C) == 0);
+    CHECK(one_side_panel(1ull << 0x09) == 0 && one_side_panel(1ull << 0x08) == 0 && one_side_panel(0) == 0);
+    FakeMenus menus;
+    menus.open = {inventory()};
+    FakeAim world;
+    world.v.width = 640, world.v.height = 480, world.v.hero_x = 320, world.v.hero_y = 240, world.v.hero_mode = 1;
+    Controls c;
+    c.set_frame(640, 480);
+    c.set_menu_nav(&menus);
+    c.set_auto_target(AimSettings(), &world);   // aim_panel_walk_ms 280
+    c.set_context(true, true, 1ull | 1ull << 0x01, false);   // the inventory (the right half)
+    int x, y;
+    inv_cell(3, 1, x, y);
+    c.warp_cursor(x, y);
+    uint64_t t = 1000;
+    c.update(pad_with(0), t);
+    // A short flick: one cell, no walk.
+    c.update(pad_with(0, 156, 0), t += 16);
+    c.update(pad_with(0, 156, 0), t += 16);
+    c.update(pad_with(0), t += 16);
+    int ex, ey;
+    inv_cell(4, 1, ex, ey);
+    CHECK(c.cursor_x() == ex && c.cursor_y() == ey && !g_left);
+    // Held out left (towards the free half) past 280 ms: walking, the left
+    // button held, the point on the free (left) half.
+    for (int i = 0; i < 12; i++)   // 192 ms: not yet
+        c.update(pad_with(0, -156, 0), t += 16);
+    CHECK(!g_left);
+    for (int i = 0; i < 8; i++)
+        c.update(pad_with(0, -156, 0), t += 16);
+    CHECK(g_left && c.cursor_x() < 320 && c.cursor_x() == 320 - 88 && c.cursor_y() == 225);
+    // Towards the panel (right): the point stays off its half.
+    for (int i = 0; i < 4; i++)
+        c.update(pad_with(0, 156, 0), t += 16);
+    CHECK(g_left && c.cursor_x() <= 320 - 5);
+    // Let go: the stop click (ahead of his middle the way he walked, off
+    // the panel's half), then up; and a flick steps cells again.
+    c.update(pad_with(0), t += 16);
+    CHECK(g_left && c.cursor_x() == 315 && c.cursor_y() == 232);
+    c.update(pad_with(0), t += 150);
+    c.update(pad_with(0), t += 16);
+    CHECK(!g_left);
+    c.warp_cursor(ex, ey);
+    c.update(pad_with(0), t += 16);
+    c.update(pad_with(0, 156, 0), t += 16);
+    c.update(pad_with(0), t += 16);
+    inv_cell(5, 1, x, y);
+    CHECK(c.cursor_x() == x && c.cursor_y() == y && !g_left);
+    // A left panel (the character sheet): the point stays on the right half.
+    c.set_context(true, true, 1ull | 1ull << 0x02, false);
+    for (int i = 0; i < 25; i++)
+        c.update(pad_with(0, -156, 0), t += 16);
+    CHECK(g_left && c.cursor_x() >= 324);
+    c.update(pad_with(0), t += 16);
+    c.update(pad_with(0), t += 40);   // the stop click
+    c.update(pad_with(0), t += 200);
+    CHECK(!g_left);
+    // Both halves open (the character sheet and the inventory): held, no walk.
+    c.set_context(true, true, 1ull | 1ull << 0x02 | 1ull << 0x01, false);
+    for (int i = 0; i < 40; i++) {
+        c.update(pad_with(0, -156, 0), t += 16);
+        CHECK(!g_left);
+    }
+    c.update(pad_with(0), t += 16);
+    // An item on the cursor: no walk (a click would drop it).
+    c.set_context(true, true, 1ull | 1ull << 0x01, true);
+    for (int i = 0; i < 40; i++) {
+        c.update(pad_with(0, -156, 0), t += 16);
+        CHECK(!g_left);
+    }
+    c.update(pad_with(0), t += 16);
+    // aim_panel_walk_ms=0: never.
+    AimSettings never;
+    never.panel_walk_ms = 0;
+    c.set_auto_target(never, &world);
+    c.set_context(true, true, 1ull | 1ull << 0x01, false);
+    for (int i = 0; i < 40; i++) {
+        c.update(pad_with(0, -156, 0), t += 16);
+        CHECK(!g_left);
+    }
+    c.update(pad_with(0), t += 16);
+    // Another threshold: 500 ms.
+    AimSettings slow;
+    slow.panel_walk_ms = 500;
+    c.set_auto_target(slow, &world);
+    for (int i = 0; i < 25; i++)   // 400 ms
+        c.update(pad_with(0, -156, 0), t += 16);
+    CHECK(!g_left);
+    for (int i = 0; i < 10; i++)
+        c.update(pad_with(0, -156, 0), t += 16);
+    CHECK(g_left);
+    c.update(pad_with(0), t += 16);
+    c.update(pad_with(0), t += 200);
+}
+
+// ---- A on the control panel: a plain click, no auto-target ----
 static void test_control_panel_plain_click()
 {
     CHECK(control_panel_at(182, 461, 640, 480));    // run / walk
@@ -849,6 +880,20 @@ static void test_control_panel_plain_click()
     CHECK(g_right && c.cursor_x() == 182 && c.cursor_y() == 461);
     c.update(pad_with(0), t += 16);
 }
+
+// ---- the on-screen keyboard open: the game still gets the sticks and A ----
+static void test_keyboard_pass_through()
+{
+    Pad p;
+    p.held = kA | kB | kY | kStart | kSelect | kX | kUp;
+    p.circle_x = 100, p.circle_y = -50, p.cstick_x = 20, p.cstick_y = 30;
+    p.touching = true, p.touch_x = 10, p.touch_y = 20, p.pointing = true, p.point_left = true;
+    const Pad g = keyboard_pass_through(p);
+    CHECK(g.held == (kA | kX | kUp));
+    CHECK(g.circle_x == 100 && g.circle_y == -50 && g.cstick_x == 20 && g.cstick_y == 30);
+    CHECK(!g.touching && !g.pointing && !g.point_left && !g.touchpad);
+}
+
 static void test_controls()
 {
     FakeMenus menus;
@@ -885,8 +930,11 @@ static void test_controls()
     c.update(pad_with(0), t += 16);
     inv_cell(4, 0, x, y);
     CHECK(c.cursor_x() == x && c.cursor_y() == y);
-    // A slow tilt: the cursor moves freely, no cell steps.
-    c.set_auto_target(AimSettings(), nullptr);
+    // A slow tilt with the panel walk off (aim_panel_walk_ms=0): the cursor
+    // moves freely, no cell steps.
+    AimSettings no_walk;
+    no_walk.panel_walk_ms = 0;
+    c.set_auto_target(no_walk, nullptr);
     const int asked = menus.asked;
     for (int i = 1; i <= 70; i++)   // from 20% of the tilt to 40% in 190 ms: slower than a flick (150)
         c.update(pad_with(0, 156 * (i < 60 ? i : 60) / 60, 0), t += 16);
@@ -975,6 +1023,139 @@ static void test_controls_holding()
 }
 
 // ---- B out of the game: Escape (one screen back), not on the main menu ----
+static void test_b_out_of_game()
+{
+    const D2WinControl main_menu[] = {
+        {6, 5, 264, 324, 272, 35, true, 0, false, 0, 0, 0, 0},   // Single Player
+        {6, 5, 264, 433, 272, 35, true, 0, false, 0, 0, 0, 0},   // Other Multiplayer
+        {6, 5, 264, 568, 272, 35, true, 0, false, 0, 0, 0, 0},   // Exit
+    };
+    CHECK(d2win_main_menu(std::vector<D2WinControl>(main_menu, main_menu + 3)));
+    CHECK(!d2win_main_menu(std::vector<D2WinControl>(main_menu, main_menu + 2)));   // no Exit there
+    CHECK(!d2win_main_menu(char_screen(3, 0, 0)));   // character select
+    CHECK(!d2win_main_menu({}));
+    FakeMenus menus;
+    Controls c;
+    c.set_frame(800, 600);
+    c.set_menu_nav(&menus);
+    c.set_context(false, false, 0, false);
+    uint64_t t = 1000;
+    // Character select (or the class screen): B is Escape while held, never the right button.
+    c.update(pad_with(kB), t += 16);
+    CHECK(g_keys[VK_ESCAPE] && !g_right);
+    c.update(pad_with(0), t += 16);
+    CHECK(!g_keys[VK_ESCAPE]);
+    // The main menu: nothing (its Escape would quit the game).
+    menus.on_main_menu = true;
+    c.update(pad_with(kB), t += 16);
+    CHECK(!g_keys[VK_ESCAPE] && !g_right);
+    c.update(pad_with(0), t += 16);
+    // R + B is still R's: no Escape.
+    menus.on_main_menu = false;
+    c.update(pad_with(kR | kB), t += 16);
+    CHECK(!g_keys[VK_ESCAPE]);
+    c.update(pad_with(0), t += 16);
+    // In the game with no panel: B is the right button as before.
+    c.set_context(true, false, 0, false);
+    c.update(pad_with(kB), t += 16);
+    CHECK(!g_keys[VK_ESCAPE] && g_right);
+    c.update(pad_with(0), t += 16);
+}
+
+// ---- a panel on one side: the walk and the auto-target round the hero
+// where the game draws him (the free half's middle), not the frame's ----
+static void test_panel_side_hero_place()
+{
+    FakeMenus menus;
+    menus.open = {inventory()};
+    FakeAim world;
+    // The inventory open on the right: the game draws the hero at 160 across.
+    world.v.width = 640, world.v.height = 480, world.v.hero_x = 160, world.v.hero_y = 240, world.v.hero_mode = 1;
+    Controls c;
+    c.set_frame(640, 480);
+    c.set_menu_nav(&menus);
+    c.set_auto_target(AimSettings(), &world);
+    c.set_context(true, true, 1ull | 1ull << 0x01, false);
+    int x, y;
+    inv_cell(3, 1, x, y);
+    c.warp_cursor(x, y);
+    uint64_t t = 1000;
+    c.update(pad_with(0), t);
+    // Held right (towards the panel) past 280 ms: the hero walks right, the
+    // point right of him, still off the panel's half.
+    for (int i = 0; i < 25; i++)
+        c.update(pad_with(0, 156, 0), t += 16);
+    CHECK(g_left && c.cursor_x() == 160 + 88 && c.cursor_x() < 320);
+    // Held left: left of him.
+    for (int i = 0; i < 4; i++)
+        c.update(pad_with(0, -156, 0), t += 16);
+    CHECK(g_left && c.cursor_x() == 160 - 88);
+    c.update(pad_with(0), t += 16);
+    CHECK(g_left && c.cursor_x() == 140 && c.cursor_y() == 232);   // the stop click ahead of him (left)
+    c.update(pad_with(0), t += 200);
+    c.update(pad_with(0), t += 16);
+    CHECK(!g_left);
+    // No view of the hero: the free half's middle all the same.
+    Controls blind;
+    blind.set_frame(640, 480);
+    blind.set_menu_nav(&menus);
+    blind.set_context(true, true, 1ull | 1ull << 0x02, false);   // the character sheet (the left half)
+    struct NoView : FakeAim {
+        bool view(AimView &) override { return false; }
+    } none;
+    blind.set_auto_target(AimSettings(), &none);
+    for (int i = 0; i < 25; i++)
+        blind.update(pad_with(0, -156, 0), t += 16);
+    CHECK(g_left && blind.cursor_x() == (324 + 640) / 2 - 88);
+    blind.update(pad_with(0), t += 16);
+    blind.update(pad_with(0), t += 300);
+    // The auto-target with the inventory open: an enemy on the free half,
+    // left of the hero (the stick's last direction).
+    AimUnit enemy;
+    enemy.type = 1, enemy.id = 5, enemy.mode = 1, enemy.flags_a = 0x0F, enemy.flags_b = 0x80;
+    enemy.feet_x = 80, enemy.feet_y = 240, enemy.distance = 5;
+    world.monsters = {enemy};
+    AimUnit hidden = enemy;   // under the panel: never taken
+    hidden.id = 6, hidden.feet_x = 420, hidden.distance = 4;
+    world.monsters.push_back(hidden);
+    // A with the cursor on a panel cell: a plain click there.
+    c.warp_cursor(x, y);
+    c.update(pad_with(0), t += 16);
+    c.update(pad_with(kA), t += 16);
+    CHECK(g_left && c.cursor_x() == x && c.cursor_y() == y);
+    c.update(pad_with(0), t += 16);
+    c.update(pad_with(0), t += 200);
+    // A with the cursor on the free half: the cursor onto the enemy there.
+    c.warp_cursor(200, 240);
+    c.update(pad_with(0), t += 16);
+    c.update(pad_with(kA), t += 16);
+    CHECK(c.cursor_x() == 80 && c.cursor_y() == 240 - 30);
+    c.update(pad_with(0), t += 16);
+}
+
+// ---- the inventory's weapon swap tabs: one cell over each weapon slot ----
+static void test_weapon_tabs()
+{
+    NavWindow w = inventory();
+    const NavRect right_arm = w.cells[40], left_arm = w.cells[42];   // the weapon boxes drawn left and right
+    const NavRect tab_l = weapon_tab(right_arm), tab_r = weapon_tab(left_arm);
+    CHECK(tab_l.left == 340 && tab_l.right == 395 && tab_l.top == 25 && tab_l.bottom == 44);
+    CHECK(tab_r.left == 571 && tab_r.right == 626);
+    w.cells.push_back(tab_l);
+    w.cells.push_back(tab_r);
+    std::vector<NavWindow> ws = {w};
+    MenuNav nav;
+    // Up from the left weapon: onto its tab; down from the tab: back.
+    MenuNav::Step s = flick_at(nav, ws, right_arm.centre_x(), right_arm.centre_y(), NavDirection::kUp);
+    CHECK(at(s, tab_l.centre_x(), tab_l.centre_y()));
+    s = flick_at(nav, ws, tab_l.centre_x(), tab_l.centre_y(), NavDirection::kDown);
+    CHECK(at(s, right_arm.centre_x(), right_arm.centre_y()));
+    // The right weapon's tab, the same way.
+    s = flick_at(nav, ws, left_arm.centre_x(), left_arm.centre_y(), NavDirection::kUp);
+    CHECK(at(s, tab_r.centre_x(), tab_r.centre_y()));
+    s = flick_at(nav, ws, tab_r.centre_x(), tab_r.centre_y(), NavDirection::kDown);
+    CHECK(at(s, left_arm.centre_x(), left_arm.centre_y()));
+}
 
 int main()
 {
@@ -985,18 +1166,20 @@ int main()
     test_free_half();
     test_npc_menu();
     test_fixed_windows();
+    test_controls();
+    test_controls_holding();
     test_d2win_cells();
     test_d2win_screen();
     test_char_screen_scroll();
     test_controls_scroll_button();
-    test_b_out_of_game();
     test_game_menu_rows();
     test_controls_game_menu();
+    test_b_out_of_game();
     test_weapon_tabs();
     test_keyboard_pass_through();
-    test_controls();
-    test_controls_holding();
     test_control_panel_plain_click();
+    test_panel_hold_walks();
+    test_panel_side_hero_place();
     if (g_fail) {
         std::printf("%d checks FAILED\n", g_fail);
         return 1;

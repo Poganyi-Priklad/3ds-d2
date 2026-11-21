@@ -365,6 +365,22 @@ bool Controls::game_menu_buttons(uint64_t now_ms)
     return false;
 }
 
+// The panels open: -1 on the left half only (the character sheet, the
+// quest log, the party screen, the mercenary), 1 on the right half only
+// (the inventory, the skill tree), 0 on both or any other (a shop, the
+// stash, the cube, a trade, the waypoints, an NPC's menu, the game menu,
+// Configure Controls, help).
+int one_side_panel(uint64_t ui)
+{
+    constexpr uint64_t kLeft = 1ull << 0x02 | 1ull << 0x0F | 1ull << 0x16 | 1ull << 0x24;
+    constexpr uint64_t kRight = 1ull << 0x01 | 1ull << 0x04;
+    constexpr uint64_t kOthers = 1ull << 0x08 | 1ull << 0x09 | 1ull << 0x0B | 1ull << 0x0C | 1ull << 0x0E |
+                                 1ull << 0x14 | 1ull << 0x17 | 1ull << 0x19 | 1ull << 0x1A | 1ull << 0x21;
+    if (ui & kOthers)
+        return 0;
+    const bool left = ui & kLeft, right = ui & kRight;
+    return left == right ? 0 : left ? -1 : 1;
+}
 
 // ---- walking: the point keeps off units ----
 //
@@ -796,10 +812,22 @@ void Controls::update(const Pad &pad, uint64_t now_ms)
         }
         if (!(held & (kA | kB)))
             aim_on_interface_ = false;
+        // A panel open on one side only (the inventory, the character
+        // sheet...): the auto-target works on the free half, while the
+        // cursor is there (A on the panel's cells stays a plain click).
+        const int aim_side = in_game_ && panel_open_ && !holding_ && !game_menu_on_ && !item_step_
+                                 ? one_side_panel(ui_)
+                                 : 0;
+        const bool cursor_free_half = aim_side > 0 ? cx_ < w_ / 2 : aim_side < 0 ? cx_ >= w_ / 2 : false;
         AimPoll poll;
         poll.now_ms = now_ms;
-        poll.allowed = in_game_ && !panel_open_ && !holding_ && !item_step_ && !(held & kL) && !pad.aim_off &&
-                       !pad.pointing && !select_layer && !aim_on_interface_;
+        poll.allowed = in_game_ && (!panel_open_ || (aim_side && (cursor_free_half || aiming_))) && !holding_ &&
+                       !item_step_ && !(held & kL) && !pad.aim_off && !pad.pointing && !select_layer &&
+                       !aim_on_interface_;
+        if (aim_side) {   // targets only on the free half
+            poll.area_left = aim_side > 0 ? 0 : w_ / 2;
+            poll.area_right = aim_side > 0 ? w_ / 2 : w_;
+        }
         poll.a_held = (held & kA) && bound_[0] == kMouseLeft;
         poll.b_held = (held & kB) && bound_[1] == kMouseRight;
         poll.a_pressed = poll.a_held && (pressed & kA);
@@ -852,14 +880,47 @@ void Controls::update(const Pad &pad, uint64_t now_ms)
         }
     }
 
-    // ---- circle pad: walk in the game world; elsewhere (menus, the screens
-    // before the game) it moves the cursor like the C-stick, and a flick
-    // steps one cell.
+    // ---- circle pad: walk in the game world; elsewhere (menus, open
+    // panels) it moves the cursor like the C-stick ----
+    // A panel on one side only: a flick steps the cursor, the stick held
+    // out (aim_panel_walk_ms) walks, on the free half of the screen.
     const bool walk_mode = in_game_ && !panel_open_;
     const float cvx = pad.circle_x / kStickMax, cvy = pad.circle_y / kStickMax;
     const float cm = std::sqrt(cvx * cvx + cvy * cvy);
+    const int side = in_game_ && panel_open_ && !holding_ && !game_menu_on_ && !item_step_ &&
+                             aim_.settings().panel_walk_ms > 0
+                         ? one_side_panel(ui_)
+                         : 0;
+    bool panel_walk = false;
+    if (side) {
+        if (cm > kWalkEngage && !panel_hold_) {
+            panel_hold_ = true;
+            panel_hold_ms_ = now_ms;
+        } else if (cm < kWalkRelease) {
+            panel_hold_ = false;
+        }
+        if (!panel_walking_ && panel_hold_ && now_ms - panel_hold_ms_ >= (uint64_t)aim_.settings().panel_walk_ms) {
+            panel_walking_ = true;
+            rt::logf("walk: the stick held %d ms with a panel open on the %s: walking", aim_.settings().panel_walk_ms,
+                     side < 0 ? "left" : "right");
+        }
+        panel_walk = panel_walking_ || walk_stop_;
+    } else {
+        panel_walking_ = panel_hold_ = false;
+    }
     if (walk_mode) {
+        panel_walking_ = false;
         walk(cvx, cvy, cm, aim.aiming, now_ms);
+    } else if (panel_walk) {
+        // The walk's point and its stop stay off the panel's half.
+        walk_x_min_ = side < 0 ? w_ / 2 + 4 : 0;
+        walk_x_max_ = side > 0 ? w_ / 2 - 5 : w_ - 1;
+        walk(cvx, cvy, cm, aim.aiming, now_ms);
+        walk_x_min_ = 0;
+        walk_x_max_ = 1 << 20;
+        if (!walking_)
+            panel_walking_ = false;
+        flick_held_ = cm >= AimFlicks::kCentre;   // back to the cell steps once centred
     } else {
         if (walking_ || walk_stop_) {   // the context changed under a held stick: stop walking
             walking_ = walk_press_pending_ = walk_left_ = false;

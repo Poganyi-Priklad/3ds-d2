@@ -612,7 +612,8 @@ int main(int argc, char **argv)
                        std::chrono::steady_clock::now().time_since_epoch())
                 .count();
         });
-        std::fprintf(stderr, "[rt] aim: %s (M4_AIM, M4_AIM_SETTINGS)\n", aim.enabled ? "on" : "off");
+        std::fprintf(stderr, "[rt] aim: %s (M4_AIM, M4_AIM_SETTINGS); a panel on one side: the stick held %d ms walks\n",
+                     aim.enabled ? "on" : "off", aim.panel_walk_ms);
     }
     opt.poll_input = [] {
         const uint64_t now = rt::now_ms();

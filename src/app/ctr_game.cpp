@@ -2857,11 +2857,12 @@ int main()
     g_controls.set_menu_nav(&game::game_menu_world());
     g_ss.set_aim_settings(g_aim_settings);   // AIM > SETTINGS shows and changes them
     {
-        char line[320];
+        char line[400];
         std::snprintf(line, sizeof line,
                       "aim: %s; A %s %d degrees %d subtiles, B %s %d degrees %d subtiles; near %d subtiles %d "
                       "degrees; flick %d degrees, %d ms, light %d%%, strong %d%%; objects %s, loot %s, gold first "
-                      "%s; lost %d ms, forget %d ms, height %d px, confirm %d frames",
+                      "%s; lost %d ms, forget %d ms, height %d px, confirm %d frames; a panel on one side: the stick "
+                      "held %d ms walks (aim_panel_walk_ms, 0: never)",
                       g_aim_settings.enabled ? "on" : "off", game::aim_mode_name(g_aim_settings.a.mode),
                       g_aim_settings.a.cone_degrees, g_aim_settings.a.range_subtiles,
                       game::aim_mode_name(g_aim_settings.b.mode), g_aim_settings.b.cone_degrees,
@@ -2870,7 +2871,7 @@ int main()
                       g_aim_settings.flick_strong_percent, g_aim_settings.objects ? "on" : "off",
                       g_aim_settings.loot ? "on" : "off", g_aim_settings.gold_first ? "on" : "off",
                       g_aim_settings.lost_ms, g_aim_settings.forget_ms, g_aim_settings.height_px,
-                      g_aim_settings.confirm_polls);
+                      g_aim_settings.confirm_polls, g_aim_settings.panel_walk_ms);
         logline(line);   // game.log: what the auto-target runs with (settings.txt)
     }
     {

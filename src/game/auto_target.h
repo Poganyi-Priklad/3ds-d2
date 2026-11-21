@@ -96,6 +96,10 @@ struct AimSettings {
     int forget_ms = 2500;       // no button held for this long: the target is forgotten
     int height_px = 30;         // the cursor goes this far above the target's feet
     int confirm_polls = 4;      // frames to wait for the game to show the target under the cursor
+    // A panel open on one side only (the inventory, the character sheet,
+    // the skill tree, the quest log...): the circle pad held out this long
+    // walks the hero (a flick still steps the cursor); 0: never.
+    int panel_walk_ms = 280;
     // The circle pad let go after a walk: a click just ahead of the hero so
     // he stops where he stands rather than walking on to the walk's last point.
     // Off: no click; the hero finishes that last step (up to a few subtiles).

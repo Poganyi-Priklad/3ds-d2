@@ -923,7 +923,7 @@ static void test_settings()
     CHECK(text == "bottom=map\naim=1\naim_a_mode=enemies\naim_b_mode=enemies\naim_a_cone=45\naim_a_range=20\n"
                   "aim_b_cone=45\naim_b_range=20\naim_near=4\naim_near_cone=90\naim_flick_cone=30\n"
                   "aim_flick_ms=150\naim_flick_light=40\naim_flick_strong=80\naim_lost_ms=1500\n"
-                  "aim_forget_ms=2500\naim_height=30\naim_confirm=4\naim_objects=1\naim_loot=1\n"
+                  "aim_forget_ms=2500\naim_height=30\naim_confirm=4\naim_panel_walk_ms=280\naim_objects=1\naim_loot=1\n"
                   "aim_gold_first=0\naim_walk_stop=1\n");
     // An older file (Stage 2: aim_turn, A's range of 10, its default then):
     // read, its A range moved to the new default 20, and its aim_turn line
@@ -952,7 +952,7 @@ static void test_settings()
     CHECK(parse_aim_setting("aim_objects=0", n) && !n.objects);
     CHECK(parse_aim_setting("aim_loot=0", n) && !n.loot);
     CHECK(parse_aim_setting("aim_gold_first=1", n) && n.gold_first);
-    CHECK(parse_aim_setting("aim_walk_stop=0", n) && !n.walk_stop);
+    CHECK(n.walk_stop && parse_aim_setting("aim_walk_stop=0", n) && !n.walk_stop);
     AimSettings r;
     CHECK(parse_aim_setting("aim=0\n", r) && !r.enabled);
     CHECK(parse_aim_setting("aim_b_mode=corpses\r\n", r) && r.b.mode == AimMode::kCorpses);

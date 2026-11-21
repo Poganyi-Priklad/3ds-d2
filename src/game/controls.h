@@ -95,6 +95,10 @@ inline Pad keyboard_pass_through(const Pad &pad)
     return out;
 }
 
+// The panels open (GameState::ui): -1 on the left half only, 1 on the
+// right half only, 0 on both or any other kind (controls.cpp).
+int one_side_panel(uint64_t ui);
+
 class Controls {
 public:
     // Game frame size (cursor bounds, walk radius scale).
