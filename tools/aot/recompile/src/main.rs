@@ -233,6 +233,23 @@ fn main() {
             have.insert(t);
             extra.push(t);
         }
+        // And those in the game's tables, by the same rule: a relocated dword
+        // in .rdata or .data (the renderer's table at 0x74c4a8 holds 6c8060,
+        // which a compiled caller reached only as an exit).
+        let mut found: BTreeSet<u32> = BTreeSet::new();
+        for &(_, t) in &img.data_pointers {
+            if t >= img.text_lo && t < img.text_hi && t % 16 == 0 && !have.contains(&t) && !inside.contains(&t) {
+                let pad = img.mem[(t - 1 - img.base) as usize];
+                if pad == 0xcc || pad == 0x90 {
+                    found.insert(t);
+                }
+            }
+        }
+        println!("aot: {} code pointers in the game's data added", found.len());
+        for t in found {
+            have.insert(t);
+            extra.push(t);
+        }
     }
     let intr = intrinsics();
     let nat = natives();

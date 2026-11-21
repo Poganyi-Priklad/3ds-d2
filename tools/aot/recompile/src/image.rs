@@ -27,6 +27,10 @@ pub struct Image {
     /// The natives' sites applied to `mem`: (group, va, bytes), and why a group wasn't.
     pub sites: Vec<(String, u32, usize)>,
     pub sites_skipped: Vec<String>,
+    /// The dwords in .rdata and .data that the base relocations name (issue
+    /// #138: the code pointers in the game's tables, the renderer's among
+    /// them), as (where, the value there).
+    pub data_pointers: Vec<(u32, u32)>,
     cs: Cs,
     cache: RefCell<HashMap<u32, Rc<Insn>>>,
 }
@@ -87,6 +91,7 @@ impl Image {
         let section_alignment = rd32(&data, opt + 32);
         let file_alignment = rd32(&data, opt + 36);
         let import_rva = rd32(&data, opt + 96 + 8);
+        let (reloc_rva, reloc_size) = (rd32(&data, opt + 96 + 8 * 5), rd32(&data, opt + 96 + 8 * 5 + 4));
         let sec0 = opt + opt_size;
         let mut sections = Vec::new();
         for k in 0..nsec {
@@ -170,6 +175,31 @@ impl Image {
                 d += 20;
             }
         }
+        // The base relocations' HIGHLOW entries (type 3) in the data sections.
+        let data_secs: Vec<(u32, u32)> = sections
+            .iter()
+            .filter(|s| {
+                let n: Vec<u8> = s.name.iter().copied().take_while(|&b| b != 0).collect();
+                n == b".rdata" || n == b".data"
+            })
+            .map(|s| (s.va, s.va + s.vsize.max(s.raw_size)))
+            .collect();
+        let mut data_pointers = Vec::new();
+        let (mut b, end) = (reloc_rva as usize, (reloc_rva + reloc_size) as usize);
+        while reloc_rva != 0 && b + 8 <= end.min(mem.len()) {
+            let (page, size) = (rd32(&mem, b), rd32(&mem, b + 4) as usize);
+            if size < 8 {
+                break;
+            }
+            for k in 0..(size - 8) / 2 {
+                let e = rd16(&mem, b + 8 + 2 * k);
+                let at = page + (e & 0xfff);
+                if e >> 12 == 3 && data_secs.iter().any(|&(lo, hi)| lo <= at && at < hi) {
+                    data_pointers.push((base + at, rd32(&mem, at as usize)));
+                }
+            }
+            b += size;
+        }
         let mut import_pops = import_pops(&imports, src_root);
         let resumes = resumes(&src_root.join("src/game/d2_native.cpp"));
         let (native_slots, sites, sites_skipped) =
@@ -185,6 +215,7 @@ impl Image {
             native_slots,
             sites,
             sites_skipped,
+            data_pointers,
             cs: Cs::new(),
             cache: RefCell::new(HashMap::new()),
         })
