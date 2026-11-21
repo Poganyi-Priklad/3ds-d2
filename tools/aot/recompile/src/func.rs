@@ -323,6 +323,9 @@ impl Func {
             }
         }
         let i = &self.insns[&va];
+        if let Some(p) = self.reg_import_pops(i, img) {
+            return p;
+        }
         if let Some(n) = self.insns.get(&va.wrapping_add(i.size)) {
             if n.mnemonic == "add" && n.op_str.starts_with("esp, ") {
                 return 0;
@@ -412,6 +415,38 @@ impl Func {
             kept += 1;
         }
         4 * (n - popped.max(kept))
+    }
+
+    /// A call through a register that holds an import: every instruction of
+    /// the function that writes the register, but a pop (the epilogue's),
+    /// loads it from an import's slot, all with the same known pops (issue
+    /// #138: 40b600's mov esi, [HeapAlloc]; call esi, its pushes counted, was
+    /// a guess that threw the stack off, 3,211 plain exits a script).
+    fn reg_import_pops(&self, i: &Insn, img: &Image) -> Option<i64> {
+        let op = i.ops.first()?;
+        if !op.is_reg() || op.size != 4 {
+            return None;
+        }
+        let r = reg_full(op.reg())?.0;
+        let mut pops: Option<i64> = None;
+        for j in self.insns.values() {
+            if regs_rw(j).1 & (1 << r) == 0 || j.mnemonic == "pop" {
+                continue;
+            }
+            if j.mnemonic != "mov" || j.ops.len() != 2 || !j.ops[0].is_reg() || !j.ops[1].is_mem() {
+                return None;
+            }
+            let m = j.ops[1].mem();
+            if m.base != 0 || m.index != 0 || !(0..=u32::MAX as i64).contains(&m.disp) {
+                return None;
+            }
+            let p = img.import_pops.get(&(m.disp as u32)).copied().flatten()?;
+            if pops.is_some_and(|q| q != p) {
+                return None;
+            }
+            pops = Some(p);
+        }
+        pops
     }
 
     /// Whether `r` (ebx, esi, edi or ebp) can be at `at` as it was at the

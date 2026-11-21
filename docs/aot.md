@@ -601,6 +601,48 @@ The first of them closed (the check with `D2_AOT_STALE=1 M4_LAYOUT=ctr`: 0 diffe
 
 Act II's nested runs are 46 against 3,103, its callouts to code that isn't compiled 23 against 1,057. Box86 ran 2,524,958 x86 bytes against 2,610,752, with the state lines the same on the three scripts. HeapAlloc's 3,211 exits stayed: they are calls through a register loaded from the import's slot, in functions that aren't plain.
 
+**A call through a register that holds an import** (40b600's `mov esi, [HeapAlloc]; call esi`): where every instruction of the function that writes the register, but a `pop`, loads it from an import's slot, all with the same known pops, the callout takes those pops, not a count of the pushes. The check: 0 differ (town-walk 12.3M calls, fight 12.2M, Act II 49.4M). Left to Box86: 4,978 times in town-walk against 8,236, 5,205 in the fight against 8,462, 7,014 in Act II against 10,244; HeapAlloc's exits are gone. Box86 ran 2,139,724 x86 bytes against 2,524,958; the state lines are the same on town-walk and Act II, and the fight's reads and `va` move a window at 90 to 110 s.
+
+What Act II still leaves, at this build: 674230's return at 66f4cc (4,744), 415210 (1,061: it is passed as a callback, the cause not found yet), TlsGetValue (807), 555230 (131, refused: a switch), SendMessageA (83, its window procedure), 46 nested runs; and 474,563 waits.
+
+### Natives bound at compile time (#138, planned, after the scheduler)
+
+`d2_native`'s 40 entry hooks (`rt::hook_function`: a `jmp` to the native over a function's first bytes) are the 40 functions still changed since compiled. Compiled callers already reach the native in C (`aot_call_stale`, through the Bridge's shim, the registers copied to the CPU and back: 455,000 calls in a 10 s window of Act II, none handed back to Box86), and with `D2_AOT_STALE=1` their callers stay compiled. So the hooks aren't in the strict report: none of its hand-overs is a native's. What binding them at compile time gives is the call's cost (no shim, no copy of the registers), callers entered in line again (7,986 functions reach a changed one and aren't), and a build without Box86 that needn't hash an x86 image to learn what is hooked. It comes after the scheduler, which is what the strict report's numbers ask for.
+
+With compiled code the hook needn't be in the x86 image to take effect. It becomes a row the recompiler binds:
+
+- **`ENTRY(Name, va, stack_dwords, hands_back, "game bytes")`** in `native_sites_table.h`. The Box86 build installs it as today's hook (the row replaces `d2_native`'s byte arrays); the code hash reads the function as the game's.
+- **The function at `va` stays compiled from the game's bytes.** It is what a hand-back runs (18 places in `d2_native` hand back, from the entry or at an address after the hooked bytes, where the recompiler already compiles a resume entry). It is no longer "changed".
+- **A compiled caller calls the native in C** where it called the function: one adapter at first (the registers to the CPU, the native's `fn(Cpu &)`, back), then natives that take the registers themselves. A native that hands back returns that, and the caller's code calls the compiled original in C: no exit. This is `natives()`'s two hand-written bindings (RoomFind, CollisionCross) for every row, and it replaces them.
+- **What the recompiler assumes of the call** is the original function's summary (the native computes the same function), with its exits where the row says it hands back.
+- **`aot_call_stale` and the changed list** stay for a group that is compiled but not applied (a native masked off with `D2_NATIVE_MASK`): each hook is a group of its own.
+
+The stubs in `.text`'s slack stay as they are: in a build without Box86 their bytes are only what the recompiler reads.
+
+### Threads that wait in place (#138, planned)
+
+The strict report's largest number is the waits: 435,032 in Act II, nearly all `Sleep`. Today a shim that must wait asks the Bridge to stop; compiled code unwinds (an exit to the return sites' trap), WinVita's `CooperativeScheduler` runs another thread's slice, and when the first runs again the trap re-enters each compiled function at its return site (`reent_<va>`). All of it exists because the guest threads share one host stack.
+
+The plan needs no scheduler of our own. WinVita's `CooperativeScheduler` asks its CPU backend one thing, `run(eip)` for the thread whose context it loaded, until that stops (a yield, a wait, the thread's return to the sentinel); and `Cpu` (`cpu.h`) is small: the guest's memory, eight registers, the traps, run and stop. So the build without Box86 is a second backend behind that interface, **`CpuAot`**, in `src/runtime`, with no change to the submodule:
+
+- **Each guest thread's compiled code runs on a host stack of its own** (a fiber: `ucontext` on the lane, a small context switch on the 3DS), keyed by the thread's TIB, which the scheduler sets before each slice. One runs at a time, as now.
+- **`run` switches to the thread's fiber.** The first time, the fiber calls the compiled function at the thread's entry, on the guest stack the scheduler prepared: a thread starts in compiled code, the game's top loop (4101c0) with it. When that function returns to the sentinel, the thread has finished.
+- **A shim that waits or yields stops the fiber where it is:** after the shim's call, a yield the Bridge was asked for switches back to `run`'s caller, which returns as Box86's does. The scheduler does what it does today (the cooperative contract: the wait's result written to the saved eax on wake); the next `run` switches back, the callout takes eax from the context, and compiled code goes on in place. No exit, no trap, no return-site entries (about 8.5 of the lane build's 21.5 MiB of AOT code), and the calls the recompiler compiles as exits because they may block become plain calls.
+- **`reg` and `set_reg` are the running fiber's registers at its callout** (a shim reads its arguments from the guest stack); memory is the same arena, `aot_mem`.
+- **Preemption:** none at first (the game's threads yield at every `Sleep(0)`, 40,000 times a 10 s window); then the budget at function entries and loop back-edges, a switch of fibers there.
+- **Nothing to fall back on:** code that isn't compiled, a refused function, a callout that comes back with another esp stops the run with a report naming it. That is the strict lane: the lane's scripts run on `CpuAot`, from the game's entry point, and each stop is the next thing to close. The check's lane and the Box86 build stay as they are.
+
+How `CpuAot` runs code (from reading `cpu.h`, `sched_cooperative.cpp` and `aot_call_out`):
+
+- **One dispatcher,** `dispatch(eip, until)`: at a compiled function's entry (a map of every compiled function, hookable or not), its `sig(regs)`, then on at the return address it popped; at an address in the Bridge's trap range (`set_trap`), the trap's function, which returns false at the thread's sentinel; at a native's resume address, its resume entry; anywhere else, the stop and its report ("no compiled code at X").
+- **A thread's fiber** is `dispatch(entry, none)` on the context the scheduler loaded (`load_context`, then `run(eip)`).
+- **A callout to a shim** is what `aot_call_out` does today (the shim's `fn(cpu)`, on `CpuAot`'s registers), then: a redirect the shim left (SendMessageA's window procedure, a native's hand-back) is `dispatch(redirect, the callout's return address)`, nested on the same fiber; a yield switches the fiber out, and eax is the context's when it is back.
+- **`aot_exit`, `aot_guest_call` and a callout that comes back with another esp** are stops with a report; the entry hooks aren't written (nothing runs the x86), but the hash still finds what natives changed, and compiled callers call their shims (`aot_call_stale`) as now.
+- **Per fiber:** the eight registers at its last callout, its x87 state (`aot_fpu` points at the running one), its host stack. `aot_fs_base` is the thread's TEB, as now.
+- **Where it is chosen:** `rt_host.cpp` makes the CPU (`make_cpu_box86()` today): `D2_CPU=aot` on the lane. Box86 stays linked in the lane's binary for the other modes.
+
+Recommendations on the open points: fibers rather than host threads (one runs at a time anyway, and a switch costs nothing in the kernel); 256 KiB of host stack a thread at first, measured on the lane with a guard page and then cut (four threads in play); the placeholder-result contract kept, so no shim changes; a lane run compared with another run of the same build, since switch points move.
+
 ### The natives' site table (#138)
 
 The natives change the game's code at install time. They do it in their own `install_*` code: about 80 writes across `d2_native`, `d2_memory`, `storm_reads`, `sprite_trace`, `dcc_native`, `frame_reads`, `automap` and `cinematics`. The recompiler can't see those writes. So a function a native changed runs under Box86 at run time (47 functions in production, `60bff0`'s DccDecode loop among them), and compiled callers reach it through `aot_call_stale`. After the steps above, that is most of what Box86 still runs.
