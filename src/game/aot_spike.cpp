@@ -347,6 +347,43 @@ uint32_t g_handed_direct = 0;   // ... and those run in C (aot_direct)
 uint32_t g_callout_shims = 0, g_callout_fns = 0, g_callout_back = 0;
 std::map<uint32_t, uint32_t> g_callout_back_by;
 
+// D2_AOT_STRICT=1 (the lane, issue #138): everything compiled code hands to
+// Box86 over the whole run, by cause and address (aot_strict_lines): what a
+// build with no Box86 has nowhere to send. The cause is set by the runtime's
+// own exits; an exit with none is one the recompiler wrote into the C.
+enum : int {
+    kLeftExit,       // an exit in the compiled code: the address it exits to
+    kLeftNotCompiled,   // a callout to code that isn't compiled
+    kLeftNotHooked,  // a callout to a compiled function not hooked
+    kLeftChanged,    // a function a native changed, with no shim at its entry
+    kLeftBack,       // a callout that came back with another esp or registers, or handed back: the callee
+    kLeftBackWait,   // a callout whose shim waited, the return not a site with an entry: the callee
+    kLeftTrap,       // a wait at a callout, on through the return sites' trap: the callee
+    kLeftReentEnd,   // a thread past its last return site: the address Box86 goes on at
+    kLeftNested,     // a nested run: the callee
+    kLeftCauses
+};
+const char *const kLeftNames[kLeftCauses] = {
+    "an exit in the compiled code, to",
+    "a callout to code that isn't compiled:",
+    "a callout to a compiled function that isn't hooked:",
+    "a function a native changed, with no shim:",
+    "a callout that came back with another esp or registers, or handed back, from",
+    "a callout whose shim waited, its return no site, from",
+    "a wait at a callout, on through the return sites' trap, from",
+    "a thread past its last return site, Box86 on at",
+    "a nested run of",
+};
+const bool g_strict = std::getenv("D2_AOT_STRICT") != nullptr;
+int g_cause = kLeftExit;
+uint32_t g_cause_at = 0;
+std::map<std::pair<int, uint32_t>, uint64_t> g_left;
+inline void left(int cause, uint32_t at)
+{
+    if (g_strict)
+        g_left[{cause, at}]++;
+}
+
 // fn(regs), an exit caught: false when the code exited (into x).
 bool run_catching(AotRootFn fn, uint32_t *regs, ExitJump &x)
 {
@@ -819,6 +856,7 @@ uint32_t reenter(Cpu &c)
         if (it == g_reent_at.end()) {
             target = at;
             g_reent_ended[at]++;
+            left(kLeftReentEnd, at);
             break;
         }
         const uint32_t ra = c.read_u32(r[4] - it->second->sp);
@@ -1308,6 +1346,63 @@ void set_aot_mode(Cpu &c, AotMode mode)
                  unapplied.c_str());
 }
 
+std::vector<std::string> aot_strict_lines()
+{
+    std::vector<std::string> out;
+    if (!g_strict)
+        return out;
+    // The compiled function an address is in, if any.
+    auto owner = [](uint32_t a) -> const AotFunc * {
+        for (size_t k = 0; aot_funcs && aot_funcs[k].va; k++)
+            for (uint32_t j = 0; j + 1 < 2u * aot_funcs[k].nranges; j += 2)
+                if (aot_funcs[k].ranges[j] <= a && a < aot_funcs[k].ranges[j + 1])
+                    return &aot_funcs[k];
+        return nullptr;
+    };
+    uint64_t by[kLeftCauses] = {}, all = 0;
+    size_t places[kLeftCauses] = {};
+    for (const auto &kv : g_left) {
+        by[kv.first.first] += kv.second;
+        places[kv.first.first]++;
+        if (kv.first.first != kLeftTrap)
+            all += kv.second;
+    }
+    char line[256];
+    std::snprintf(line, sizeof line,
+                  "aot strict: %llu times compiled code left to Box86 (a build without it has nowhere to send them), "
+                  "and %llu waits on through the return sites' trap",
+                  (unsigned long long)all, (unsigned long long)by[kLeftTrap]);
+    out.push_back(line);
+    for (int cause = 0; cause < kLeftCauses; cause++) {
+        if (!by[cause])
+            continue;
+        std::vector<std::pair<uint64_t, uint32_t>> rows;
+        for (const auto &kv : g_left)
+            if (kv.first.first == cause)
+                rows.push_back({kv.second, kv.first.second});
+        std::sort(rows.rbegin(), rows.rend());
+        std::snprintf(line, sizeof line, "aot strict: %llu %s %zu places", (unsigned long long)by[cause],
+                      kLeftNames[cause], places[cause]);
+        out.push_back(line);
+        for (size_t k = 0; k < rows.size() && k < 60; k++) {
+            const AotFunc *f = owner(rows[k].second);
+            const d2rt::Shim *sh = rt::bridge().slot_shim(rows[k].second);
+            const bool stale = f && aot_stale[f - aot_funcs];
+            std::snprintf(line, sizeof line, "aot strict:   %08x %llu%s%s%s%s", rows[k].second,
+                          (unsigned long long)rows[k].first,
+                          sh ? " " : f ? (f->va == rows[k].second ? " compiled" : " in ") : " not compiled",
+                          sh ? sh->tag.c_str() : f && f->va != rows[k].second ? f->name : "",
+                          f && !f->keep ? ", can't be hooked" : "", stale ? ", changed by a native" : "");
+            out.push_back(line);
+        }
+        if (rows.size() > 60) {
+            std::snprintf(line, sizeof line, "aot strict:   ... and %zu more places", rows.size() - 60);
+            out.push_back(line);
+        }
+    }
+    return out;
+}
+
 std::vector<std::string> aot_lines()
 {
     std::vector<std::string> out;
@@ -1541,6 +1636,7 @@ void aot_guest_call(uint32_t va, AotRegs *r)
 {
     game::g_nested++;
     game::g_nested_by[va]++;
+    game::left(game::kLeftNested, va);
     if (game::g_journaling)
         game::g_impure = true;   // the check (issue #114): Box86's writes aren't journaled
     if (aot_guest_hook) {
@@ -1579,6 +1675,7 @@ void aot_call_stale(uint32_t va, AotRegs *t)
         // returns through the compiled callers' return addresses (issue #138).
         g_stale_guest++;
         uint32_t *r = t->r;
+        g_cause = kLeftChanged;
         aot_exit(va, r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7]);
     }
     if (!sh) {   // nothing to exit to: Box86's call, nested
@@ -1638,6 +1735,9 @@ void aot_exit(uint32_t target, uint32_t eax, uint32_t ecx, uint32_t edx, uint32_
               uint32_t esi, uint32_t edi)
 {
     target = game::aot_site_target(target);
+    game::left(game::g_cause, game::g_cause_at ? game::g_cause_at : target);
+    game::g_cause = game::kLeftExit;
+    game::g_cause_at = 0;
     game::ExitJump *x = game::g_exit_jump;
     if (!x || game::g_no_exit) {   // compiled code entered other than by a trap (AotFunc::may_exit not honoured): a bug of ours
         rt::logf("aot: an exit to %08x with no trap to go back to", target);
@@ -1677,9 +1777,12 @@ void aot_exit(uint32_t target, uint32_t eax, uint32_t ecx, uint32_t edx, uint32_
     using namespace game;
     g_callout_back++;
     g_callout_back_by[x]++;
+    g_cause = clean ? kLeftBackWait : kLeftBack;
+    g_cause_at = x;
     if (clean && g_reent_trap && g_mode == AotMode::Sig && g_reent_at.count(to)) {
         g_reent_pending[r[4]] = to;
         to = g_reent_trap;
+        g_cause = kLeftTrap;
     }
     aot_exit(to, r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7]);
 }
@@ -1762,8 +1865,10 @@ void aot_call_out(uint32_t x, AotRegs *t, uint32_t pops)
                                     : !g_journaling       ? &aot_funcs[k]
                                     : aotj_funcs && aotj_funcs[k].va == x ? &aotj_funcs[k]
                                                                           : nullptr;
-                if (!af)
+                if (!af) {
+                    g_cause = kLeftNotCompiled;
                     aot_exit(x, r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7]);
+                }
                 af->sig(r);
                 r[4] = esp0 + 4u + aot_funcs[k].pops;
                 if (g_journaling)
@@ -1782,9 +1887,10 @@ void aot_call_out(uint32_t x, AotRegs *t, uint32_t pops)
                 g_callout_fns++;
                 if (r[4] != want)
                     call_out_back(x, ra, r);
-            } else if ((!F.hooked && !F.dropped) || !af)
+            } else if ((!F.hooked && !F.dropped) || !af) {
+                g_cause = kLeftNotHooked;
                 aot_exit(x, r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7]);
-            else {
+            } else {
                 af->sig(r);   // an exit inside goes back to our own trap, as from a direct call
                 r[4] = esp0 + 4u + F.f->pops;
                 if (g_journaling)

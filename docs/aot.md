@@ -560,6 +560,32 @@ The goal is a build without Box86, so the measure is how much of the game's x86 
 
 The trap's own entry (`aot:reenter`) shows in the runtime's "exits to Box86" line, about 39,750 a fight window, one per re-entry. Box86 doesn't run any game code for those.
 
+### The strict report (#138)
+
+A build without Box86 has nowhere to send what compiled code hands to it today. `D2_AOT_STRICT=1` (the lane) counts every such hand-over over the whole run, by cause and address, and the lane prints them at the run's end (`aot strict: ...`). The windows' lines above name only the first six a window. It reports; it stops nothing yet, and threads still start in Box86.
+
+The causes: an exit the recompiler wrote into the C (the address it exits to); a callout to code that isn't compiled, or to a compiled function that isn't hooked; a function a native changed, with no shim; a callout that came back with another esp or registers, or handed back (the callee); a callout whose shim waited where the return is no site; a thread past its last return site; a nested run (the callee). A wait at a callout that goes on through the return sites' trap is counted apart: compiled code goes on after it, but through Box86's scheduler.
+
+The first run, at `4c2f9fe`, profiled production with `M4_LAYOUT=ctr`:
+
+| Script | Left to Box86 | Waits through the trap |
+| --- | --- | --- |
+| town-walk | 10,294 | 142,929 |
+| fight | 11,872 | 341,929 |
+| Act II | 14,604 | 435,032 |
+
+Act II's 14,604, by cause:
+
+| Cause | Times | Places | First |
+| --- | --- | --- | --- |
+| An exit in the compiled code | 5,403 | 26 | HeapAlloc 3,211 and GetLastError 647 (calls to imports in functions with plain exits), 415210 1,061 (it reaches a function `d2_native` changes), 5ff760 266 (refused: an 8-bit `imul`), 555230 131 (refused: a switch) |
+| A callout that came back with another esp or registers, or handed back | 5,039 | 9 | 674230 4,744 (its pushes are before a join), TlsGetValue 160, SendMessageA 83 |
+| A nested run | 3,103 | 11 | 4107d0 3,056 (refused: `lock cmpxchg8b`) |
+| A callout to code that isn't compiled | 1,057 | 13 | 6c9270 1,033 (in the table at 0x74c56c, after a `ret 4` with no pad) |
+| A thread past its last return site | 2 | 1 | 470b22 |
+
+The waits are Sleep (434,429) and WaitForSingleObject (603): they go when a guest thread waits in place, on a stack of its own.
+
 ### The natives' site table (#138)
 
 The natives change the game's code at install time. They do it in their own `install_*` code: about 80 writes across `d2_native`, `d2_memory`, `storm_reads`, `sprite_trace`, `dcc_native`, `frame_reads`, `automap` and `cinematics`. The recompiler can't see those writes. So a function a native changed runs under Box86 at run time (47 functions in production, `60bff0`'s DccDecode loop among them), and compiled callers reach it through `aot_call_stale`. After the steps above, that is most of what Box86 still runs.

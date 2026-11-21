@@ -652,6 +652,8 @@ int main(int argc, char **argv)
         std::fprintf(stderr, "[rt] FATAL %s\n", r.error.c_str());
         return 3;
     }
+    for (const std::string &l : game::aot_strict_lines())   // D2_AOT_STRICT=1 (issue #138)
+        std::fprintf(stderr, "[rt] %s\n", l.c_str());
     std::fprintf(stderr, "[rt] RESULT exited=%d timed_out=%d code=%u %s\n", r.exited, r.timed_out, r.exit_code,
                  r.error.c_str());
     std::fflush(stdout);
