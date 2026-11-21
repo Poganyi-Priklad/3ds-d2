@@ -568,7 +568,7 @@ pub fn compile_set<'a>(
                     break;
                 }
                 Err(e) => {
-                    if attempt == 0 && e.0.starts_with("esp at a ret") && prog.make_plain(va) {
+                    if attempt == 0 && e.0.starts_with("esp at a ret") && prog.make_plain(va, &e.0) {
                         continue;
                     }
                     refused.insert(va, e.0);
@@ -722,7 +722,7 @@ pub fn compile_set<'a>(
                 panic!("signatures: {} functions put off with no refusal", put_off.len());
             }
             for (va, why) in hit.iter() {
-                if why.starts_with("esp at a ret") && prog.make_plain(*va) {
+                if why.starts_with("esp at a ret") && prog.make_plain(*va, why) {
                     continue;
                 }
                 refused.insert(*va, why.clone());
@@ -1238,6 +1238,13 @@ fn write_out<'a>(
         ex.set("may_exit", J::Int(prog.may_exit.iter().filter(|v| cset.contains(v)).count() as i64));
         ex.set("callouts", J::Int(compiled.iter().map(|&va| prog.func(va).callouts.len() as i64).sum()));
         ex.set("plain", J::Int(prog.plain.iter().filter(|v| cset.contains(v)).count() as i64));
+        let mut pw = J::obj();   // each plain one's refusal with its callouts
+        let mut pl: Vec<u32> = prog.plain.iter().copied().filter(|v| cset.contains(v)).collect();
+        pl.sort();
+        for va in pl {
+            pw.set(&format!("{:08x}", va), J::Str(prog.plain_why.get(&va).cloned().unwrap_or_default()));
+        }
+        ex.set("plain_why", pw);
         report.set("exits", ex);
         chunks.push("const AotFunc AOT_SYM(funcs)[] = {".to_string());
         for &va in &compiled {

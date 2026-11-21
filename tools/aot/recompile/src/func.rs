@@ -308,11 +308,13 @@ impl Func {
             ends.insert(k.wrapping_add(j.size), *k);
         }
         let (mut n, mut cur) = (0i64, va);
+        let mut pushed: Vec<(u32, &str)> = Vec::new();   // the pushes walked, the last first
         while !self.leaders.contains(&cur) {
             let Some(&k) = ends.get(&cur) else { break };
             let j = &self.insns[&k];
             if j.mnemonic == "push" {
                 n += 1;
+                pushed.push((k, j.op_str.as_str()));
             } else if matches!(j.mnemonic.as_str(), "call" | "pop" | "ret" | "leave" | "pushal" | "popal")
                 || j.op_str.split(',').next().unwrap_or("").trim() == "esp"
                 // A frame's mov ebp, esp (issue #138: renderer_line's push ebp
@@ -322,6 +324,41 @@ impl Func {
                 break;
             }
             cur = k;
+        }
+        // A pop just after the call takes a dword the callee left: where the
+        // pops match the first pushes walked, register for register, and the
+        // register is written between its push and the call, those were saves
+        // of a register reused, not arguments (issue #138: 4f6300's push edi,
+        // mov edi before its four arguments, popped after the call through
+        // the renderer's table, counted 20 for 16, so its call was a plain
+        // exit; 52e590's push edi is its argument, the pop after the call its
+        // prologue's save).
+        let writes = |r: &str, from: u32| {
+            let mut a = from.wrapping_add(self.insns[&from].size);
+            while a != va {
+                let Some(j) = self.insns.get(&a) else { return false };
+                if !matches!(j.mnemonic.as_str(), "push" | "cmp" | "test")
+                    && j.op_str.contains(',')
+                    && j.op_str.split(',').next().unwrap_or("").trim() == r
+                {
+                    return true;
+                }
+                a = a.wrapping_add(j.size);
+            }
+            false
+        };
+        let mut at = va.wrapping_add(i.size);
+        for &(pa, p) in pushed.iter().rev() {
+            let Some(j) = self.insns.get(&at) else { break };
+            if j.mnemonic != "pop"
+                || j.op_str != p
+                || (at != va.wrapping_add(i.size) && self.leaders.contains(&at))
+                || !writes(p, pa)
+            {
+                break;
+            }
+            n -= 1;
+            at = at.wrapping_add(j.size);
         }
         4 * n
     }
