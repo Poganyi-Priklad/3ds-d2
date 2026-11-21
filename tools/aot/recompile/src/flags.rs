@@ -136,6 +136,39 @@ impl Flags {
         Ok(fl)
     }
 
+    /// A flag read that code entered at x reaches before any instruction
+    /// sets that flag (issue #138: a resume entry, which starts with no
+    /// flags), or None.
+    pub fn read_before_set(f: &Func, x: u32) -> Option<u32> {
+        // Per address, the flag bits still unset on some path from x.
+        let mut seen: HashMap<u32, u8> = HashMap::new();
+        let mut work = vec![(x, FALL)];
+        while let Some((va, unset)) = work.pop() {
+            let had = seen.get(&va).copied().unwrap_or(0);
+            if unset & !had == 0 {
+                continue;
+            }
+            let unset = unset | had;
+            seen.insert(va, unset);
+            let i = &f.insns[&va];
+            let (mut d, mut u) = flags_rw(i);
+            if f.calls.contains_key(&va) {
+                d = FALL;
+                u = 0;
+            }
+            if u & unset != 0 {
+                return Some(va);
+            }
+            let left = unset & !d;
+            if left != 0 {
+                for &t in &f.succ[&va] {
+                    work.push((t, left));
+                }
+            }
+        }
+        None
+    }
+
     /// The shared operand slots: no other storing definer between a definer
     /// and its reader.
     fn check_slots(&self, f: &Func) -> Result<(), Refused> {

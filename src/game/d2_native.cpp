@@ -2267,9 +2267,14 @@ bool section_free(uint32_t cs)
 }
 
 // Resumes the original at `va` once the shim returns: the bridge then pops
-// the return address and `stack_args` dwords from the ESP set here.
+// the return address and `stack_args` dwords from the ESP set here. Every
+// register as the code at va wants it, eax included, and the native returns
+// c.reg(R_EAX) after: where the recompiler compiled an entry at va (issue
+// #138), the function has run to its return here, and eax is its result.
 void resume_original(Cpu &c, uint32_t va, uint32_t esp, uint32_t stack_args)
 {
+    if (game::aot_resume(c, va, esp, stack_args))   // its compiled code (issue #138)
+        return;
     c.set_reg(R_ESP, esp - 4 - 4 * stack_args);
     rt::bridge().redirect_next(va);
 }
@@ -2674,8 +2679,9 @@ uint32_t current_unlock(Cpu &c)
     if (!cs) {
         // The original's fatal error, from 52df45 (the jmp covers its first
         // instruction, eax = the current entry).
+        c.set_reg(R_EAX, e);
         resume_original(c, 0x0052df45, c.reg(R_ESP), 0);
-        return e;
+        return c.reg(R_EAX);
     }
     wx86_crit_leave(cs, wx86_sched());
     return 0;   // LeaveCriticalSection's
@@ -2891,10 +2897,13 @@ uint32_t unit_pick_filter(Cpu &c)
         if (game::aot_direct(c, 0x00466870, r))
             return r[0];
     }
-    if (const uint32_t trap = game::aot_trap_for(0x00466870)) {
-        resume_original(c, trap, esp, 2);
-        return c.reg(R_EAX);
-    }
+    // Its compiled entry at 466876 where there's one (issue #138): in C, and
+    // a compiled caller's call doesn't exit, as it does at the trap.
+    if (!game::aot_resumable(0x00466876))
+        if (const uint32_t trap = game::aot_trap_for(0x00466870)) {
+            resume_original(c, trap, esp, 2);
+            return c.reg(R_EAX);
+        }
     put32(esp - 4, c.reg(R_EBP));
     c.set_reg(R_EBP, esp - 4);
     resume_original(c, 0x00466876, esp - 4 - 0x34, 2);
@@ -3448,7 +3457,7 @@ uint32_t path_search(Cpu &c)
     c.set_reg(R_EBP, esp - 4);
     c.set_reg(R_EAX, 0x32f4);
     resume_original(c, 0x0067b858, esp - 4, 0);
-    return 0x32f4;
+    return c.reg(R_EAX);
 }
 
 // D2_NATIVE_CHECK=1: the plan's result and points against the game's
@@ -4282,6 +4291,9 @@ bool install_slot_steps(Cpu &c)
         std::memcpy(p + 1, &rel, 4);
         c.write(st.va, p, st.n);
         c.invalidate_code(st.va, st.n);
+        // Each step does the loop it replaced (issue #138): the compiled
+        // function runs the original loop.
+        game::set_aot_inline_equivalent(st.va, st.orig, st.n);
         rt::logf("native %s at %08x (in line)", st.name, st.va);
     }
     return true;
@@ -4301,6 +4313,9 @@ bool install_slot_steps(Cpu &c)
 //   682fd9  push ebp; ...; fstp qword [esp]; cvttsd2si eax, [esp]; leave; ret
 // becomes jmp 0x682fd9. With D2_NATIVE_CHECK, a stub runs both on each
 // call instead, and FtolCheck compares them.
+// Where compiled code runs _ftol2 (issue #138), not patched: the patch is for
+// the dynarec, and the compiled original's x87 path is C's own (patched, the
+// function would be Box86's, each call an exit).
 constexpr uint32_t kFtol = 0x00682fd0, kFtolSse = 0x00682fd9, kFtolX87 = 0x00683006;
 uint32_t g_ftol_calls = 0, g_ftol_bad = 0;
 
@@ -4320,6 +4335,10 @@ uint32_t ftol_check(Cpu &c)
 
 bool install_ftol(Cpu &c, bool check)
 {
+    if (game::aot_compiled(kFtol)) {
+        rt::logf("native: _ftol2_sse at %08x left as it is: compiled", kFtol);
+        return false;
+    }
     static const uint8_t kOrig[] = {0x83, 0x3d, 0x88, 0x4c, 0x99, 0x00, 0x00, 0x74, 0x2d};
     uint8_t have[sizeof kOrig];
     if (!c.read(kFtol, have, sizeof have) || std::memcmp(have, kOrig, sizeof have))

@@ -37,6 +37,7 @@
 // The natives run on the guest's thread (the scheduler is cooperative), as
 // does the heartbeat, so the file needs no lock of its own.
 #include "game/sprite_trace.h"
+#include "game/aot_spike.h"
 #include "game/d2_memory.h"
 
 #include "runtime/cpu.h"
@@ -266,6 +267,12 @@ bool install_sprite_trace(d2rt::Cpu &c)
     c.invalidate_code(kRemoveStub, sizeof r);
     c.invalidate_code(kUseAt, sizeof use_jump);
     c.invalidate_code(kRemoveAt, sizeof remove_jump);
+    // The stubs do what the bytes they replaced do, the trace's natives
+    // saving the registers they change (issue #138): 6001f0 and 5ff4a0 stay
+    // compiled. Their compiled code doesn't trace, so with compiled code on,
+    // the trace has only the uses and removals Box86 runs.
+    game::set_aot_inline_equivalent(kUseAt, kUseOrig, sizeof kUseOrig);
+    game::set_aot_inline_equivalent(kRemoveAt, kRemoveOrig, sizeof kRemoveOrig);
     rt::logf("sprite trace: stubs at %08x and %08x (in line%s), off", kUseAt, kRemoveAt,
              fast ? ", the use without the GIL" : "");
     return true;

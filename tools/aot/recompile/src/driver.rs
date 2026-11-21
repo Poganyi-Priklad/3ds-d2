@@ -3,7 +3,7 @@
 
 use crate::analysis::Analysis;
 use crate::cs::{OpKind, GRP_JUMP, REG_EIP};
-use crate::emit::{x87_op, Emitter, Sig};
+use crate::emit::{reent_name, resume_name, x87_op, Emitter, Sig};
 use crate::flags::Flags;
 use crate::func::{Func, Tgt};
 use crate::image::Image;
@@ -99,6 +99,83 @@ pub fn root_head(img: &Image, va: u32) -> Result<(u32, Vec<u8>), Refused> {
         keep += i.size;
     }
     Ok((keep, (0..16).map(|k| img.u8(va + k)).collect()))
+}
+
+/// A function's trampoline where its first bytes have a branch (issue #138):
+/// the code, with each rel32 written as the absolute target, and where those
+/// are (the runtime makes them relative to where it puts the code).
+pub type Tramp = (Vec<u8>, Vec<u8>);
+
+/// root_head, and where the first bytes have a call, a jmp or a jcc that the
+/// trampoline can do from elsewhere (rel8 and rel32, to rel32; an indirect
+/// one as it is), that trampoline. Not a ret, a loop or jecxz, nor a jmp
+/// before the 5 bytes (what follows it isn't the function's to overwrite).
+pub fn fn_head(img: &Image, va: u32) -> Result<(u32, Vec<u8>, Option<Tramp>), Refused> {
+    if let Ok((keep, hd)) = root_head(img, va) {
+        return Ok((keep, hd, None));
+    }
+    let no = || Refused(format!("a branch in the first bytes at {:08x}: no trampoline", va));
+    let mut keep = 0u32;
+    let mut code: Vec<u8> = Vec::new();
+    let mut rel: Vec<u8> = Vec::new();
+    while keep < 5 {
+        let a = va + keep;
+        let i = img.insn(a)?;
+        if i.ops.iter().any(|o| matches!(o.kind, OpKind::Mem(m) if m.base == REG_EIP)) {
+            return Err(no());
+        }
+        let b = &i.bytes;
+        let target = |d: i64| (a as i64 + i.size as i64 + d) as u32;
+        let i8_at = |k: usize| b[k] as i8 as i64;
+        let i32_at = |k: usize| i32::from_le_bytes([b[k], b[k + 1], b[k + 2], b[k + 3]]) as i64;
+        let mut push_rel = |code: &mut Vec<u8>, op: &[u8], t: u32| {
+            code.extend_from_slice(op);
+            rel.push(code.len() as u8);
+            code.extend_from_slice(&t.to_le_bytes());
+        };
+        let last;
+        match (b[0], b.get(1).copied().unwrap_or(0)) {
+            (0xe8, _) if i.size == 5 => {
+                push_rel(&mut code, &[0xe8], target(i32_at(1)));
+                last = false;
+            }
+            (0xe9, _) if i.size == 5 => {
+                push_rel(&mut code, &[0xe9], target(i32_at(1)));
+                last = true;
+            }
+            (0xeb, _) if i.size == 2 => {
+                push_rel(&mut code, &[0xe9], target(i8_at(1)));
+                last = true;
+            }
+            (0x70..=0x7f, _) if i.size == 2 => {
+                push_rel(&mut code, &[0x0f, 0x80 + (b[0] - 0x70)], target(i8_at(1)));
+                last = false;
+            }
+            (0x0f, 0x80..=0x8f) if i.size == 6 => {
+                push_rel(&mut code, &[0x0f, b[1]], target(i32_at(2)));
+                last = false;
+            }
+            (0xff, m) if (m >> 3) & 7 == 2 || (m >> 3) & 7 == 4 => {
+                code.extend_from_slice(b);
+                last = (m >> 3) & 7 == 4;
+            }
+            _ => {
+                if i.mnemonic == "ret" || i.mnemonic.starts_with('j') || i.mnemonic.starts_with("loop") || i.mnemonic == "call" {
+                    return Err(no());
+                }
+                code.extend_from_slice(b);
+                last = false;
+            }
+        }
+        keep += i.size;
+        if last && keep < 5 {
+            return Err(no());
+        }
+    }
+    if code.len() + 5 > 32 || keep > 16 {
+        return Err(no());
+    }
+    Ok((keep, (0..16).map(|k| img.u8(va + k)).collect(), Some((code, rel))))
 }
 
 fn text_bytes(img: &Image) -> &[u8] {
@@ -255,7 +332,9 @@ fn reads_first(img: &Image, mut va: u32, depth: u32, steps: u32) -> Result<bool,
     Ok(false)
 }
 
-/// Of vas, the functions whose flags a caller may read after they return.
+/// Of vas, the functions whose flags a caller may read after they return. A
+/// function that never returns has no after (issue #138: exit(-1) at 46169c
+/// ends the function, the bytes after the call being the next one's).
 pub fn flags_read_after(img: &Image, vas: &BTreeSet<u32>) -> OMap<u32, u32> {
     let mut hit = OMap::new();
     let mem = text_bytes(img);
@@ -268,7 +347,7 @@ pub fn flags_read_after(img: &Image, vas: &BTreeSet<u32>) -> OMap<u32, u32> {
             continue;
         }
         let t = (img.text_lo as i64 + k + 5 + i32_at(mem, ku + 1)) as u32;
-        if vas.contains(&t) && !hit.contains_key(&t) {
+        if vas.contains(&t) && !NORETURN_FUNCS.contains(&t) && !hit.contains_key(&t) {
             if let Ok(true) = reads_first(img, img.text_lo + ku as u32 + 5, 0, 12) {
                 hit.insert(t, img.text_lo + ku as u32);
             }
@@ -305,21 +384,29 @@ pub fn code_hash(img: &Image, ranges: &[(u32, u32)]) -> u32 {
 }
 
 /// Each compiled function's entry for the check: (keep, head) where it can be hooked, else why not.
-pub fn hookable(img: &Image, prog: &Program) -> (BTreeMap<u32, (u32, Vec<u8>)>, BTreeMap<u32, String>) {
+/// The trampolines with a branch moved are in the third map (AOT_NO_RELOC=1: none, those not hooked).
+#[allow(clippy::type_complexity)]
+pub fn hookable(img: &Image, prog: &Program) -> (BTreeMap<u32, (u32, Vec<u8>)>, BTreeMap<u32, String>, BTreeMap<u32, Tramp>) {
     let mut heads: BTreeMap<u32, (u32, Vec<u8>)> = BTreeMap::new();
     let mut why: BTreeMap<u32, String> = BTreeMap::new();
+    let mut tramps: BTreeMap<u32, Tramp> = BTreeMap::new();
+    let reloc = std::env::var("AOT_NO_RELOC").map(|v| v != "1").unwrap_or(true);
     for &va in &prog.compiled {
-        match root_head(img, va) {
+        let h = if reloc { fn_head(img, va) } else { root_head(img, va).map(|(k, h)| (k, h, None)) };
+        match h {
             Err(e) => {
                 why.insert(va, e.0);
                 continue;
             }
-            Ok(h) => {
+            Ok((keep, hd, t)) => {
                 if prog.summ[&va].pops.is_none() {
                     why.insert(va, "its ret pops aren't known".to_string());
                     continue;
                 }
-                heads.insert(va, h);
+                heads.insert(va, (keep, hd));
+                if let Some(t) = t {
+                    tramps.insert(va, t);
+                }
             }
         }
     }
@@ -361,7 +448,8 @@ pub fn hookable(img: &Image, prog: &Program) -> (BTreeMap<u32, (u32, Vec<u8>)>, 
         why.entry(inner[&t]).or_insert_with(|| format!("a 32-bit branch somewhere in .text could reach its first bytes ({:08x})", t));
     }
     heads.retain(|va, _| !why.contains_key(va));
-    (heads, why)
+    tramps.retain(|va, _| heads.contains_key(va));
+    (heads, why, tramps)
 }
 
 fn mask(rs: &[u8]) -> u32 {
@@ -480,7 +568,7 @@ pub fn compile_set<'a>(
                     break;
                 }
                 Err(e) => {
-                    if attempt == 0 && e.0.starts_with("esp at a ret") && prog.make_plain(va) {
+                    if attempt == 0 && e.0.starts_with("esp at a ret") && prog.make_plain(va, &e.0) {
                         continue;
                     }
                     refused.insert(va, e.0);
@@ -497,6 +585,36 @@ pub fn compile_set<'a>(
     }
     prog.apply_exits(&blocks);
     prog.summarize(&reach_sorted, 50);
+    // A callee's leftovers (garbage) in ecx or edx that reach a caller's ret
+    // are its leftovers too, also where the callee is screened after it (a
+    // cycle): 55c270 returned 55c110's ecx, which its compiled code doesn't
+    // keep, and its callers' read of it was compared.
+    let mut more = 0usize;
+    for _ in 0..20 {
+        let mut changed = 0usize;
+        for &va in &screen {
+            if !prog.compiled.contains(&va) {
+                continue;
+            }
+            let f = prog.func(va);
+            if !calls_tails(&f).any(|(_, t)| t.direct().is_some_and(|d| prog.garbage.get(&d).is_some_and(|&g| g != 0))) {
+                continue;
+            }
+            let Ok(a) = Analysis::new(&prog, f, Some(full_outs), true) else { continue };
+            let old = prog.garbage.get(&va).copied().unwrap_or(0);
+            if a.garbage & !old != 0 {
+                prog.garbage.insert(va, old | a.garbage);
+                changed += 1;
+            }
+        }
+        more += changed;
+        if changed == 0 {
+            break;
+        }
+    }
+    if more > 0 {
+        eprintln!("aot: {} functions' leftovers found again after their callees'", more);
+    }
     let mut rounds = 0usize;
     let mut outs: HashMap<u32, Regs>;
     let sigs: HashMap<u32, Sig>;
@@ -604,7 +722,7 @@ pub fn compile_set<'a>(
                 panic!("signatures: {} functions put off with no refusal", put_off.len());
             }
             for (va, why) in hit.iter() {
-                if why.starts_with("esp at a ret") && prog.make_plain(*va) {
+                if why.starts_with("esp at a ret") && prog.make_plain(*va, why) {
                     continue;
                 }
                 refused.insert(*va, why.clone());
@@ -710,6 +828,149 @@ fn write_out<'a>(
         em.ana = None;
         ems.push(em);
     }
+    // The natives' hand-backs (issue #138): each compiled as an entry into
+    // the function that holds it, sig mode only.
+    let mut resume_texts: HashMap<u32, Vec<String>> = HashMap::new();
+    let mut resumed: Vec<(u32, u32, i64)> = Vec::new();
+    let mut resume_why: Vec<(u32, String)> = Vec::new();
+    if let Some(mi) = mode_list.iter().position(|&m| m == "sig") {
+        let em = &mut ems[mi];
+        for &x in &img.resumes {
+            let at = compiled.iter().copied().filter(|&va| va <= x && prog.func(va).insns.contains_key(&x)).max();
+            let Some(va) = at else {
+                resume_why.push((x, "in no compiled function".to_string()));
+                continue;
+            };
+            let f = prog.func(va);
+            if x == f.entry {
+                resume_why.push((x, "a compiled function's entry".to_string()));
+                continue;
+            }
+            if let Some(r) = Flags::read_before_set(&f, x) {
+                resume_why.push((x, format!("flags read at {:08x} before anything sets them", r)));
+                continue;
+            }
+            let out = set_of(&sigs[&va].outs);
+            let ana = match Analysis::new(&prog, f.clone(), Some(out), false) {
+                Ok(a) => a,
+                Err(Refused(e)) => {
+                    resume_why.push((x, e));
+                    continue;
+                }
+            };
+            let Some(Some(sp)) = ana.sp_at.get(&x).copied() else {
+                resume_why.push((x, "the stack offset there not known".to_string()));
+                continue;
+            };
+            em.ana = Some(ana);
+            match em.resume_fn(va, x, sp) {
+                Ok(t) => {
+                    resume_texts.entry(va).or_default().push(t);
+                    resumed.push((x, va, sp));
+                }
+                Err(Refused(e)) => resume_why.push((x, e)),
+            }
+            em.ana = None;
+        }
+    }
+    // The return sites (issue #138): where a thread stopped in compiled code
+    // goes on (a shim's yield at a callout, the C frames above it dropped),
+    // each function's in one entry, reent_<va>. A callout's return, and a
+    // direct call's to a compiled function that may exit. AOT_NO_REENT=1:
+    // none.
+    let mut reents: Vec<(u32, u32, i64)> = Vec::new();
+    let mut reent_fns = 0usize;
+    let mut reent_why: BTreeMap<String, usize> = BTreeMap::new();
+    let mut reent_taken: HashSet<u32> = HashSet::new();   // a site in two functions' code: the first's
+    if let (Some(mi), false) = (mode_list.iter().position(|&m| m == "sig"), std::env::var("AOT_NO_REENT").is_ok_and(|v| v == "1")) {
+        let em = &mut ems[mi];
+        for (n, &va) in compiled.iter().enumerate() {
+            progress.tick("writing the return sites' entries", n, compiled.len());
+            if !prog.may_exit.contains(&va) {
+                continue;
+            }
+            let f = prog.func(va);
+            let mut want: Vec<u32> = Vec::new();
+            for (&c, t) in f.calls.iter() {
+                if f.noreturn.contains(&c) {
+                    continue;
+                }
+                let ra = c.wrapping_add(f.insns[&c].size);
+                if !f.insns.contains_key(&ra) {
+                    continue;
+                }
+                let exits = f.callouts.contains_key(&c)
+                    || t.direct().is_some_and(|d| prog.compiled.contains(&d) && prog.may_exit.contains(&d));
+                if exits {
+                    want.push(ra);
+                }
+            }
+            if want.is_empty() {
+                continue;
+            }
+            let out = set_of(&sigs[&va].outs);
+            let ana = match Analysis::new(&prog, f.clone(), Some(out), false) {
+                Ok(a) => a,
+                Err(Refused(e)) => {
+                    *reent_why.entry(e.split(" at ").next().unwrap_or("").to_string()).or_default() += want.len();
+                    continue;
+                }
+            };
+            let mut sites: Vec<(u32, i64)> = Vec::new();
+            for x in want {
+                if !reent_taken.insert(x) {
+                    *reent_why.entry("a site of another function's entry".to_string()).or_default() += 1;
+                } else if Flags::read_before_set(&f, x).is_some() {
+                    *reent_why.entry("flags read before anything sets them".to_string()).or_default() += 1;
+                } else if let Some(Some(sp)) = ana.sp_at.get(&x).copied() {
+                    sites.push((x, sp));
+                } else {
+                    *reent_why.entry("the stack offset there not known".to_string()).or_default() += 1;
+                }
+            }
+            if sites.is_empty() {
+                continue;
+            }
+            // The entry too: sig_<va> calls reent_<va> there, so the code is
+            // there once (AOT_REENT_COPY=1: twice, sig_ its own).
+            let by_reent = !std::env::var("AOT_REENT_COPY").is_ok_and(|v| v == "1");
+            let mut all = sites.clone();
+            if by_reent && !sites.iter().any(|e| e.0 == f.entry) {
+                all.push((f.entry, 0));
+            }
+            em.ana = Some(ana);
+            match em.reent_fn(va, &all) {
+                Ok(t) => {
+                    resume_texts.entry(va).or_default().push(t);
+                    reents.extend(sites.iter().map(|&(x, sp)| (x, va, sp)));
+                    reent_fns += 1;
+                    if by_reent {
+                        let w = em.sig_by_reent(va);
+                        if let Some(v) = texts.get_mut(&va) {
+                            for (m, text) in v.iter_mut() {
+                                if *m == "sig" {
+                                    *text = w.clone();
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(Refused(e)) => *reent_why.entry(e.split(" at ").next().unwrap_or("").to_string()).or_default() += sites.len(),
+            }
+            em.ana = None;
+        }
+    }
+    let mut ej = J::obj();
+    ej.set("functions", J::Int(reent_fns as i64));
+    ej.set("sites", J::Int(reents.len() as i64));
+    ej.set("refused", J::Obj(reent_why.iter().map(|(k, v)| (k.clone(), J::Int(*v as i64))).collect()));
+    report.set("reents", ej);
+    let mut rj = J::obj();
+    for &(x, va, _) in &resumed {
+        rj.set(&format!("{:08x}", x), J::Str(format!("{:08x}", va)));
+    }
+    report.set("resumes", rj);
+    report.set("resumes_refused", J::Obj(resume_why.iter().map(|(x, e)| (format!("{:08x}", x), J::Str(e.clone()))).collect()));
     let part_max: usize = (std::env::var("AOT_PART_MB").ok().and_then(|s| s.parse::<f64>().ok()).unwrap_or(8.0) * 1e6) as usize;
     let cset: HashSet<u32> = compiled.iter().copied().collect();
     let callees_of: HashMap<u32, BTreeSet<u32>> = compiled
@@ -719,7 +980,11 @@ fn write_out<'a>(
             (va, calls_tails(&f).filter_map(|(_, t)| t.direct()).filter(|t| cset.contains(t)).collect())
         })
         .collect();
-    let size_of = |va: u32| -> usize { texts[&va].iter().map(|(_, t)| t.len()).sum() };
+    // With the entries written beside it (resume_, reent_): sig_ may be only a
+    // call to reent_ (issue #138: counted alone, one part had 105 MB of C).
+    let size_of = |va: u32| -> usize {
+        texts[&va].iter().map(|(_, t)| t.len()).sum::<usize>() + resume_texts.get(&va).map_or(0, |v| v.iter().map(|t| t.len()).sum())
+    };
     let cut = |order: &[u32]| -> (usize, Vec<Vec<u32>>) {
         let mut parts: Vec<Vec<u32>> = Vec::new();
         let mut cur: Vec<u32> = Vec::new();
@@ -871,6 +1136,12 @@ fn write_out<'a>(
             for &va in part {
                 out.push(texts[&va].iter().find(|(m, _)| *m == mode).unwrap().1.clone());
                 out.push(String::new());
+                if mode == "sig" {
+                    for t in resume_texts.get(&va).into_iter().flatten() {
+                        out.push(t.clone());
+                        out.push(String::new());
+                    }
+                }
             }
         }
         part_texts.push(out);
@@ -914,7 +1185,7 @@ fn write_out<'a>(
             ));
         }
     }
-    let (heads, why) = hookable(img, &prog);
+    let (heads, why, tramps) = hookable(img, &prog);
     let mut leaf_n = 0usize;
     if mode_list.contains(&"sig") {
         let em = Emitter::new(&prog, "sig", &sigs);
@@ -967,6 +1238,13 @@ fn write_out<'a>(
         ex.set("may_exit", J::Int(prog.may_exit.iter().filter(|v| cset.contains(v)).count() as i64));
         ex.set("callouts", J::Int(compiled.iter().map(|&va| prog.func(va).callouts.len() as i64).sum()));
         ex.set("plain", J::Int(prog.plain.iter().filter(|v| cset.contains(v)).count() as i64));
+        let mut pw = J::obj();   // each plain one's refusal with its callouts
+        let mut pl: Vec<u32> = prog.plain.iter().copied().filter(|v| cset.contains(v)).collect();
+        pl.sort();
+        for va in pl {
+            pw.set(&format!("{:08x}", va), J::Str(prog.plain_why.get(&va).cloned().unwrap_or_default()));
+        }
+        ex.set("plain_why", pw);
         report.set("exits", ex);
         chunks.push("const AotFunc AOT_SYM(funcs)[] = {".to_string());
         for &va in &compiled {
@@ -1003,8 +1281,53 @@ fn write_out<'a>(
         chunks.push("    {0, 0, 0, 0, 0, 0, 0, 0, {0}, 0, 0, 0, 0, 0, 0, 0, 0, 0}".to_string());
         chunks.push("};".to_string());
     }
+    // The resume entries' table: all eight registers in and out, esp after
+    // the function's ret.
+    for &(x, _, _) in &resumed {
+        chunks.push(format!("AOT_FN void {}(AotRegs *R);", resume_name(x)));
+        chunks.push(format!(
+            "static uint32_t AOT_SYM(rs_{:08x})(uint32_t *r) {{ AotRegs t; for (int k = 0; k < 8; k++) t.r[k] = r[k]; {}(&t); for (int k = 0; k < 8; k++) r[k] = t.r[k]; return r[0]; }}",
+            x,
+            resume_name(x)
+        ));
+    }
+    chunks.push("const AotResume AOT_SYM(resumes)[] = {".to_string());
+    for &(x, va, sp) in &resumed {
+        chunks.push(format!("    {{0x{:08x}u, 0x{:08x}u, 0x{:x}u, AOT_SYM(rs_{:08x})}},", x, va, sp as i32 as u32, x));
+    }
+    chunks.push("    {0, 0, 0, 0}".to_string());
+    chunks.push("};".to_string());
+    // The return sites' entries: reent_<va>, one per function, called with the site.
+    let mut declared: HashSet<u32> = HashSet::new();
+    for &(_, va, _) in &reents {
+        if declared.insert(va) {
+            chunks.push(format!("AOT_FN void {}(AotRegs *R, uint32_t at);", reent_name(va)));
+        }
+    }
+    chunks.push("const AotReent AOT_SYM(reents)[] = {".to_string());
+    for &(x, va, sp) in &reents {
+        chunks.push(format!("    {{0x{:08x}u, 0x{:08x}u, 0x{:x}u, {}}},", x, va, sp as i32 as u32, reent_name(va)));
+    }
+    chunks.push("    {0, 0, 0, 0}".to_string());
+    chunks.push("};".to_string());
+    chunks.push("const AotTramp AOT_SYM(tramps)[] = {".to_string());
+    for (va, (code, rel)) in &tramps {
+        let mut r4 = rel.clone();
+        r4.resize(4, 0);
+        chunks.push(format!(
+            "    {{0x{:08x}u, {}, {}, {{{}}}, {{{}}}}},",
+            va,
+            code.len(),
+            rel.len(),
+            r4.iter().map(|b| b.to_string()).collect::<Vec<_>>().join(", "),
+            code.iter().map(|b| format!("0x{:02x}", b)).collect::<Vec<_>>().join(", ")
+        ));
+    }
+    chunks.push("    {0, 0, 0, {0}, {0}}".to_string());
+    chunks.push("};".to_string());
     let mut hk = J::obj();
     hk.set("hookable", J::Int(heads.len() as i64));
+    hk.set("moved", J::Int(tramps.len() as i64));
     hk.set("not", J::Obj(why.iter().map(|(k, v)| (format!("{:08x}", k), J::Str(v.clone()))).collect()));
     report.set("hooks", hk);
     chunks.push("const AotRoot AOT_SYM(roots)[] = {".to_string());

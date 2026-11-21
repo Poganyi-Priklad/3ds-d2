@@ -22,7 +22,11 @@ pub struct Summary {
 pub const UNKNOWN: Summary = Summary { reads: ALL, preserved: 0, pops: None, known: false };
 pub const CALLEE_SAVED: Regs = (1 << EBX) | (1 << EBP) | (1 << ESI) | (1 << EDI);
 
-pub const NORETURN_FUNCS: [u32; 1] = [0x00681e09];
+/// Functions that never return: exit(-1) (0x681e09, the game's internal
+/// errors), and __report_gsfailure (0x6889d6, issue #138), which ends in
+/// TerminateProcess(GetCurrentProcess(), 0xc0000409) before a ret the
+/// decoding sees.
+pub const NORETURN_FUNCS: [u32; 2] = [0x00681e09, 0x006889d6];
 pub const ERROR_PATH_FUNCS: [u32; 2] = [0x00408090, 0x00408a60];
 
 #[derive(Clone, Debug)]
@@ -53,6 +57,12 @@ pub fn intrinsics() -> HashMap<u32, &'static str> {
     let mut m = HashMap::new();
     m.insert(0x00681ef0, "memset");
     m.insert(0x006829c0, "memcpy");
+    m.insert(0x00683840, "memcpy");   // memmove: the same glue (aot_memmove)
+    // The C runtime's sine and cosine of st0, in st0 (issue #138): hand-written
+    // code that passes flags and the stack between its pieces (688590 into
+    // 6885e8, 6987d8, 6987fb), refused. 61bb80 calls them.
+    m.insert(0x00688590, "fsin");
+    m.insert(0x006886c0, "fcos");
     m.insert(0x006831b0, "alloca_probe");
     m
 }
@@ -198,6 +208,8 @@ pub struct Program<'a> {
     pub may_exit: HashSet<u32>,
     pub may_hard: HashSet<u32>,
     pub plain: HashSet<u32>,
+    /// Why each of plain's was made plain: the refusal its callouts gave.
+    pub plain_why: HashMap<u32, String>,
     pub noreturn_funcs: HashSet<u32>,
     pub why: HashMap<u32, String>,
     pub cfg_pops: HashMap<u32, Option<i64>>,
@@ -229,6 +241,7 @@ impl<'a> Program<'a> {
             may_exit: HashSet::new(),
             may_hard: HashSet::new(),
             plain: HashSet::new(),
+            plain_why: HashMap::new(),
             noreturn_funcs: HashSet::new(),
             why: HashMap::new(),
             cfg_pops: HashMap::new(),
@@ -289,7 +302,8 @@ impl<'a> Program<'a> {
             }
             Tgt::Import(slot) => {
                 return Summary {
-                    reads: bit(ESP),
+                    // A native (issue #138) reads what it likes of the registers.
+                    reads: if self.img.native_slots.contains(&slot) { ALL } else { bit(ESP) },
                     preserved: CALLEE_SAVED,
                     pops: self.img.import_pops.get(&slot).copied().flatten(),
                     known: true,
@@ -424,12 +438,13 @@ impl<'a> Program<'a> {
 
     /// A function whose callouts' pops threw its stack off: its indirect
     /// and import calls plain exits instead. False if they were already.
-    pub fn make_plain(&mut self, va: u32) -> bool {
+    pub fn make_plain(&mut self, va: u32, why: &str) -> bool {
         let f = self.func(va);
         if f.plain || f.callouts.is_empty() {
             return false;
         }
         self.plain.insert(va);
+        self.plain_why.insert(va, why.to_string());
         let mut g = Func::new(self.img, va, &self.starts);
         let tp = self.thunk_pops.as_ref().and_then(|m| m.get(&va).copied());
         g.set_exits(&f.exits, false, tp, self.img, self.callouts);

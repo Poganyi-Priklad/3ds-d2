@@ -2,6 +2,7 @@
 #include "game/dcc_native.h"
 
 #include "game/dcc_decode.h"
+#include "game/native_sites.h"
 #include "runtime/cpu.h"
 #include "runtime/rt_host.h"
 
@@ -211,16 +212,10 @@ bool install_dcc_native(d2rt::Cpu &c, DccMode mode)
     const uint32_t native = rt::native_entry("DccDecode", 0, loop_native);
     if (!native)
         return false;
-    // call native; cmp eax, [ebp-0x340]; nops to 0x60c11f.
-    uint8_t p[sizeof kLoopOrig];
-    std::memset(p, 0x90, sizeof p);
-    p[0] = 0xe8;
-    put_rel32(p + 1, kLoop + 5, native);
-    const uint8_t cmp[6] = {0x3b, 0x85, 0xc0, 0xfc, 0xff, 0xff};
-    std::memcpy(p + 5, cmp, sizeof cmp);
+    // call native; cmp eax, [ebp-0x340]; nops to 0x60c11f (native_sites_table.h).
     static_assert(kLoop + sizeof kLoopOrig == kLoopNext, "the patch ends where the game's code goes on");
-    c.write(kLoop, p, sizeof p);
-    c.invalidate_code(kLoop, sizeof p);
+    if (!apply_sites(c, "dcc", {{"DccDecode", native}}))
+        return false;
     if (mode == DccMode::Check) {
         uint8_t a[sizeof kAfterOrig];
         if (c.read(kAfter, a, sizeof a) && std::memcmp(a, kAfterOrig, sizeof a) == 0) {

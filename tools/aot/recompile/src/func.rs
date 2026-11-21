@@ -105,6 +105,7 @@ impl Func {
 
     fn walk(&mut self, img: &Image, starts: &HashSet<u32>) -> Result<(), Refused> {
         let mut work = vec![self.entry];
+        let mut again: HashSet<u32> = HashSet::new();
         while let Some(mut va) = work.pop() {
             while !self.insns.contains_key(&va) {
                 let i = img.insn(va)?;
@@ -124,7 +125,11 @@ impl Func {
                 if m == "jmp" {
                     if ops[0].is_imm() {
                         let t = imm_addr(ops[0].imm());
-                        if t != self.entry && starts.contains(&t) {
+                        if img.native_slots.contains(&t) {
+                            // A native's site (issue #138): a tail call to it, as through an import.
+                            self.tails.insert(va, Tgt::Import(t));
+                            self.succ.insert(va, vec![]);
+                        } else if t != self.entry && starts.contains(&t) {
                             self.tails.insert(va, Tgt::Direct(t));
                             self.succ.insert(va, vec![]);
                         } else {
@@ -133,7 +138,18 @@ impl Func {
                         }
                         break;
                     }
-                    match self.switch(img, va, &i)? {
+                    let sw = match self.switch(img, va, &i) {
+                        // Reached before its guard was (issue #138: 57edd0's jz
+                        // to the table's movzx at 57edfa, past the cmp and ja at
+                        // 57edf5): once more, after the rest of the work.
+                        Err(_) if !work.is_empty() && again.insert(va) => {
+                            self.insns.retain(|k| *k != va);
+                            work.insert(0, va);
+                            break;
+                        }
+                        r => r?,
+                    };
+                    match sw {
                         None => {
                             // Not through a table: a tail call through a pointer (issue #138).
                             let op = ops[0];
@@ -147,8 +163,10 @@ impl Func {
                             self.succ.insert(va, vec![]);
                         }
                         Some(sw) => {
+                            // Not the guard's default: the ja before goes there, and the
+                            // index here is in the table (issue #138: the jmp's pushes
+                            // reached a default that is the ret, two esps there).
                             let mut s: Vec<u32> = sw.targets.clone();
-                            s.push(sw.default);
                             s.sort();
                             s.dedup();
                             work.extend(s.iter().copied());
@@ -171,7 +189,9 @@ impl Func {
                 if m == "call" {
                     let op = ops[0];
                     let mm = op.mem();
-                    let t = if op.is_imm() {
+                    let t = if op.is_imm() && img.native_slots.contains(&imm_addr(op.imm())) {
+                        Tgt::Import(imm_addr(op.imm()))   // a native's site (issue #138): its call as an import's
+                    } else if op.is_imm() {
                         Tgt::Direct(imm_addr(op.imm()))
                     } else if op.is_mem()
                         && mm.base == 0
@@ -300,19 +320,122 @@ impl Func {
             ends.insert(k.wrapping_add(j.size), *k);
         }
         let (mut n, mut cur) = (0i64, va);
-        while !self.leaders.contains(&cur) {
+        let mut pushed: Vec<(u32, &str)> = Vec::new();   // the pushes walked, the last first
+        // Into a block only from the conditional jump before it: the walk goes
+        // on through the jump (issue #138: 66f3b0's first argument pushed
+        // before the jnz at 66f4a8, its call at 66f4b2 counted 4 for 8).
+        let falls_in = |cur: u32| {
+            ends.get(&cur).is_some_and(|k| {
+                let m = self.insns[k].mnemonic.as_str();
+                m.starts_with('j')
+                    && m != "jmp"
+                    && !self.succ.iter().any(|(src, ts)| src != k && ts.contains(&cur))
+                    && cur != self.entry
+            })
+        };
+        while !self.leaders.contains(&cur) || falls_in(cur) {
             let Some(&k) = ends.get(&cur) else { break };
             let j = &self.insns[&k];
             if j.mnemonic == "push" {
                 n += 1;
+                pushed.push((k, j.op_str.as_str()));
             } else if matches!(j.mnemonic.as_str(), "call" | "pop" | "ret" | "leave" | "pushal" | "popal")
                 || j.op_str.split(',').next().unwrap_or("").trim() == "esp"
+                // A frame's mov ebp, esp (issue #138: renderer_line's push ebp
+                // counted as an argument, 20 for 16, so its calls were exits).
+                || j.op_str.split(',').nth(1).is_some_and(|o| o.trim() == "esp")
             {
                 break;
             }
             cur = k;
         }
-        4 * n
+        // A pop just after the call takes a dword the callee left: where the
+        // pops match the first pushes walked, register for register, and the
+        // register is written between its push and the call, those were saves
+        // of a register reused, not arguments (issue #138: 4f6300's push edi,
+        // mov edi before its four arguments, popped after the call through
+        // the renderer's table, counted 20 for 16, so its call was a plain
+        // exit; 52e590's push edi is its argument, the pop after the call its
+        // prologue's save).
+        let writes = |r: &str, from: u32| {
+            let mut a = from.wrapping_add(self.insns[&from].size);
+            while a != va {
+                let Some(j) = self.insns.get(&a) else { return false };
+                if !matches!(j.mnemonic.as_str(), "push" | "cmp" | "test")
+                    && j.op_str.contains(',')
+                    && j.op_str.split(',').next().unwrap_or("").trim() == r
+                {
+                    return true;
+                }
+                a = a.wrapping_add(j.size);
+            }
+            false
+        };
+        let mut at = va.wrapping_add(i.size);
+        let mut popped = 0i64;
+        for &(pa, p) in pushed.iter().rev() {
+            let Some(j) = self.insns.get(&at) else { break };
+            if j.mnemonic != "pop"
+                || j.op_str != p
+                || (at != va.wrapping_add(i.size) && self.leaders.contains(&at))
+                || !writes(p, pa)
+            {
+                break;
+            }
+            popped += 1;
+            at = at.wrapping_add(j.size);
+        }
+        // The first pushes walked of ebx, esi, edi or ebp as the caller left
+        // them (no instruction names the register on some path from the entry
+        // to the push) are the prologue's saves: a function doesn't pass its
+        // caller's register (issue #138: 410a80's push esi, push edi before
+        // call edi, GetTickCount, counted 8 for 0; 476bc0's before its call
+        // to the thunk 4f65c0 made the thunk pop 8).
+        let mut kept = 0i64;
+        for &(pa, p) in pushed.iter().rev() {
+            if !self.as_entered(pa, p) {
+                break;
+            }
+            kept += 1;
+        }
+        4 * (n - popped.max(kept))
+    }
+
+    /// Whether `r` (ebx, esi, edi or ebp) can be at `at` as it was at the
+    /// entry: a path from the entry reaches `at` through no instruction that
+    /// names it or a part of it, but a push, cmp or test.
+    fn as_entered(&self, at: u32, r: &str) -> bool {
+        let parts: &[&str] = match r {
+            "ebx" => &["ebx", "bx", "bl", "bh"],
+            "esi" => &["esi", "si", "sil"],
+            "edi" => &["edi", "di", "dil"],
+            "ebp" => &["ebp", "bp", "bpl"],
+            _ => return false,
+        };
+        let names = |j: &Insn| {
+            !matches!(j.mnemonic.as_str(), "push" | "cmp" | "test")
+                && j.op_str
+                    .split(|c: char| !c.is_ascii_alphanumeric())
+                    .any(|w| parts.contains(&w))
+        };
+        let mut seen = HashSet::new();
+        let mut work = vec![self.entry];
+        while let Some(a) = work.pop() {
+            if a == at {
+                return true;
+            }
+            if !seen.insert(a) {
+                continue;
+            }
+            let Some(j) = self.insns.get(&a) else { continue };
+            if names(j) {
+                continue;
+            }
+            if let Some(s) = self.succ.get(&a) {
+                work.extend(s.iter().copied());
+            }
+        }
+        false
     }
 
     pub fn cut(&mut self, hit: &[u32]) {
@@ -361,6 +484,55 @@ impl Func {
         self.n_bytes = self.insns.values().map(|i| i.size as u64).sum();
     }
 
+    /// The value `r` has at `at`, by a cmp r, imm; jne before it (`back`: the
+    /// instructions before `at`, in order) with nothing between that writes
+    /// r, in a straight line that no branch comes into before `end`.
+    fn pinned(&self, r: u8, back: &[u32], at: u32, end: u32) -> Option<i64> {
+        let (mut next, mut jne) = (at, None);
+        for &a in back.iter().rev() {
+            let p = &self.insns[&a];
+            if a.wrapping_add(p.size) != next {
+                return None;
+            }
+            if jne.is_none() && p.mnemonic == "pop" && p.ops[0].is_reg() && reg_full(p.ops[0].reg()).map(|s| s.0) == Some(r) {
+                // push imm; ...; pop r (68b5a3's push 7; sar eax, 4; pop ecx).
+                let mut nx = a;
+                for &b in back.iter().rev().skip_while(|&&b| b >= a) {
+                    let q = &self.insns[&b];
+                    if b.wrapping_add(q.size) != nx {
+                        return None;
+                    }
+                    if q.mnemonic == "push" {
+                        return if q.ops[0].is_imm() { Some(q.ops[0].imm()) } else { None };
+                    }
+                    if regs_rw(q).1 & (1 << 4) != 0 || matches!(q.mnemonic.as_str(), "call" | "ret" | "pop") || q.mnemonic.starts_with('j') {
+                        return None;
+                    }
+                    nx = b;
+                }
+                return None;
+            }
+            if jne.is_none() && p.mnemonic == "jne" {
+                jne = Some(a);
+            } else if jne.is_some() {
+                let ops = &p.ops;
+                if p.mnemonic != "cmp" || !ops[0].is_reg() || ops[0].size != 4 || reg_full(ops[0].reg()).map(|s| s.0) != Some(r) || !ops[1].is_imm() {
+                    return None;
+                }
+                let from = jne.unwrap();
+                let into = self.succ.iter().any(|(src, ts)| {
+                    let fall = src.wrapping_add(self.insns[src].size);
+                    ts.iter().any(|&t| t > from && t <= end && t != fall)
+                });
+                return if into { None } else { Some(ops[1].imm()) };
+            } else if regs_rw(p).1 & (1 << r) != 0 || matches!(p.mnemonic.as_str(), "call" | "jmp" | "ret") || p.mnemonic.starts_with('j') {
+                return None;
+            }
+            next = a;
+        }
+        None
+    }
+
     /// jmp [reg*4 + table], bounded by the cmp/ja that guards the index; or
     /// through a byte index table first. None when it isn't through a table.
     fn switch(&mut self, img: &Image, va: u32, i: &Insn) -> Result<Option<Switch>, Refused> {
@@ -406,6 +578,18 @@ impl Func {
                 && ops[1].is_imm()
             {
                 bound = Some(ops[1].imm());
+            } else if mn == "cmp"
+                && default.is_some()
+                && ops[0].is_reg()
+                && reg_full(ops[0].reg()).map(|s| s.0) == Some(cur)
+                && ops[1].is_reg()
+                && ops[1].size == 4
+            {
+                // The index against a register an earlier cmp reg, imm; jne
+                // pins on the way here (issue #138: 61bb80's cmp edi, 3; jnz;
+                // add ecx, -0x67; cmp ecx, edi; ja; jmp [ecx*4 + table]).
+                bound = self.pinned(reg_full(ops[1].reg()).expect("a register").0, &back[..k as usize], a, va);
+                break;
             } else {
                 let (_, w) = regs_rw(&p);
                 if w & (1 << cur) != 0 || (bytes_table.is_none() && w & (1 << idx) != 0) {

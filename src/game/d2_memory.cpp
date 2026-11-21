@@ -43,6 +43,7 @@
 // (issue #33). install_sprite_frames gives them an allocator of their own
 // (sprite_frames.h) with finer classes, in blocks of the same shared pool.
 #include "game/d2_memory.h"
+#include "game/native_sites.h"
 #include "game/sprite_governor.h"
 
 #include "runtime/bridge.h"
@@ -74,9 +75,6 @@ constexpr uint32_t kSpriteCache = 0x0089db60;
 // all 17 bytes): A = push 0; push 0; push [esp+0xc]; jmp B, and
 // B = call doexit; add esp, 0xc; ret.
 constexpr uint32_t kExit = 0x00681e09;
-constexpr uint8_t kExitOrig[] = {0x6a, 0x00, 0x6a, 0x00, 0xff, 0x74, 0x24, 0x0c, 0xe8,
-                                 0x11, 0xff, 0xff, 0xff, 0x83, 0xc4, 0x0c, 0xc3};
-constexpr uint32_t kDoExit = 0x00681d27;
 constexpr uint32_t kPadA = 0x006814d1, kPadB = 0x00681531;   // 15 bytes of int3 each
 
 // The global pool (0x74f104): its lock at +4, the number of size classes at
@@ -103,16 +101,13 @@ constexpr uint8_t kPoolAllocOrig[] = {0x55, 0x8b, 0xec, 0x53, 0x8b, 0xd9};
 constexpr uint32_t kVirtualFreeIat = 0x006cc220;
 constexpr uint32_t kFree = 0x00683fc0;
 // The release stub and its flag, in .text's zero slack after the automap's.
-constexpr uint32_t kReleaseStub = 0x006cb660, kReleaseStubSize = 56;
+constexpr uint32_t kReleaseStub = 0x006cb660;
 constexpr uint32_t kReleaseFlag = 0x006cb6a0;
-constexpr uint32_t kReleaseSlackEnd = 0x006cb6b0;
 // 0x409dd0 sizes each class's blocks: units of 1 KiB and more get
 // 0x80000 / unit of them (mov eax, 0x80000 at 0x409fa8; 0x409fad divides
 // it by the unit, esi, and multiplies back), 512 KiB blocks. Every pool the
 // game creates tops out at 256 KiB units.
-constexpr uint32_t kBlockSizeInsn = 0x00409fa8, kBlockSizeNext = 0x00409fad;
-constexpr uint8_t kBlockSizeOrig[] = {0xb8, 0x00, 0x00, 0x08, 0x00};
-constexpr uint32_t kBlockSizeStub = 0x006cb6b0, kBlockSizeStubEnd = 0x006cb6c0;
+constexpr uint32_t kBlockSize = 0x006cb6a4;   // the data dword the stub reads
 // 0x5ff3f0, the cache's room for a new sprite, counts it in once it has
 // evicted enough: mov edx, [ebp+8]; add dword [edi+0xc], 1;
 // add [edi+8], edx (the entry's own bytes: its frames are counted as they
@@ -120,9 +115,7 @@ constexpr uint32_t kBlockSizeStub = 0x006cb6b0, kBlockSizeStubEnd = 0x006cb6c0;
 // cache takes passes here, so with the entry count the heartbeat knows how
 // many it let go of. The stub, in .text's slack after the block size's:
 //   call <native>; <the 10 bytes>; jmp 0x5ff480
-constexpr uint32_t kInsert = 0x005ff476, kInsertNext = 0x005ff480;
-constexpr uint8_t kInsertOrig[] = {0x8b, 0x55, 0x08, 0x83, 0x47, 0x0c, 0x01, 0x01, 0x57, 0x08};
-constexpr uint32_t kInsertStub = 0x006cb6c0, kInsertStubEnd = 0x006cb6e0;
+constexpr uint32_t kInsert = 0x005ff476;
 // 0x5ff6e0 decodes a sprite's frames into the cache from its DCC file, once
 // the game's asynchronous load of the file (0x40a620, queued at 0x5ffbbd and
 // 0x5ff977) is done: the draw's poll of the load (0x40a7f0, from 0x600367)
@@ -132,15 +125,13 @@ constexpr uint32_t kInsertStub = 0x006cb6c0, kInsertStubEnd = 0x006cb6e0;
 // goes on drawing without the sprite).
 // It takes three stack arguments and returns with ret 0xc; its first bytes
 // are push ebp; mov ebp, esp; push ebx; push esi. The stub, in .text's
-// slack after the sprite trace's:
+// slack after the sprite trace's (native_sites_table.h, decode_timer):
 //   S+0   push eax; push ecx; push edx; call begin; pop edx; pop ecx; pop eax
 //   S+11  push [esp+0xc] three times (the arguments again); call S+52
 //   S+28  push eax; push ecx; push edx; call end; pop edx; pop ecx; pop eax
 //   S+39  ret 0xc
 //   S+52  <the 5 bytes>; jmp 0x5ff6e5
-constexpr uint32_t kDecode = 0x005ff6e0, kDecodeNext = 0x005ff6e5;
-constexpr uint8_t kDecodeOrig[] = {0x55, 0x8b, 0xec, 0x53, 0x56};
-constexpr uint32_t kDecodeStub = 0x006cb740, kDecodeStubEnd = 0x006cb780;
+constexpr uint32_t kDecode = 0x005ff6e0;
 // The frames of a decoded group (issue #44): 0x60bff0 asks the cache's pool
 // system for their block at 0x60c103 (call 0x40b430: ecx the pool, edx the
 // bytes, three stack arguments for the file and line). The call goes to a
@@ -154,31 +145,30 @@ constexpr uint32_t kPoolsOn = 0x00708000;   // 0: 0x40b430 and 0x40b480 pass poo
 // whose first bytes are push ebp; mov ebp, esp; push ecx; push ebx. Its stub
 // sends a pointer into a 64 KiB granule the frames hold (a byte map, after
 // the stubs) to a native, and anything else on.
-constexpr uint32_t kPoolFree = 0x00409ab0, kPoolFreeNext = 0x00409ab5;
+constexpr uint32_t kPoolFree = 0x00409ab0;
 constexpr uint8_t kPoolFreeOrig[] = {0x55, 0x8b, 0xec, 0x51, 0x53};
 // 0x409c80 destroys a pool system ([esp+4], 0: the global one) and frees its
 // blocks: push ebp; mov ebp, esp; sub esp, 8. The frames asked of it go too.
 // It does nothing while [0x74f0e8] is 0.
-constexpr uint32_t kPoolDestroy = 0x00409c80, kPoolDestroyNext = 0x00409c86;
+constexpr uint32_t kPoolDestroy = 0x00409c80;
 constexpr uint8_t kPoolDestroyOrig[] = {0x55, 0x8b, 0xec, 0x83, 0xec, 0x08};
 constexpr uint32_t kPoolsUp = 0x0074f0e8;
 // 0x5ff6e0 counts the frames in the cache once decoded: mov ecx, [esi+0x18]
 // (the group's OutSizeCoded); push 0; push ecx; then 0x5ff630. Counted as
 // the block they hold instead ([esi+0x14] is the frames).
-constexpr uint32_t kCountFrames = 0x005ff72d, kCountFramesNext = 0x005ff733;
+constexpr uint32_t kCountFrames = 0x005ff72d;
 constexpr uint8_t kCountFramesOrig[] = {0x8b, 0x4e, 0x18, 0x6a, 0x00, 0x51};
 // 0x5fffa0 counts the bytes of the file 0x5ffa20 queued for the group:
 // push eax; call 0x5ff630. For a DCC group (bit 1 of the flags its first
 // argument points at: 0x5ffa20 queues the file with 0x5ff6e0 to decode it)
 // they are freed once decoded (0x40a4c0) and are no part of the sprite; a
 // DC6 file's bytes are the sprite.
-constexpr uint32_t kCountFile = 0x0060002d, kCountFileNext = 0x00600033;
+constexpr uint32_t kCountFile = 0x0060002d;
 constexpr uint8_t kCountFileOrig[] = {0x50, 0xe8, 0xfd, 0xf5, 0xff, 0xff};
-constexpr uint32_t kCacheCount = 0x005ff630;
 // The four stubs and the byte map, in .text's zero slack after the native
 // checks' (d2_native.cpp), up to .rdata.
-constexpr uint32_t kFreeStub = 0x006cb820, kDestroyStub = 0x006cb860, kCountFramesStub = 0x006cb880,
-                   kCountFileStub = 0x006cb8a0, kFramesMap = 0x006cb8c0, kFramesSlackEnd = 0x006cc000;
+constexpr uint32_t kFreeStub = 0x006cb820, kFramesBase = 0x006cb8b8, kFramesLen = 0x006cb8bc, kFramesMap = 0x006cb8c0,
+                   kFramesSlackEnd = 0x006cc000;
 
 uint32_t g_fatal_caller = 0;
 SpriteGovernor g_governor;
@@ -200,12 +190,6 @@ FrameHeap *g_frames = nullptr;
 uint8_t *g_frames_map = nullptr;   // host address of kFramesMap: a byte per 64 KiB granule from g_map_base
 uint32_t g_map_base = 0;
 uint32_t g_frames_to_pool = 0, g_frames_dropped = 0, g_frames_strays = 0;
-
-void put_rel32(uint8_t *at, uint32_t insn_end, uint32_t target)
-{
-    const uint32_t rel = target - insn_end;
-    std::memcpy(at, &rel, 4);
-}
 
 bool all_int3(d2rt::Cpu &c, uint32_t va, uint32_t n)
 {
@@ -361,42 +345,20 @@ SpriteCacheStats sprite_cache_stats(d2rt::Cpu &c)
 
 bool install_sprite_cache_counter(d2rt::Cpu &c)
 {
-    uint8_t have[sizeof kInsertOrig];
-    uint8_t slack[kInsertStubEnd - kInsertStub];
-    static const uint8_t kZero[sizeof slack] = {};
-    if (!c.read(kInsert, have, sizeof have) || std::memcmp(have, kInsertOrig, sizeof have) != 0 ||
-        !c.read(kInsertStub, slack, sizeof slack) || std::memcmp(slack, kZero, sizeof slack) != 0)
-        return false;
     // eax and ecx are dead there, edx is loaded again after.
     const uint32_t count = rt::native_entry("SpriteCacheInsert", 0, [](d2rt::Cpu &) -> uint32_t {
         __atomic_fetch_add(&g_inserted, 1u, __ATOMIC_RELAXED);
         return 0;
     });
-    if (!count)
+    // call count; the 10 bytes; jmp 0x5ff480 (native_sites_table.h, sprite_cache_counter).
+    if (!count || !apply_sites(c, "sprite_cache_counter", {{"SpriteCacheInsert", count}}))
         return false;
-    uint8_t s[5 + sizeof kInsertOrig + 5] = {0xe8};
-    put_rel32(s + 1, kInsertStub + 5, count);
-    std::memcpy(s + 5, kInsertOrig, sizeof kInsertOrig);
-    s[15] = 0xe9;
-    put_rel32(s + 16, kInsertStub + sizeof s, kInsertNext);
-    uint8_t jump[sizeof kInsertOrig] = {0xe9, 0, 0, 0, 0, 0x90, 0x90, 0x90, 0x90, 0x90};
-    put_rel32(jump + 1, kInsert + 5, kInsertStub);
-    c.write(kInsertStub, s, sizeof s);
-    c.write(kInsert, jump, sizeof jump);
-    c.invalidate_code(kInsertStub, sizeof s);
-    c.invalidate_code(kInsert, sizeof jump);
     rt::logf("sprite cache: insertions counted at %08x", kInsert);
     return true;
 }
 
 bool install_sprite_decode_timer(d2rt::Cpu &c)
 {
-    uint8_t have[sizeof kDecodeOrig];
-    uint8_t slack[kDecodeStubEnd - kDecodeStub];
-    static const uint8_t kZero[sizeof slack] = {};
-    if (!c.read(kDecode, have, sizeof have) || std::memcmp(have, kDecodeOrig, sizeof have) != 0 ||
-        !c.read(kDecodeStub, slack, sizeof slack) || std::memcmp(slack, kZero, sizeof slack) != 0)
-        return false;
     // The game's thread decodes, and Storm's read thread in its loads'
     // callbacks (issue #76): a start by thread, the guest's threads taking
     // turns (no lock). A decode does not nest in another on one thread. The
@@ -422,36 +384,10 @@ bool install_sprite_decode_timer(d2rt::Cpu &c)
         }
         return 0;
     });
-    if (!begin || !end)
+    // The stub, the function's first bytes after it, and the jump to it
+    // (native_sites_table.h, decode_timer).
+    if (!begin || !end || !apply_sites(c, "decode_timer", {{"SpriteDecodeBegin", begin}, {"SpriteDecodeEnd", end}}))
         return false;
-    uint8_t s[kDecodeStubEnd - kDecodeStub] = {};
-    const uint8_t save[] = {0x50, 0x51, 0x52}, restore[] = {0x5a, 0x59, 0x58};
-    const uint8_t arg[] = {0xff, 0x74, 0x24, 0x0c};   // push dword [esp+0xc]
-    uint32_t at = 0;
-    auto put = [&](const uint8_t *b, uint32_t n) {
-        std::memcpy(s + at, b, n);
-        at += n;
-    };
-    auto call = [&](uint8_t op, uint32_t target) {
-        s[at] = op;
-        put_rel32(s + at + 1, kDecodeStub + at + 5, target);
-        at += 5;
-    };
-    put(save, 3), call(0xe8, begin), put(restore, 3);
-    put(arg, 4), put(arg, 4), put(arg, 4);
-    call(0xe8, kDecodeStub + 52);
-    put(save, 3), call(0xe8, end), put(restore, 3);
-    const uint8_t ret[] = {0xc2, 0x0c, 0x00};
-    put(ret, 3);
-    at = 52;
-    put(kDecodeOrig, sizeof kDecodeOrig);
-    call(0xe9, kDecodeNext);
-    uint8_t jump[sizeof kDecodeOrig] = {0xe9};
-    put_rel32(jump + 1, kDecode + 5, kDecodeStub);
-    c.write(kDecodeStub, s, sizeof s);
-    c.write(kDecode, jump, sizeof jump);
-    c.invalidate_code(kDecodeStub, sizeof s);
-    c.invalidate_code(kDecode, sizeof jump);
     rt::logf("sprite cache: decodes timed at %08x", kDecode);
     return true;
 }
@@ -505,9 +441,7 @@ uint32_t govern_sprite_cache(d2rt::Cpu &c, uint32_t pool_free, bool spare_taken,
 
 bool install_fatal_exit(d2rt::Cpu &c)
 {
-    uint8_t have[sizeof kExitOrig];
-    if (!c.read(kExit, have, sizeof have) || std::memcmp(have, kExitOrig, sizeof have) != 0 ||
-        !all_int3(c, kPadA, 15) || !all_int3(c, kPadB, 15))
+    if (!all_int3(c, kPadA, 15) || !all_int3(c, kPadB, 15))
         return false;
     // The native sees exit's own stack: the caller's return address, then the code.
     const uint32_t trap = rt::native_entry("FatalExit", 0, [](d2rt::Cpu &c) -> uint32_t {
@@ -516,21 +450,9 @@ bool install_fatal_exit(d2rt::Cpu &c)
         rt::request_exit(0xFFFFFFFFu);
         return 0;
     });
-    if (!trap)
+    // native_sites_table.h, fatal_exit.
+    if (!trap || !apply_sites(c, "fatal_exit", {{"FatalExit", trap}}))
         return false;
-    uint8_t a[13] = {0x6a, 0x00, 0x6a, 0x00, 0xff, 0x74, 0x24, 0x0c, 0xe9};
-    put_rel32(a + 9, kPadA + 13, kPadB);
-    uint8_t b[9] = {0xe8, 0, 0, 0, 0, 0x83, 0xc4, 0x0c, 0xc3};
-    put_rel32(b + 1, kPadB + 5, kDoExit);
-    uint8_t e[16] = {0x83, 0x7c, 0x24, 0x04, 0xff, 0x0f, 0x85, 0, 0, 0, 0, 0xe9};
-    put_rel32(e + 7, kExit + 11, kPadA);
-    put_rel32(e + 12, kExit + 16, trap);
-    c.write(kPadA, a, sizeof a);
-    c.write(kPadB, b, sizeof b);
-    c.write(kExit, e, sizeof e);
-    c.invalidate_code(kPadA, sizeof a);
-    c.invalidate_code(kPadB, sizeof b);
-    c.invalidate_code(kExit, sizeof e);
     rt::logf("fatal exit: exit(-1) at %08x ends the run", kExit);
     return true;
 }
@@ -542,13 +464,9 @@ uint32_t fatal_exit_caller()
 
 bool install_pool_release(d2rt::Cpu &c)
 {
-    uint8_t have[sizeof kPoolAllocOrig];
-    uint8_t slack[kReleaseSlackEnd - kReleaseStub];
-    static const uint8_t kZero[sizeof slack] = {};
-    if (!c.read(kPoolAlloc, have, sizeof have) || std::memcmp(have, kPoolAllocOrig, sizeof have) != 0 ||
-        !c.read(kReleaseStub, slack, sizeof slack) || std::memcmp(slack, kZero, sizeof slack) != 0)
-        return false;
     g_release_flag = (uint8_t *)c.hostptr(kReleaseFlag, 1);
+    if (!g_release_flag || *g_release_flag)
+        return false;
     // The next block to free: its memory in eax (0: none left), its header in
     // edx. The first call after a request takes the empty blocks out.
     const uint32_t next = rt::native_entry("PoolReleaseNext", 0, [](d2rt::Cpu &c) -> uint32_t {
@@ -565,65 +483,33 @@ bool install_pool_release(d2rt::Cpu &c)
         c.set_reg(d2rt::R_EDX, b.second);
         return b.first;
     });
-    if (!next || !g_release_flag)
+    // The stub in front of 0x40a080 (native_sites_table.h, pool_release):
+    // while the flag is set, VirtualFree and free each block `next` hands it.
+    if (!next || !apply_sites(c, "pool_release", {{"PoolReleaseNext", next}})) {
+        g_release_flag = nullptr;
         return false;
-    // S+0  cmp byte [flag], 0; je S+45
-    // S+9  pushad
-    // S+10 call next; test eax, eax; je S+44
-    // S+19 push edx; push 0x8000; push 0; push eax; call [VirtualFree]
-    // S+34 call free; add esp, 4; jmp S+10
-    // S+44 popad
-    // S+45 push ebp; mov ebp, esp; push ebx; mov ebx, ecx; jmp 0x40a086
-    uint8_t s[kReleaseStubSize] = {0x80, 0x3d};
-    std::memcpy(s + 2, &kReleaseFlag, 4);
-    s[6] = 0x00, s[7] = 0x74, s[8] = 45 - 9;
-    s[9] = 0x60;
-    s[10] = 0xe8;
-    put_rel32(s + 11, kReleaseStub + 15, next);
-    s[15] = 0x85, s[16] = 0xc0, s[17] = 0x74, s[18] = 44 - 19;
-    s[19] = 0x52;
-    s[20] = 0x68, s[21] = 0x00, s[22] = 0x80, s[23] = 0x00, s[24] = 0x00;
-    s[25] = 0x6a, s[26] = 0x00;
-    s[27] = 0x50;
-    s[28] = 0xff, s[29] = 0x15;
-    std::memcpy(s + 30, &kVirtualFreeIat, 4);
-    s[34] = 0xe8;
-    put_rel32(s + 35, kReleaseStub + 39, kFree);
-    s[39] = 0x83, s[40] = 0xc4, s[41] = 0x04;
-    s[42] = 0xeb, s[43] = (uint8_t)(10 - 44);
-    s[44] = 0x61;
-    std::memcpy(s + 45, kPoolAllocOrig, sizeof kPoolAllocOrig);
-    s[51] = 0xe9;
-    put_rel32(s + 52, kReleaseStub + 56, kPoolAlloc + sizeof kPoolAllocOrig);
-    uint8_t jump[sizeof kPoolAllocOrig] = {0xe9, 0, 0, 0, 0, 0x90};
-    put_rel32(jump + 1, kPoolAlloc + 5, kReleaseStub);
-    c.write(kReleaseStub, s, sizeof s);
-    c.write(kPoolAlloc, jump, sizeof jump);
-    c.invalidate_code(kReleaseStub, sizeof s);
-    c.invalidate_code(kPoolAlloc, sizeof jump);
+    }
     rt::logf("pool release: stub at %08x in front of %08x", kReleaseStub, kPoolAlloc);
     return true;
 }
 
 bool set_pool_block_size(d2rt::Cpu &c, uint32_t bytes)
 {
-    uint8_t have[sizeof kBlockSizeOrig];
-    uint8_t slack[kBlockSizeStubEnd - kBlockSizeStub];
-    static const uint8_t kZero[sizeof slack] = {};
-    if (!c.read(kBlockSizeInsn, have, sizeof have) || std::memcmp(have, kBlockSizeOrig, sizeof have) != 0 ||
-        !c.read(kBlockSizeStub, slack, sizeof slack) || std::memcmp(slack, kZero, sizeof slack) != 0)
-        return false;
-    // mov eax, bytes; cmp esi, eax; jle +2; mov eax, esi; jmp 0x409fad:
-    // a block of `bytes`, or of one unit where a unit is larger.
-    uint8_t s[16] = {0xb8, 0, 0, 0, 0, 0x3b, 0xf0, 0x7e, 0x02, 0x8b, 0xc6, 0xe9};
-    std::memcpy(s + 1, &bytes, 4);
-    put_rel32(s + 12, kBlockSizeStub + 16, kBlockSizeNext);
-    uint8_t jump[sizeof kBlockSizeOrig] = {0xe9};
-    put_rel32(jump + 1, kBlockSizeInsn + 5, kBlockSizeStub);
-    c.write(kBlockSizeStub, s, sizeof s);
-    c.write(kBlockSizeInsn, jump, sizeof jump);
-    c.invalidate_code(kBlockSizeStub, sizeof s);
-    c.invalidate_code(kBlockSizeInsn, sizeof jump);
+    // 0x409fa8 reads the size from the data dword (native_sites_table.h,
+    // pool_block_size): a block of `bytes`, or of one unit where a unit is
+    // larger.
+    static bool applied = false;
+    if (!applied) {
+        if (c.read_u32(kBlockSize) != 0)
+            return false;
+        c.write_u32(kBlockSize, bytes);
+        if (!apply_sites(c, "pool_block_size", {})) {
+            c.write_u32(kBlockSize, 0);
+            return false;
+        }
+        applied = true;
+    } else
+        c.write_u32(kBlockSize, bytes);
     rt::logf("pool blocks: %u KiB (the game's own: 512 KiB)", bytes >> 10);
     return true;
 }
@@ -737,63 +623,19 @@ bool install_sprite_frames(d2rt::Cpu &c)
                                   mark_granules(va, bytes, 0);
                                   rt::va_free(va);
                               }});
-    uint8_t s[kFramesSlackEnd - kFreeStub] = {};
-    uint32_t at = 0;
-    auto put = [&](std::initializer_list<uint8_t> b) {
-        for (uint8_t x : b)
-            s[at++] = x;
-    };
-    auto put32 = [&](uint32_t v) {
-        std::memcpy(s + at, &v, 4);
-        at += 4;
-    };
-    auto rel = [&](uint8_t op, uint32_t target) {
-        s[at] = op;
-        put_rel32(s + at + 1, kFreeStub + at + 5, target);
-        at += 5;
-    };
-    // kFreeStub:
-    //   +0  mov eax, [edx]; sub eax, base; cmp eax, len; jae +44
-    //   +14 shr eax, 16; cmp byte [eax+map], 0; je +44
-    //   +26 push ecx; push edx; push dword [edx]; call free; pop edx; pop ecx
-    //   +37 test eax, eax; je +44; ret 8
-    //   +44 push ebp; mov ebp, esp; push ecx; push ebx; jmp 0x409ab5
-    put({0x8b, 0x02, 0x2d}), put32(g_map_base), put({0x3d}), put32(map_len), put({0x73, 44 - 14});
-    put({0xc1, 0xe8, 0x10, 0x80, 0xb8}), put32(kFramesMap), put({0x00, 0x74, 44 - 26});
-    put({0x51, 0x52, 0xff, 0x32}), rel(0xe8, free), put({0x5a, 0x59});
-    put({0x85, 0xc0, 0x74, 44 - 41, 0xc2, 0x08, 0x00});
-    put({0x55, 0x8b, 0xec, 0x51, 0x53}), rel(0xe9, kPoolFreeNext);
-    // kDestroyStub: push ecx; push edx; push dword [esp+0xc]; call destroy;
-    // pop edx; pop ecx; the 6 bytes; jmp 0x409c86
-    at = kDestroyStub - kFreeStub;
-    put({0x51, 0x52, 0xff, 0x74, 0x24, 0x0c}), rel(0xe8, destroy), put({0x5a, 0x59});
-    put({0x55, 0x8b, 0xec, 0x83, 0xec, 0x08}), rel(0xe9, kPoolDestroyNext);
-    // kCountFramesStub: push dword [esi+0x18]; push dword [esi+0x14];
-    // call held; push 0; push eax; jmp 0x5ff733 (ecx and edx are loaded
-    // again there).
-    at = kCountFramesStub - kFreeStub;
-    put({0xff, 0x76, 0x18, 0xff, 0x76, 0x14}), rel(0xe8, held), put({0x6a, 0x00, 0x50}), rel(0xe9, kCountFramesNext);
-    // kCountFileStub: push eax; mov eax, [ebp+8]; test byte [eax], 2; pop eax;
-    // je +12; xor eax, eax; push eax; call 0x5ff630; jmp 0x600033
-    at = kCountFileStub - kFreeStub;
-    put({0x50, 0x8b, 0x45, 0x08, 0xf6, 0x00, 0x02, 0x58, 0x74, 0x02, 0x33, 0xc0, 0x50});
-    rel(0xe8, kCacheCount), rel(0xe9, kCountFileNext);
-    c.write(kFreeStub, s, kFramesMap - kFreeStub);
-    c.invalidate_code(kFreeStub, kFramesMap - kFreeStub);
-    auto jump = [&](uint32_t va, uint32_t n, uint32_t stub) {
-        uint8_t j[8] = {0xe9, 0, 0, 0, 0, 0x90, 0x90, 0x90};
-        put_rel32(j + 1, va + 5, stub);
-        c.write(va, j, n);
-        c.invalidate_code(va, n);
-    };
-    uint8_t call[5] = {0xe8};
-    put_rel32(call + 1, kFramesCall + 5, alloc);
-    c.write(kFramesCall, call, sizeof call);
-    c.invalidate_code(kFramesCall, sizeof call);
-    jump(kPoolFree, sizeof kPoolFreeOrig, kFreeStub);
-    jump(kPoolDestroy, sizeof kPoolDestroyOrig, kDestroyStub);
-    jump(kCountFrames, sizeof kCountFramesOrig, kCountFramesStub);
-    jump(kCountFile, sizeof kCountFileOrig, kCountFileStub);
+    // The stubs and their entries: native_sites_table.h, sprite_frames. The
+    // free stub reads the granules' base and length from data.
+    c.write_u32(kFramesBase, g_map_base);
+    c.write_u32(kFramesLen, map_len);
+    if (!apply_sites(c, "sprite_frames",
+                     {{"SpriteFramesAlloc", alloc}, {"SpriteFramesFree", free}, {"SpriteFramesPoolGone", destroy},
+                      {"SpriteFramesHeld", held}})) {
+        c.write_u32(kFramesBase, 0);
+        c.write_u32(kFramesLen, 0);
+        delete g_frames;
+        g_frames = nullptr;
+        return false;
+    }
     rt::logf("sprite frames: their own blocks, from %08x; the cache counts what they hold", kFramesCall);
     return true;
 }

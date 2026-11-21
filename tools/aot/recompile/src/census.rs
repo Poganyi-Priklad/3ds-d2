@@ -179,7 +179,7 @@ fn hot_block(line: &str) -> Option<(u32, i64)> {
 }
 
 /// d2d's list: start -> size, and names, in its order.
-fn load_list(tsv: &str, names: Option<&mut HashMap<u32, String>>) -> OMap<u32, i64> {
+pub fn load_list(tsv: &str, names: Option<&mut HashMap<u32, String>>) -> OMap<u32, i64> {
     let mut sizes = OMap::new();
     let mut nm = HashMap::new();
     let text = std::fs::read_to_string(tsv).unwrap_or_else(|e| panic!("{}: {}", tsv, e));

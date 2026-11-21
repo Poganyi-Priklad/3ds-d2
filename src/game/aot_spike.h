@@ -59,10 +59,32 @@ std::vector<std::string> aot_lines();
 // at its hook (resume_original). 0 when there's none, or compiled code is off.
 uint32_t aot_trap_for(uint32_t va);
 
+// A native's hand-back at va (resume_original, issue #138), with the
+// registers in c and esp there: run in C when the recompiler compiled an
+// entry there (Sig only), then on at the function's return, or at an exit's
+// target. c's registers are then as the bridge wants them for
+// redirect_next's target, its pop of the return address and `stack_args`
+// dwords included. False when there's no such entry: Box86 runs it.
+bool aot_resume(d2rt::Cpu &c, uint32_t va, uint32_t esp, uint32_t stack_args);
+// Whether aot_resume would run va's entry.
+bool aot_resumable(uint32_t va);
+
+// Whether compiled code runs the function at va (Sig or Check, the lane's
+// D2_AOT included before the natives are in): a native that only speeds up
+// Box86 there can leave it be (issue #138: _ftol2's).
+bool aot_compiled(uint32_t va);
+
 // A native that does what the game's function at va does, its registers
 // included (the check lane with it: 0 differ): compiled code calls the
 // function's compiled original, not the native.
 void set_aot_equivalent(uint32_t va);
+
+// A native patched in line at va (n bytes, `orig` the game's) that does what
+// the code it replaced does, only faster under Box86 (issue #138: the
+// natives' loop steps): the function holding it counts as unchanged, so it
+// stays compiled and hooked, and its C runs the original loop. The check
+// lane compares the two.
+void set_aot_inline_equivalent(uint32_t va, const uint8_t *orig, uint32_t n);
 
 // The same for a native that can call it outright (Sig): the compiled
 // function run in C with regs (the eight general registers, esp at the

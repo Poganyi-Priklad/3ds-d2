@@ -244,7 +244,11 @@ test)
             all=("${runs[@]}"); runs=()
             for r in "${all[@]}"; do [[ " $AOT_RUNS " == *" ${r% *} "* ]] && runs+=("$r"); done
         fi
-        out=build/m4-aot
+        # AOT_OUT=<dir under build/>: this run's folders and logs there (build/m4-aot); AOT_BIN=<dir>: the
+        # binary another run built there, not built again (a check and a timed run side by side:
+        # the second with AOT_OUT of its own, AOT_BIN the first's and D2_AOT_BUILD=keep).
+        out="${AOT_OUT:-build/m4-aot}"
+        bin="${AOT_BIN:-$out}"
         save="${3:-}"
         mkdir -p "$ROOT/$out"
         # One build for every script (AOT_JOBS, 2: two of the generated C's objects side by side; the C is
@@ -254,7 +258,7 @@ test)
         # time); a timed run (AOT_MODE) one at a time unless AOT_PARALLEL=1, so the runs don't share
         # the host's cores. Each run is cut after AOT_TIMEOUT seconds (3600: side by side, Act II's
         # took over 1800 with another lane on the host).
-        if ! run_in "$HOSTTEST_IMAGE" make -j"${AOT_JOBS:-2}" -C tests/m4 host OUT="/work/$out" "${AOT_MAKE[@]}" \
+        if [ -z "${AOT_BIN:-}" ] && ! run_in "$HOSTTEST_IMAGE" make -j"${AOT_JOBS:-2}" -C tests/m4 host OUT="/work/$out" "${AOT_MAKE[@]}" \
                 ${AOT_SPLIT:+AOT_SPLIT=1} > "$ROOT/$out/make.txt" 2>&1 < /dev/null; then
             echo "RESULT aot.build FAIL (see $out/make.txt)"
             grep -a "error" "$ROOT/$out/make.txt" | head -10 || true
@@ -269,7 +273,7 @@ test)
             local RUN_EXTRA=(-v "$game_mount:/game:ro" -e "D2_AOT=${AOT_MODE:-5}" -e "D2_AOT_FNS=${D2_AOT_FNS:-}" -e M4_VIRTUAL_CLOCK=1 -e WX86_FAKETSC=1
                        -e "M4_SCRIPT=$(cat "$ROOT/tests/m4/scripts/$name.txt")")
             for v in ${AOT_ENV:-}; do RUN_EXTRA+=(-e "$v"); done   # AOT_ENV="M4_ASYNCIO=1 D2_DCC=2": the console's ways
-            run_in "$HOSTTEST_IMAGE" make -C tests/m4 run-built MS="$ms" OUT="/work/$dir" BIN_OUT="/work/$out" TIMEOUT="${AOT_TIMEOUT:-3600}" \
+            run_in "$HOSTTEST_IMAGE" make -C tests/m4 run-built MS="$ms" OUT="/work/$dir" BIN_OUT="/work/$bin" TIMEOUT="${AOT_TIMEOUT:-3600}" \
                 "${AOT_MAKE[@]}" ${AOT_SPLIT:+AOT_SPLIT=1} > "$ROOT/$out/$name-make.txt" 2>&1 < /dev/null || true
             cp "$ROOT/$dir/err.txt" "$ROOT/$out/$name.txt" 2>/dev/null || : > "$ROOT/$out/$name.txt"
         }
@@ -333,6 +337,18 @@ test)
         aot_recompiler_build
         # shellcheck disable=SC2046
         run_in "$HOSTTEST_IMAGE" "$AOT_RECOMPILER" /aot/Game.exe --explain "$3" $(aot_args) ;;
+    aot-left)  # <game-dir> (issue #138): what Box86 still ran in the last test aot, run as AOT_MODE=1 AOT_ENV="WX86_HOTPROF=1
+               # D2_NOLINK=1 M4_HOTPROF_TOP=20000": its block counter folded into functions, each classed by the
+               # build's aot_spike.json (hooked, not hookable, refused, not on d2d's list), against the Box86
+               # lane's profile of the same scripts (build/m4-prof/*.err) where there is one.
+        [ -n "${2:-}" ] && [ -f "$2/Game.exe" ] || die "test aot-left <game-dir>"
+        RUN_EXTRA=(-v "$(host_path "$(cd "$2" && pwd)/Game.exe"):/aot/Game.exe:ro")
+        logs=(); base=()
+        for f in "$ROOT"/build/m4-aot/{town-walk,fight,act2-east}.txt; do [ -f "$f" ] && logs+=("build/m4-aot/$(basename "$f")"); done
+        for f in "$ROOT"/build/m4-prof/*.err; do [ -f "$f" ] && base+=("build/m4-prof/$(basename "$f")"); done
+        [ "${#logs[@]}" -gt 0 ] || die "no build/m4-aot/<script>.txt: run test aot first"
+        run_in "$HOSTTEST_IMAGE" python3 -I tools/aot/box86_left.py /aot/Game.exe build/aot/spike/aot_spike.json "${logs[@]}" \
+            ${base[@]+--baseline "${base[@]}"} ;;
     aot-compare)  # <game-dir> <a> <b> [census] (issue #144): two recompilers on the same Game.exe, what they write
                   # compared (the C byte for byte, the reports but for their timings). Each of a and b is rs (this
                   # tree's tools/aot/recompile), rs@<rev> (that commit's) or py@<rev> (a commit's recompile.py,
@@ -374,7 +390,7 @@ test)
             esac || exit 1
         done
         run_in "$HOSTTEST_IMAGE" python3 -I tools/aot/compare.py "build/aot/cmp/${sides[0]}" "build/aot/cmp/${sides[1]}" ;;
-    *)    die "test host | test x86 [golden] | test cpu [armv7|armv6] | test m3 | test report | test governor | test gameexe | test frames | test pad | test pool | test d2d [<game-dir>] | test tls | test m4 <game-dir> | test aot <game-dir> [<save-dir>] | test aot-explain <game-dir> <va,...> | test aot-census <game-dir> | test aot-compare <game-dir> <a> <b> [census]" ;;
+    *)    die "test host | test x86 [golden] | test cpu [armv7|armv6] | test m3 | test report | test governor | test gameexe | test frames | test pad | test pool | test d2d [<game-dir>] | test tls | test m4 <game-dir> | test aot <game-dir> [<save-dir>] | test aot-explain <game-dir> <va,...> | test aot-census <game-dir> | test aot-left <game-dir> | test aot-compare <game-dir> <a> <b> [census]" ;;
     esac
     ;;
 package)
@@ -438,7 +454,7 @@ package-cia)   # [<game-dir> | --slim|--full <game-dir>]: the game app (+ the us
     bid="$(build_id)"
     # The build ID covers the AOT step: the recompiler's and its arguments'
     # hash, never Game.exe's.
-    [ ${#AOT_MAKE[@]} -gt 0 ] && bid="$bid-aot$(cat "$ROOT"/tools/aot/recompile/Cargo.lock "$ROOT"/tools/aot/recompile/src/*.rs "$(aot_args_file)" | sha256sum | cut -c1-6)"
+    [ ${#AOT_MAKE[@]} -gt 0 ] && bid="$bid-aot$(cat "$ROOT"/tools/aot/recompile/Cargo.lock "$ROOT"/tools/aot/recompile/src/*.rs "$ROOT"/src/game/native_sites_table.h "$(aot_args_file)" | sha256sum | cut -c1-6)"
     report_vars=(BUILD_ID="$bid" D2_VERSION="$version" ${AOT_MAKE[@]+"${AOT_MAKE[@]}"})
     [ -n "${D2_REPORT_DSN+x}" ] && report_vars+=(D2_REPORT_DSN="$D2_REPORT_DSN")
     # The AOT parts first, AOT_JOBS at a time (2; issue #135: at -j8 cc1 ran out of Docker's 8 GB).

@@ -90,6 +90,15 @@ fn arith_op(reg: u8) -> Option<&'static str> {
     })
 }
 
+/// A resume entry's C name (issue #138).
+pub fn resume_name(x: u32) -> String {
+    format!("AOT_SYM(resume_{:08x})", x)
+}
+
+pub fn reent_name(va: u32) -> String {
+    format!("AOT_SYM(reent_{:08x})", va)
+}
+
 pub struct Emitter<'p, 'a> {
     p: &'p Program<'a>,
     pub mode: &'static str,
@@ -101,6 +110,11 @@ pub struct Emitter<'p, 'a> {
     df: HashMap<u32, Option<u8>>,
     pub ana: Option<Analysis<'p, 'a>>,
     trace_all: Option<u32>,
+    /// A resume entry being written (issue #138): where a native hands the
+    /// call back, and the stack offset there from the entry's esp. Or, with
+    /// reent, the function's return sites (reent_<va>, entered at one).
+    resume: Option<Vec<(u32, i64)>>,
+    reent: bool,
 }
 
 impl<'p, 'a> Emitter<'p, 'a> {
@@ -119,11 +133,45 @@ impl<'p, 'a> Emitter<'p, 'a> {
             df: HashMap::new(),
             ana: None,
             trace_all,
+            resume: None,
+            reent: false,
         }
     }
 
     pub fn name(&self, va: u32) -> String {
         format!("AOT_SYM({}_{:08x})", self.mode, va)
+    }
+
+    /// All eight registers in and out through AotRegs: ctx mode, or a
+    /// resume entry (whose calls stay sig mode's).
+    fn regs_ctx(&self) -> bool {
+        self.mode == "ctx" || self.resume.is_some()
+    }
+
+    /// resume_<x> (issue #138): `va`'s code entered at x, where a native that
+    /// did the function's first instructions hands the call back
+    /// (resume_original), with all eight registers as there; its ret returns
+    /// them as ctx mode's does (esp after the ret). Sig mode only; the
+    /// analysis must be one without skipped saves (the native stored them).
+    pub fn resume_fn(&mut self, va: u32, x: u32, sp: i64) -> R<String> {
+        self.resume = Some(vec![(x, sp)]);
+        let r = self.function(va);
+        self.resume = None;
+        r
+    }
+
+    /// reent_<va> (issue #138): `va`'s code entered at one of its return
+    /// sites (`at`, each with its stack offset from the entry's esp), with all
+    /// eight registers as there, as resume_fn's is: where a thread that
+    /// stopped in compiled code (a shim's yield, the C frames above dropped)
+    /// goes on when the scheduler runs it again.
+    pub fn reent_fn(&mut self, va: u32, sites: &[(u32, i64)]) -> R<String> {
+        self.resume = Some(sites.to_vec());
+        self.reent = true;
+        let r = self.function(va);
+        self.resume = None;
+        self.reent = false;
+        r
     }
 
     fn f(&self) -> &Func {
@@ -255,10 +303,14 @@ impl<'p, 'a> Emitter<'p, 'a> {
         self.sig = Some(sig.clone());
         self.df = direction(&f);
         let mut out: Vec<String> = Vec::new();
-        out.push(self.proto(va) + "\n{");
+        out.push(match &self.resume {
+            Some(_) if self.reent => format!("AOT_FN void {}(AotRegs *R, uint32_t at)\n{{", reent_name(va)),
+            Some(v) => format!("AOT_FN void {}(AotRegs *R)\n{{", resume_name(v[0].0)),
+            None => self.proto(va) + "\n{",
+        });
         let mut decl: Vec<String> = Vec::new();
         for r in 0..8u8 {
-            if self.mode == "ctx" {
+            if self.regs_ctx() {
                 decl.push(format!("uint32_t {} = R->r[{}];", REGS[r as usize], r));
             } else if r == ESP || sig.ins.contains(&r) {
                 continue;
@@ -270,17 +322,33 @@ impl<'p, 'a> Emitter<'p, 'a> {
             "uint32_t F_A = 0, F_B = 0, F_R = 0, F_C = 0; int F_K = 0; (void)F_A; (void)F_B; (void)F_R; (void)F_C; (void)F_K;"
                 .to_string(),
         );
-        decl.push("uint8_t *const M = aot_mem; const uint32_t esp0 = esp, ra0 = LD32(esp);".to_string());
-        if f.insns.values().any(|i| x87_op(i).is_some()) {
+        decl.push(match &self.resume {
+            Some(_) if self.reent => "uint8_t *const M = aot_mem; uint32_t esp0 = 0, ra0 = 0;".to_string(),
+            // The entry's esp, from the stack offset at x.
+            Some(v) => format!("uint8_t *const M = aot_mem; const uint32_t esp0 = esp + 0x{:x}u, ra0 = LD32(esp0);", (v[0].1 as i32).wrapping_neg() as u32),
+            None => "uint8_t *const M = aot_mem; const uint32_t esp0 = esp, ra0 = LD32(esp);".to_string(),
+        });
+        let fmath = f.calls.values().any(|t| t.direct().is_some_and(|d| matches!(self.p.intrinsics.get(&d), Some(&"fsin") | Some(&"fcos"))));
+        if fmath || f.insns.values().any(|i| x87_op(i).is_some()) {
             decl.push("AotFpu *const F = aot_fpu;".to_string());
         }
         out.push(format!("    {}", decl.join(" ")));
         out.push(format!("    AOT_TRACE(0x{:08x}u, eax, ecx, edx, ebx, esp, ebp, esi, edi);", va));
         out.push(format!("    {}", (0..8).map(|r| format!("(void){};", REGS[r])).collect::<Vec<_>>().join(" ")));
-        out.push(format!("    goto L_{:08x};", f.entry));
+        let starts: Vec<u32> = self.resume.as_ref().map_or(vec![f.entry], |v| v.iter().map(|e| e.0).collect());
+        if let (true, Some(v)) = (self.reent, &self.resume) {
+            // Each site's entry esp from its stack offset.
+            let cases: Vec<String> = v
+                .iter()
+                .map(|&(x, sp)| format!("case 0x{:08x}u: esp0 = esp + 0x{:x}u; ra0 = LD32(esp0); goto L_{:08x};", x, (sp as i32).wrapping_neg() as u32, x))
+                .collect();
+            out.push(format!("    switch (at) {{ {} }}\n    aot_unreachable(at); return;", cases.join(" ")));
+        } else {
+            out.push(format!("    goto L_{:08x};", starts[0]));
+        }
         for &a in &f.order {
             let i = f.insns[&a].clone();
-            if f.leaders.contains(&a) {
+            if f.leaders.contains(&a) || starts.contains(&a) {
                 out.push(format!("L_{:08x}:", a));
             }
             out.push(format!("    /* {:08x} {} {} */", a, i.mnemonic, i.op_str));
@@ -297,6 +365,33 @@ impl<'p, 'a> Emitter<'p, 'a> {
         }
         out.push("}".to_string());
         Ok(out.join("\n"))
+    }
+
+    /// sig_<va> for a function with a return sites' entry (issue #138): its
+    /// code is reent_<va>'s, entered at the entry, so it is there once.
+    pub fn sig_by_reent(&self, va: u32) -> String {
+        let sig = &self.sigs[&va];
+        let fill: Vec<String> =
+            (0..8u8).map(|r| if r == ESP || sig.ins.contains(&r) { REGS[r as usize].to_string() } else { "0u".to_string() }).collect();
+        let outs = &sig.outs;
+        let back = match outs.len() {
+            0 => "return;".to_string(),
+            1 => format!("return t.r[{}];", outs[0]),
+            2 => format!("return (uint64_t)t.r[{}] | (uint64_t)t.r[{}] << 32;", outs[0], outs[1]),
+            _ => {
+                let s: Vec<String> = outs.iter().enumerate().map(|(k, &r)| format!("o[{}] = t.r[{}];", k, r)).collect();
+                s.join(" ") + " return;"
+            }
+        };
+        format!(
+            "AOT_FN void {}(AotRegs *R, uint32_t at);\n{}\n{{\n    AotRegs t = {{{{{}}}}};\n    {}(&t, 0x{:08x}u);\n    {}\n}}",
+            reent_name(va),
+            self.proto(va),
+            fill.join(", "),
+            reent_name(va),
+            va,
+            back
+        )
     }
 
     pub fn proto(&self, va: u32) -> String {
@@ -337,7 +432,7 @@ impl<'p, 'a> Emitter<'p, 'a> {
 
     fn ret_stmt(&self, pops: i64) -> String {
         let chk = format!("if (esp != esp0 || LD32(esp) != ra0) aot_bad_ret(0x{:08x}u, esp0, esp); ", self.f().entry);
-        if self.mode == "ctx" {
+        if self.regs_ctx() {
             return format!("{}{} R->r[4] = esp + {}u; return;", chk, self.ctx_sets(), 4 + pops);
         }
         chk + &self.ret_outs()
@@ -620,6 +715,19 @@ impl<'p, 'a> Emitter<'p, 'a> {
         }
         if m == "cld" || m == "std" {
             return Ok(";".to_string());
+        }
+        // _ftol2's SSE2 path (issue #138): out of range, x86 gives 0x80000000.
+        if m == "cvttsd2si" && ops[0].is_reg() && ops[0].size == 4 {
+            let src = if ops[1].is_mem() {
+                format!("aot_ldf64(M, {})", self.addr(i, &ops[1])?)
+            } else {
+                return refused(format!("cvttsd2si from a register at {:08x}", va));
+            };
+            return Ok(format!(
+                "{{ double d = {}; {} }}",
+                src,
+                self.put(i, &ops[0], "(d > -2147483649.0 && d < 2147483648.0) ? (uint32_t)(int32_t)d : 0x80000000u")?
+            ));
         }
         if m == "wait" || x87_op(i).is_some() {
             return self.x87(i);
@@ -990,14 +1098,14 @@ impl<'p, 'a> Emitter<'p, 'a> {
         }
         let chk = format!("if (esp != esp0 || LD32(esp) != ra0) aot_bad_ret(0x{:08x}u, esp0, esp); ", f.entry);
         let inner = if p.compiled.contains(&td) {
-            format!("\n#ifdef AOT_SPLIT\n    {}\n#else\n    {}\n#endif\n    ", self.call_guest(td), self.call_compiled(td, false))
+            format!("\n#ifdef AOT_SPLIT\n    {}\n#else\n    {}\n#endif\n    ", self.call_guest(td), self.call_compiled(td, self.resume.is_some()))
         } else {
             self.call_guest(td)
         };
         if f.noreturn.contains(&va) {
             return Ok(format!("{}{} aot_unreachable(0x{:08x}u);", chk, inner, va));
         }
-        if self.mode == "ctx" {
+        if self.regs_ctx() {
             return Ok(format!("{}{} {} R->r[4] = esp; return;", chk, inner, self.ctx_sets()));
         }
         Ok(format!("{}{} {}", chk, inner, self.ret_outs()))
@@ -1017,7 +1125,7 @@ impl<'p, 'a> Emitter<'p, 'a> {
             self.exit("x"),
             co
         );
-        if self.mode == "ctx" {
+        if self.regs_ctx() {
             return Ok(format!("{}{} R->r[4] = esp; return;", s, self.ctx_sets()));
         }
         Ok(s + &self.ret_outs())
@@ -1089,6 +1197,10 @@ esp = f + 4u; }}",
             if name == "memcpy" {
                 return Ok(push
                     + "{ uint32_t d = LD32(esp + 4u); aot_memmove(d, LD32(esp + 8u), LD32(esp + 12u)); eax = d; esp += 4u; }");
+            }
+            if name == "fsin" || name == "fcos" {
+                // st0's sine or cosine, in st0; eax, ecx and edx are the callee's scratch.
+                return Ok(push + &format!("{{ aot_fset(F, 0, __builtin_{}(aot_fget(F, 0))); esp += 4u; }}", &name[1..]));
             }
             if name == "alloca_probe" {
                 return Ok(push

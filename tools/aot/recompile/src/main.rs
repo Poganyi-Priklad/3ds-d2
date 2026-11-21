@@ -5,6 +5,7 @@
 //!     recompile Game.exe --out build/aot/spike --root 67b850:PathSearch --compile 67aed0,...
 //!     recompile Game.exe --census --modes sig --out build/aot/census [--hot log ...]
 //!     recompile Game.exe --survey
+//!     recompile Game.exe --all --modes sig --out build/aot/spike   (every function on --functions' list)
 //!
 //! The output is Game.exe in another form: it goes under build/ and into
 //! the CIA (docs/aot.md's Distribution), never into the repository.
@@ -44,6 +45,7 @@ struct Args {
     no_callouts: bool,
     survey: bool,
     census: bool,
+    all: bool,
     hot: Vec<String>,
     explain: Option<String>,
     src_root: String,
@@ -52,7 +54,7 @@ struct Args {
 fn usage() -> ! {
     eprintln!(
         "usage: recompile EXE [--out DIR] [--root VA[:NAME]] [--compile VA,...] [--tree VA:DEPTH] [--functions TSV] \
-         [--modes sig,ctx] [--callees N] [--no-callouts] [--survey] [--census] [--hot LOG] [--explain VA,...] [--src-root DIR]"
+         [--modes sig,ctx] [--callees N] [--no-callouts] [--survey] [--census] [--all] [--hot LOG] [--explain VA,...] [--src-root DIR]"
     );
     std::process::exit(2);
 }
@@ -70,6 +72,7 @@ fn parse_args() -> Args {
         no_callouts: false,
         survey: false,
         census: false,
+        all: false,
         hot: Vec::new(),
         explain: None,
         src_root: ".".to_string(),
@@ -91,11 +94,12 @@ fn parse_args() -> Args {
             Some((n, v)) => (n.to_string(), Some(v.to_string())),
             None => (s.clone(), None),
         };
-        let flag = |n: &str| ["--no-callouts", "--survey", "--census"].contains(&n);
+        let flag = |n: &str| ["--no-callouts", "--survey", "--census", "--all"].contains(&n);
         if flag(&name) {
             match name.as_str() {
                 "--no-callouts" => a.no_callouts = true,
                 "--survey" => a.survey = true,
+                "--all" => a.all = true,
                 _ => a.census = true,
             }
             continue;
@@ -159,7 +163,15 @@ fn main() {
         eprintln!("recompile: {}", e);
         std::process::exit(1);
     });
-    let starts = driver::load_starts(&a.functions);
+    println!(
+        "aot: {} natives' sites compiled as changed ({} bytes){}",
+        img.sites.len(),
+        img.sites.iter().map(|s| s.2).sum::<usize>(),
+        if img.sites_skipped.is_empty() { String::new() } else { format!("; not: {}", img.sites_skipped.join(", ")) }
+    );
+    let mut starts = driver::load_starts(&a.functions);
+    let site_calls = img.site_call_targets();
+    starts.extend(site_calls.iter().copied());
     if a.census {
         census::census(&img, &starts, &a.functions, &a.out, &a.hot, &modes(&a.modes), callouts);
         return;
@@ -176,6 +188,69 @@ fn main() {
         names.extend(n);
     }
     let (mut extra, _) = parse_vas(&a.compile.join(","));
+    for &t in &site_calls {
+        if !extra.contains(&t) && !roots.contains(&t) {
+            extra.push(t);
+        }
+    }
+    if a.all {
+        // d2d's whole list, as the census compiles it (#138: the lane on all of it).
+        let mut l: Vec<u32> = census::load_list(&a.functions, None).keys().copied().collect();
+        l.sort();
+        let have: HashSet<u32> = extra.iter().chain(roots.iter()).copied().collect();
+        extra.extend(l.into_iter().filter(|v| !have.contains(v)));
+        // And the code pointers in their immediates (issue #138: callbacks the
+        // game stores, 501650 into [841da0], 463d80 into ebx, not on d2d's
+        // list): an address in .text on 16 bytes, after an int3 or nop pad,
+        // and in no listed function's code.
+        let prog = Program::new(&img, starts.clone(), natives(), callouts);
+        let mut have: HashSet<u32> = extra.iter().chain(roots.iter()).copied().collect();
+        let mut inside: HashSet<u32> = HashSet::new();
+        let mut found: BTreeSet<u32> = BTreeSet::new();
+        for &va in &extra {
+            let f = prog.func(va);
+            inside.extend(f.insns.keys().filter(|&&a| a != va).copied());
+            for i in f.insns.values() {
+                if i.mnemonic.starts_with("call") || i.mnemonic.starts_with('j') {
+                    continue;
+                }
+                for op in &i.ops {
+                    if let cs::OpKind::Imm(v) = op.kind {
+                        let t = v as u32;
+                        if t >= img.text_lo && t < img.text_hi && t % 16 == 0 && !have.contains(&t) {
+                            let pad = img.mem[(t - 1 - img.base) as usize];
+                            if pad == 0xcc || pad == 0x90 {
+                                found.insert(t);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        found.retain(|t| !inside.contains(t));
+        println!("aot: {} code pointers in the listed functions' immediates added", found.len());
+        for t in found {
+            have.insert(t);
+            extra.push(t);
+        }
+        // And those in the game's tables, by the same rule: a relocated dword
+        // in .rdata or .data (the renderer's table at 0x74c4a8 holds 6c8060,
+        // which a compiled caller reached only as an exit).
+        let mut found: BTreeSet<u32> = BTreeSet::new();
+        for &(_, t) in &img.data_pointers {
+            if t >= img.text_lo && t < img.text_hi && t % 16 == 0 && !have.contains(&t) && !inside.contains(&t) {
+                let pad = img.mem[(t - 1 - img.base) as usize];
+                if pad == 0xcc || pad == 0x90 {
+                    found.insert(t);
+                }
+            }
+        }
+        println!("aot: {} code pointers in the game's data added", found.len());
+        for t in found {
+            have.insert(t);
+            extra.push(t);
+        }
+    }
     let intr = intrinsics();
     let nat = natives();
     for t in &a.tree {

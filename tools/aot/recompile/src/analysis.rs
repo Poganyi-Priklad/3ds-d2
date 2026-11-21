@@ -114,7 +114,12 @@ impl<'p, 'a> Analysis<'p, 'a> {
                 if f.rets.contains_key(&va) {
                     self.ret_states.push((va, regs));
                 }
-                if f.tails.contains_key(&va) && (!f.exits.contains(&va) || f.callouts.contains_key(&va)) {
+                // A tail call to a function that never returns (__report_gsfailure's, from
+                // __security_check_cookie) says nothing of what this one keeps (issue #138).
+                if f.tails.contains_key(&va)
+                    && (!f.exits.contains(&va) || f.callouts.contains_key(&va))
+                    && !f.tails[&va].direct().is_some_and(|d| p.noreturn_funcs.contains(&d))
+                {
                     tail_states.push((va, regs));
                 }
                 let succ = &f.succ[&va];
@@ -330,6 +335,11 @@ impl<'p, 'a> Analysis<'p, 'a> {
             }
             let mm = matches!(intr, Some("memset") | Some("memcpy"));
             if mm || t.direct().is_some_and(|d| p.native_direct(d)) {
+                regs[ECX as usize] = Some(Val::Clob);
+                regs[EDX as usize] = Some(Val::Clob);
+            }
+            if matches!(intr, Some("fsin") | Some("fcos")) {
+                regs[EAX as usize] = Some(Val::Clob);
                 regs[ECX as usize] = Some(Val::Clob);
                 regs[EDX as usize] = Some(Val::Clob);
             }

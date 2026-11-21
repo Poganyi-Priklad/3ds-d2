@@ -81,6 +81,34 @@ typedef struct {
     /* 1: it has x87 code (issue #136), on the CPU's own x87 state. */
     uint8_t x87;
 } AotFunc;
+/* The natives' hand-backs compiled (issue #138; AOT_SYM(resumes)): `func`'s
+ * code entered at `va`, where a native that did its first instructions hands
+ * the call back (resume_original), with all eight registers as there; r[4]
+ * comes back past the function's ret. */
+typedef struct {
+    uint32_t va, func;
+    uint32_t sp;          /* esp at va less the entry's: the return address at esp - sp */
+    AotRootFn fn;
+} AotResume;
+/* The return sites' entries (issue #138; AOT_SYM(reents)): `func`'s code
+ * entered at `va` (fn(R, va), one entry per function for all its sites), with
+ * all eight registers as there; R->r[4] comes back past the function's ret. */
+/* The trampolines with a branch moved (issue #138; AOT_SYM(tramps)): a
+ * function whose first bytes (keep) have a call, jmp or jcc has its
+ * trampoline's code here, each rel32 at rel[] written as the absolute
+ * target. */
+typedef struct {
+    uint32_t va;
+    uint8_t len, nrel;
+    uint8_t rel[4];
+    uint8_t code[27];
+} AotTramp;
+typedef void (*AotReentFn)(AotRegs *R, uint32_t at);
+typedef struct {
+    uint32_t va, func;
+    uint32_t sp;          /* as AotResume's */
+    AotReentFn fn;
+} AotReent;
 #ifdef AOT_SPLIT
 #define AOT_LEAF(x) 0
 #define AOT_EXIT(own, tree) (own)
