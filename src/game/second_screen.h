@@ -166,9 +166,9 @@ public:
     // SETTINGS rows (aim_settings.h's aim_setting_*): the label, then "-",
     // the value and "+" to tap.
     static constexpr int kAimBtnW = 156, kAimSettingsBtnX = 2, kAimFaqBtnX = 162;
-    static constexpr int kAimRowY = kBarH + 5, kAimRowH = 14;
+    static constexpr int kAimRowY = kBarH + 5, kAimRowH = 13;   // 15 rows (aim_settings.h's kAimSettingRows)
     static constexpr int kAimMinusX = 150, kAimValueX = 198, kAimPlusX = 270, kAimButtonW = 48;
-    static_assert(kAimRowY + 14 * kAimRowH <= kMapBtnY, "the AIM settings run into the buttons under them");
+    static_assert(kAimRowY + 15 * kAimRowH <= kMapBtnY, "the AIM settings run into the buttons under them");
     // The FAQ's lines: 10 pixels each, as many as fit above the buttons.
     static constexpr int kAimFaqY = kBarH + 3, kAimFaqRowH = 10;
     static constexpr int kAimFaqRows = (kMapBtnY - kAimFaqY) / kAimFaqRowH;

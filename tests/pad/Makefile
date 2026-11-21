@@ -11,9 +11,10 @@ run: $(OUT)/pad-tests
 	$(QEMU) $(OUT)/pad-tests
 
 $(OUT)/pad-tests: pad_test.cpp $(ROOT)/src/game/pad_history.h $(ROOT)/src/game/controls.h $(ROOT)/src/game/controls.cpp \
-                  $(ROOT)/src/game/auto_target.h $(ROOT)/src/game/auto_target.cpp
+                  $(ROOT)/src/game/auto_target.h $(ROOT)/src/game/auto_target.cpp \
+                  $(ROOT)/src/game/menu_nav.h $(ROOT)/src/game/menu_nav.cpp
 	@mkdir -p $(OUT)
-	$(CXX) $(CXXFLAGS) -o $@ pad_test.cpp $(ROOT)/src/game/controls.cpp $(ROOT)/src/game/auto_target.cpp -static
+	$(CXX) $(CXXFLAGS) -o $@ pad_test.cpp $(ROOT)/src/game/controls.cpp $(ROOT)/src/game/auto_target.cpp $(ROOT)/src/game/menu_nav.cpp -static
 
 clean:
 	rm -rf $(OUT)

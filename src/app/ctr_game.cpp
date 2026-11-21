@@ -49,6 +49,7 @@
 #include "game/second_screen.h"
 #include "game/settings_file.h"
 #include "game/aim_settings.h"
+#include "game/d2_menus.h"
 #include "game/sprite_trace.h"
 #include "game/storm_reads.h"
 #include "runtime/ds_emul.h"
@@ -1465,6 +1466,7 @@ void present(const rt::Frame &f)
         g_controls.set_frame((int)f.width, (int)f.height);
         g_ss.set_frame((int)f.width, (int)f.height);
         game::automap_frame(f.pixels, f.width, f.height, f.stride);
+        game::menus_frame(f.pixels, f.palette, f.width, f.height, f.stride);
         game::set_automap_capture(g_ss.wants_automap(), g_ss.map_ms(), g_ss.map_scale());
     }
     const uint64_t t_automap = host_us();
@@ -1626,6 +1628,7 @@ void present(const rt::Frame &f)
 
 bool g_wait_release = false;         // after the keyboard closes: ignore buttons until all are up
 uint32_t g_last_focus = 0;           // the last focused edit box seen (auto-open on a new one)
+uint32_t g_osk_focus = 0;            // the edit box the keyboard opened for by itself (0: opened otherwise)
 
 // ---- settings: the bottom screen's tab and map size -------------------------------------
 
@@ -2152,9 +2155,18 @@ void apply_pad(game::Pad pad, uint64_t now, bool last)
             }
         }
     }
-    // A newly focused text field (the hero name box, a game name) opens the keyboard.
-    if (gs.edit_focus && gs.edit_focus != g_last_focus && !g_osk.is_open())
+    // A newly focused text field (the hero name box, a game name) opens the
+    // keyboard. It closes by itself once that field loses the focus (the
+    // screen left, another control clicked).
+    if (gs.edit_focus && gs.edit_focus != g_last_focus && !g_osk.is_open()) {
         g_osk.open();
+        g_osk_focus = gs.edit_focus;
+    } else if (g_osk.is_open() && g_osk_focus && gs.edit_focus != g_osk_focus) {
+        g_osk.close();
+        rt::logf("keyboard: closed, its text field lost the focus");
+    }
+    if (!g_osk.is_open())
+        g_osk_focus = 0;
     g_last_focus = gs.edit_focus;
 
     static uint32_t prev_held = 0;
@@ -2166,13 +2178,13 @@ void apply_pad(game::Pad pad, uint64_t now, bool last)
     g_osk.tick(now);
     if (g_osk.is_open()) {
         // The keyboard has the touch screen and its buttons; the game gets
-        // an idle pad, which also releases anything that was held.
+        // the rest: the sticks (cursor, menu navigation) and A.
         g_osk.buttons(pressed);
         if (touch_down)
             g_osk.tap(pad.touch_x, pad.touch_y - game::SecondScreen::kOskY);
         if (!g_osk.is_open())
             g_wait_release = true;   // the button that closed it must not reach the game
-        pad = game::Pad();
+        pad = g_osk.is_open() ? game::keyboard_pass_through(pad) : game::Pad();
     } else if (g_wait_release) {
         if (pad.held || pad.touching)
             pad = game::Pad();
@@ -2842,6 +2854,7 @@ int main()
     if (!g_aim_in_settings || !g_aim_newest_in_settings)
         save_settings();   // once: so settings.txt shows aim= and its numbers to edit
     g_controls.set_auto_target(g_aim_settings, &game::game_aim_world());
+    g_controls.set_menu_nav(&game::game_menu_world());
     g_ss.set_aim_settings(g_aim_settings);   // AIM > SETTINGS shows and changes them
     {
         char line[320];

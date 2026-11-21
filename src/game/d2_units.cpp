@@ -661,4 +661,10 @@ AimWorld &game_aim_world()
 
 void set_aim_clock(uint64_t (*clock_us)()) { g_aim_clock = clock_us ? clock_us : rt::now_us; }
 
+int player_class()
+{
+    const uint32_t player = rd32(kPlayerUnitVa);
+    return player ? (int)rd32(player + 0x04) : -1;
+}
+
 }  // namespace game

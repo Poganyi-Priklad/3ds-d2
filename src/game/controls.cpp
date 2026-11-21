@@ -4,13 +4,12 @@
 #include "runtime/rt_host.h"
 
 #include <cmath>
-#include <vector>
 
 namespace game {
 namespace {
 
 constexpr uint8_t VK_TAB = 0x09, VK_RETURN = 0x0D, VK_SHIFT = 0x10, VK_MENU = 0x12, VK_ESCAPE = 0x1B,
-                  VK_F1 = 0x70;
+                  VK_LEFT = 0x25, VK_UP = 0x26, VK_RIGHT = 0x27, VK_DOWN = 0x28, VK_F1 = 0x70;
 constexpr uint8_t kMouseLeft = 0xFE, kMouseRight = 0xFF;   // bindings that are mouse buttons, not keys
 constexpr uint8_t kAsNormal = 0xFD;                         // with_zr: the button's normal binding
 
@@ -21,6 +20,10 @@ constexpr int kTapHoldMs = 120;                               // how long a tap 
 constexpr float kTouchGain = 3.0f;                            // touchpad: frame pixels per touch pixel (800 wide)
 constexpr float kCstickSpeed = 18.0f;                         // pixels per poll at full tilt (800 wide)
 constexpr float kCircleCursorSpeed = 12.0f;                   // circle pad as a cursor (menus)
+constexpr float kMenuStepTilt = 0.5f;     // the game menu: a tilt this far out is one arrow key
+constexpr int kMenuKeyMs = 80;            // ...held this long (two game frames)
+constexpr int kMenuSnapMs = 300;          // the cursor follows the lit row once it moved, or after this long
+constexpr int kMenuClickWaitMs = 40;      // B: the cursor on "Previous" a frame before its button goes down
 // Let go of a walk: a click just ahead of the hero stops him there. The
 // numbers were measured on the lane (walks in every direction, with no
 // panel and with one on either side):
@@ -40,6 +43,7 @@ constexpr float kStopAheadPx = 20.0f;     // the click this far ahead of it, the
 constexpr int kStopWaitMs = 0;            // the cursor there first; the click on the next frame
 constexpr int kStopHoldMs = 0;            // ...held for one frame
 constexpr int kHoverKeepOutMs = 1000;     // a spot the game showed a unit at is kept off this long
+constexpr uint64_t kUiConfigure = 1ull << 0x0B;
 
 struct Binding {
     Button button;
@@ -185,24 +189,182 @@ void Controls::stick_cursor(int sx, int sy, float speed_800, float &acc_x, float
     }
 }
 
-void Controls::move_cursor(int x, int y)
+// ---- menu navigation (menu_nav.h) ----
+//
+// A slow tilt moves the cursor as before (stick_cursor); a flick, once read,
+// puts it a cell on from where it was when the stick left the centre, so
+// the bit the flick itself moved it doesn't count.
+void Controls::menu_flick(const Pad &pad)
 {
-    x = x < 0 ? 0 : x >= w_ ? w_ - 1 : x;
-    y = y < 0 ? 0 : y >= h_ ? h_ - 1 : y;
-    if (x == cx_ && y == cy_)
+    // Out of the game: D2Win's screens (in-game panels come in a later commit).
+    const bool open = menu_world_ && !in_game_;
+    if (!open) {
+        if (menu_was_open_)
+            menu_nav_.forget();
+        menu_was_open_ = flick_held_ = false;
         return;
-    cx_ = x;
-    cy_ = y;
-    rt::input_mouse_move(x, y);
+    }
+    menu_was_open_ = true;
+    if ((in_game_ && (ui_ & kUiConfigure)) || game_menu_on_) {
+        // The flicks' own state kept current (the stick's last centring).
+        menu_flicks_.update(pad.circle_x / kStickMax, -pad.circle_y / kStickMax, menu_now_ms_, aim_.settings());
+        if (game_menu_on_)
+            game_menu_flick(pad);
+        else
+            flick_held_ = false;   // Configure Controls: a free cursor
+        return;
+    }
+    game_menu_armed_ = true;
+    const float x = pad.circle_x / kStickMax, y = -pad.circle_y / kStickMax;   // screen y down
+    if (std::sqrt(x * x + y * y) < AimFlicks::kCentre) {
+        flick_from_x_ = cx_;
+        flick_from_y_ = cy_;
+        flick_held_ = false;
+    }
+    const AimFlicks::Flick flick = menu_flicks_.update(x, y, menu_now_ms_, aim_.settings());
+    if (!flick.happened)
+        return;
+    flick_held_ = std::sqrt(x * x + y * y) >= AimFlicks::kCentre;
+    const NavDirection dir = nav_direction(flick.dir_x, flick.dir_y);
+    menu_world_->windows(ui_, w_, h_, menu_windows_);
+    menu_scroll_ = NavScroll();
+    for (const NavWindow &win : menu_windows_)
+        if (win.scroll.present)
+            menu_scroll_ = win.scroll;
+    const MenuNav::Step step =
+        menu_nav_.step(menu_windows_, flick_from_x_, flick_from_y_, dir, holding_, w_, h_);
+    if (step.moved) {
+        rt::logf("menu: flick %s from %d,%d: %s, to %d,%d", nav_direction_name(dir), flick_from_x_, flick_from_y_,
+                 step.why, step.x, step.y);
+        move_cursor(step.x, step.y);
+        circle_acc_x_ = circle_acc_y_ = 0;
+    } else {
+        rt::logf("menu: flick %s from %d,%d: nowhere to go (%u windows)", nav_direction_name(dir), flick_from_x_,
+                 flick_from_y_, (unsigned)menu_windows_.size());
+        move_cursor(flick_from_x_, flick_from_y_);
+    }
+    flick_from_x_ = cx_;
+    flick_from_y_ = cy_;
 }
 
-void Controls::key(uint8_t vk, bool down)
+// A scroll button the cursor is on (a flick put it there; A clicks it, a
+// row a press) stops scrolling at the list's end: the cursor goes back to
+// the slot nearest in height (the list's first or last row), so A doesn't
+// click a button that does nothing. Read again each frame while the cursor
+// is on one, not while A is down.
+void Controls::scroll_button_check(uint32_t held)
 {
-    if (!vk || (keys_[vk] != 0) == down)
+    if (in_game_ || !menu_world_ || !menu_scroll_.present || (held & kA) || button_on_[0])
         return;
-    keys_[vk] = down;
-    rt::input_key(vk, down);
+    const bool on_up = menu_scroll_.up.contains(cx_, cy_), on_down = menu_scroll_.down.contains(cx_, cy_);
+    if (!on_up && !on_down)
+        return;
+    menu_world_->windows(ui_, w_, h_, menu_windows_);
+    NavScroll now;
+    for (const NavWindow &win : menu_windows_)
+        if (win.scroll.present)
+            now = win.scroll;
+    menu_scroll_ = now;
+    if (!now.present || (on_up ? now.up_on : now.down_on))
+        return;
+    int x = cx_, y = cy_;
+    const char *why = "";
+    NavScroll back = now;
+    back.up_on = back.down_on = true;   // scroll_step's left rule, whatever is active
+    if (!scroll_step(back, cx_, cy_, NavDirection::kLeft, x, y, why))
+        return;
+    rt::logf("menu: the scroll button at %d,%d scrolls no further: to the slot at %d,%d", cx_, cy_, x, y);
+    move_cursor(x, y);
+    flick_from_x_ = cx_;
+    flick_from_y_ = cy_;
 }
+
+// ---- the game menu (Escape) and its submenus ----
+//
+// The game moves its own lit row with the arrow keys (past titles and
+// disabled rows, round at the ends) and re-picks it from the cursor only
+// when the mouse moves. So a tilt up or down is Up or Down, and once the
+// game has moved the light the cursor goes onto that row, for A; left and
+// right are Left and Right on a choice or a slider. The stick doesn't move
+// the cursor here: a move in the same frame as the key would re-pick the
+// row under the cursor over the key's.
+void Controls::game_menu_flick(const Pad &pad)
+{
+    const int n = (int)game_menu_.rows.size();
+    const int lit = game_menu_.lit;
+    if (menu_snap_ && !menu_click_ && lit >= 0 && lit < n &&
+        (lit != menu_snap_from_ || menu_now_ms_ >= menu_snap_until_ms_)) {
+        const NavRect &r = game_menu_.rows[lit].rect;
+        move_cursor(r.centre_x(), r.centre_y());
+        menu_snap_ = false;
+    }
+    const float x = pad.circle_x / kStickMax, y = -pad.circle_y / kStickMax;   // screen y down
+    const float tilt = std::sqrt(x * x + y * y);
+    if (tilt < AimFlicks::kCentre) {
+        game_menu_armed_ = true;
+        flick_held_ = false;
+        return;
+    }
+    if (!game_menu_armed_ || tilt < kMenuStepTilt)
+        return;
+    game_menu_armed_ = false;
+    flick_held_ = true;
+    const NavDirection dir = nav_direction(x, y);
+    uint8_t vk = 0;
+    if (dir == NavDirection::kUp || dir == NavDirection::kDown) {
+        vk = dir == NavDirection::kUp ? VK_UP : VK_DOWN;
+        menu_snap_ = true;
+        menu_snap_from_ = lit;
+        menu_snap_until_ms_ = menu_now_ms_ + kMenuSnapMs;
+    } else if (lit >= 0 && lit < n &&
+               (game_menu_.rows[lit].kind == GameMenu::kChoice || game_menu_.rows[lit].kind == GameMenu::kSlider)) {
+        vk = dir == NavDirection::kLeft ? VK_LEFT : VK_RIGHT;
+    }
+    if (!vk) {
+        rt::logf("menu: game menu, %s on row %d: nothing to change", nav_direction_name(dir), lit);
+        return;
+    }
+    if (menu_key_)
+        key(menu_key_, false);
+    key(vk, true);
+    menu_key_ = vk;
+    menu_key_up_ms_ = menu_now_ms_ + kMenuKeyMs;
+    rt::logf("menu: game menu, %s from row %d of %d", nav_direction_name(dir), lit, n);
+}
+
+// B in a submenu: a click on its "Previous" row, the cursor there a frame
+// before the button goes down (the game clicks what it showed under the
+// cursor in the frame before).
+void Controls::game_menu_click(int row, uint64_t now_ms)
+{
+    if (row < 0 || row >= (int)game_menu_.rows.size())
+        return;
+    const NavRect &r = game_menu_.rows[row].rect;
+    move_cursor(r.centre_x(), r.centre_y());
+    menu_click_ = 1;
+    menu_click_ms_ = now_ms + kMenuClickWaitMs;
+    menu_click_pump_ = pump_;
+    menu_snap_ = false;
+    rt::logf("menu: game menu, B: row %d (Previous) at %d,%d", row, cx_, cy_);
+}
+
+bool Controls::game_menu_buttons(uint64_t now_ms)
+{
+    if (menu_click_ == 1) {
+        if (now_ms < menu_click_ms_ || (pumps_ && pump_ == menu_click_pump_))
+            return false;
+        menu_click_ = 2;
+        menu_click_ms_ = now_ms + kTapHoldMs;
+        return true;
+    }
+    if (menu_click_ == 2) {
+        if (now_ms < menu_click_ms_)
+            return true;
+        menu_click_ = 0;
+    }
+    return false;
+}
+
 
 // ---- walking: the point keeps off units ----
 //
@@ -215,13 +377,13 @@ void Controls::key(uint8_t vk, bool down)
 namespace {
 
 // Where a unit takes clicks, round its feet on the screen (game pixels).
-WalkBox unit_box(const AimUnit &u)
+NavRect unit_box(const AimUnit &u)
 {
     switch (u.type) {
-    case 2: return WalkBox{u.feet_x - 36, u.feet_y - 80, u.feet_x + 36, u.feet_y + 20};   // an object
-    case 4: return WalkBox{u.feet_x - 22, u.feet_y - 18, u.feet_x + 22, u.feet_y + 12};   // an item
-    case 5: return WalkBox{u.feet_x - 38, u.feet_y - 128, u.feet_x + 98, u.feet_y + 54};  // a warp (warp_box)
-    default: return WalkBox{u.feet_x - 28, u.feet_y - 95, u.feet_x + 28, u.feet_y + 12};  // a monster, an NPC
+    case 2: return NavRect{u.feet_x - 36, u.feet_y - 80, u.feet_x + 36, u.feet_y + 20};   // an object
+    case 4: return NavRect{u.feet_x - 22, u.feet_y - 18, u.feet_x + 22, u.feet_y + 12};   // an item
+    case 5: return NavRect{u.feet_x - 38, u.feet_y - 128, u.feet_x + 98, u.feet_y + 54};  // a warp (warp_box)
+    default: return NavRect{u.feet_x - 28, u.feet_y - 95, u.feet_x + 28, u.feet_y + 12};  // a monster, an NPC
     }
 }
 
@@ -230,12 +392,12 @@ WalkBox unit_box(const AimUnit &u)
 // pixels round it and 24 more below, where a hover scan on the lane still
 // found it (the Act I cave exit: its rectangle says 30 below the spot, the
 // game showed it to about 50). Unknown, a box like that cave exit's (unit_box).
-WalkBox warp_box(const AimUnit &u, AimWorld *world)
+NavRect warp_box(const AimUnit &u, AimWorld *world)
 {
     int left = 0, top = 0, width = 0, height = 0;
     if (!world || !world->warp_area(u.cls, left, top, width, height) || width <= 0 || height <= 0)
         return unit_box(u);
-    return WalkBox{u.feet_x + left - 8, u.feet_y + top - 8, u.feet_x + left + width + 8, u.feet_y + top + height + 24};
+    return NavRect{u.feet_x + left - 8, u.feet_y + top - 8, u.feet_x + left + width + 8, u.feet_y + top + height + 24};
 }
 
 // A monster's modes: 0 dying, 12 dead (a corpse takes no plain click).
@@ -285,7 +447,7 @@ bool Controls::walk_blocked(int x, int y) const
         if (k.box.contains(x, y) &&
             (!k.warp_round_hero || d2(x, y, k.spot_x, k.spot_y) < d2(walk_hero_x_, walk_hero_y_, k.spot_x, k.spot_y)))
             return true;
-    return walk_now_ms_ < walk_hover_until_ms_ && walk_hover_box_.contains(x, y);
+    return menu_now_ms_ < walk_hover_until_ms_ && walk_hover_box_.contains(x, y);
 }
 
 // Where the game draws the hero across: the auto-target's view (his feet,
@@ -305,7 +467,6 @@ int Controls::hero_screen_x(const AimView *v) const
 
 void Controls::walk(float vx, float vy, float m, bool aiming, uint64_t now_ms)
 {
-    walk_now_ms_ = now_ms;
     if (!walking_ && m > kWalkEngage) {
         walking_ = true;
         walk_press_pending_ = true;
@@ -395,7 +556,7 @@ void Controls::walk(float vx, float vy, float m, bool aiming, uint64_t now_ms)
             walk_hover_releases_++;
         walk_left_ = false;
         walk_press_pending_ = true;
-        walk_hover_box_ = WalkBox{cx_ - 30, cy_ - 30, cx_ + 30, cy_ + 30};
+        walk_hover_box_ = NavRect{cx_ - 30, cy_ - 30, cx_ + 30, cy_ + 30};
         walk_hover_until_ms_ = now_ms + kHoverKeepOutMs;
     }
     walk_read_units(seen ? v.hero_x : ox, seen ? v.hero_y : oy);
@@ -432,12 +593,37 @@ void Controls::walk(float vx, float vy, float m, bool aiming, uint64_t now_ms)
     walk_press_pending_ = true;
 }
 
+void Controls::move_cursor(int x, int y)
+{
+    x = x < 0 ? 0 : x >= w_ ? w_ - 1 : x;
+    y = y < 0 ? 0 : y >= h_ ? h_ - 1 : y;
+    if (x == cx_ && y == cy_)
+        return;
+    cx_ = x;
+    cy_ = y;
+    rt::input_mouse_move(x, y);
+}
+
+void Controls::key(uint8_t vk, bool down)
+{
+    if (!vk || (keys_[vk] != 0) == down)
+        return;
+    keys_[vk] = down;
+    rt::input_key(vk, down);
+}
 
 void Controls::update(const Pad &pad, uint64_t now_ms)
 {
     const uint32_t held = pad.held, pressed = held & ~prev_, released = prev_ & ~held;
     const bool r_layer = (held & kR) != 0;
     const bool zr_layer = (held & kZR) != 0;
+
+    // Menu navigation's clock (the walk's keep-off uses it too).
+    menu_now_ms_ = now_ms;
+    if (menu_key_ && now_ms >= menu_key_up_ms_) {
+        key(menu_key_, false);
+        menu_key_ = 0;
+    }
 
     // ---- Select / Start: zoom, keyboard, Escape, Enter ----
     if (pressed & kSelect) {
@@ -484,6 +670,13 @@ void Controls::update(const Pad &pad, uint64_t now_ms)
             bound_[i] = 0;   // ZR + D-pad: a loot command for the auto-target (below)
             loot_button_ = b.button;
             loot_pressed_ = true;
+        } else if ((pressed & b.button) && b.button == kB && !r_layer && !zr_layer && menu_world_ && !in_game_) {
+            // Out of the game (character select, the class screen, a
+            // difficulty or a message box): B is Escape, the screen's own
+            // Exit or Cancel, one screen back. Not on the main menu, whose
+            // Escape quits the game: there B does nothing.
+            bound_[i] = menu_world_->main_menu() ? 0 : VK_ESCAPE;
+            key(bound_[i], true);
         } else if (pressed & b.button) {
             bound_[i] = zr_layer ? (b.with_zr == kAsNormal ? b.normal : b.with_zr) : r_layer ? b.with_r : b.normal;
             if (bound_[i] != kMouseLeft && bound_[i] != kMouseRight)
@@ -623,19 +816,24 @@ void Controls::update(const Pad &pad, uint64_t now_ms)
         }
     }
 
-    // ---- circle pad: walk in the game world; elsewhere (menus, open
-    // panels) it moves the cursor like the C-stick ----
+    // ---- circle pad: walk in the game world; elsewhere (menus, the screens
+    // before the game) it moves the cursor like the C-stick, and a flick
+    // steps one cell.
     const bool walk_mode = in_game_ && !panel_open_;
     const float cvx = pad.circle_x / kStickMax, cvy = pad.circle_y / kStickMax;
     const float cm = std::sqrt(cvx * cvx + cvy * cvy);
-    if (!walk_mode) {
+    if (walk_mode) {
+        walk(cvx, cvy, cm, aim.aiming, now_ms);
+    } else {
         if (walking_ || walk_stop_) {   // the context changed under a held stick: stop walking
             walking_ = walk_press_pending_ = walk_left_ = false;
             walk_stop_ = 0;
         }
-        stick_cursor(pad.circle_x, pad.circle_y, kCircleCursorSpeed, circle_acc_x_, circle_acc_y_);
-    } else {
-        walk(cvx, cvy, cm, aim.aiming, now_ms);
+        // A flick's cell step: the stick moves the cursor again once centred.
+        if (!flick_held_)
+            stick_cursor(pad.circle_x, pad.circle_y, kCircleCursorSpeed, circle_acc_x_, circle_acc_y_);
+        menu_flick(pad);
+        scroll_button_check(held);
     }
 
     // ---- the mouse buttons, from all their sources ----
@@ -647,7 +845,8 @@ void Controls::update(const Pad &pad, uint64_t now_ms)
     } else if (aim.hold_plain_buttons) {
         a_left = b_right = false;   // the target is gone under a held button: no click onto its corpse
     }
-    button(false, a_left || walk_left_ || tap_left || pad.point_left || item_left);
+    const bool menu_left = game_menu_buttons(now_ms);
+    button(false, a_left || walk_left_ || tap_left || pad.point_left || item_left || menu_left);
     button(true, b_right || pad.point_right);
     prev_ = held;
 }

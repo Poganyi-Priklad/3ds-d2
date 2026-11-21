@@ -100,6 +100,10 @@ AimWorld &game_aim_world();
 // the lane may pass a host clock.
 void set_aim_clock(uint64_t (*clock_us)());
 
+// The player's class (0 Amazon, 1 Sorceress, 2 Necromancer, 3 Paladin,
+// 4 Barbarian, 5 Druid, 6 Assassin), -1 when not in a game.
+int player_class();
+
 }  // namespace game
 
 #endif

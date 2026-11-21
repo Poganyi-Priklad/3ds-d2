@@ -7,14 +7,26 @@
 //   Circle pad   in the game world: walk (the cursor orbits the character and
 //                the left button is held; the point keeps off units, so a
 //                walk never talks, opens, picks up or attacks; let go, the
-//                hero stops where he is); in menus and open panels: move the cursor
+//                hero stops where he is); in menus and open panels: move the
+//                cursor; with a panel open on one side only, held out
+//                (aim_panel_walk_ms) it walks on the free half;
+//                a flick moves it one cell or option (menu_nav.h):
+//                in the game with a panel open, and on the screens out of
+//                the game (their buttons, fields, heroes...). In the game
+//                menu (Escape) a tilt up or down is the arrow key and the
+//                cursor follows the game's lit row; left or right changes a
+//                choice or slider
 //   C-stick      move the cursor (New 3DS)
 //   Touch        a touchpad: drag moves the cursor, a short tap is a left click
 //                at the cursor
-//   A / B        left / right mouse button (held). In the game world, with
+//   A / B        left / right mouse button (held); B with a panel open in
+//                the game (menu navigation on): Escape, the panel's back or
+//                close; in a game menu's submenu, its "Previous" (one back).
+//                In the game world, with
 //                the auto-target on (auto_target.h): the cursor first goes
 //                onto the enemy, NPC or corpse the circle pad points at, and
-//                the button goes down once the game shows it under the cursor
+//                the button goes down once the game shows it under the cursor;
+//                on the control panel (skills, belt, globes): a plain click
 //   X            inventory (I)        Y   show items (Alt, held); with the
 //                inventory open, sells (a shop open) or drops the item under
 //                the cursor (issue #99)
@@ -34,17 +46,11 @@
 #define D2_GAME_CONTROLS_H
 
 #include "game/auto_target.h"
+#include "game/menu_nav.h"
 
 #include <cstdint>
-#include <vector>
 
 namespace game {
-
-// A rectangle in game pixels; right and bottom are outside it.
-struct WalkBox {
-    int left = 0, top = 0, right = 0, bottom = 0;
-    bool contains(int x, int y) const { return x >= left && x < right && y >= top && y < bottom; }
-};
 
 enum Button : uint32_t {
     kA = 1u << 0, kB = 1u << 1, kX = 1u << 2, kY = 1u << 3,
@@ -74,6 +80,21 @@ struct Pad {
     bool aim_off = false;
 };
 
+// While the on-screen keyboard is open (osk.h), the pad the game gets: the
+// sticks and every button the keyboard doesn't use (it has B backspace, Y
+// shift, Start Enter, Select close), so the cursor, a flick's step and A
+// still work; no touch (the touch screen is the keyboard's).
+inline Pad keyboard_pass_through(const Pad &pad)
+{
+    Pad out;
+    out.held = pad.held & ~(kB | kY | kStart | kSelect);
+    out.circle_x = pad.circle_x;
+    out.circle_y = pad.circle_y;
+    out.cstick_x = pad.cstick_x;
+    out.cstick_y = pad.cstick_y;
+    return out;
+}
+
 class Controls {
 public:
     // Game frame size (cursor bounds, walk radius scale).
@@ -100,6 +121,11 @@ public:
     // default, and the pad test): A and B click where the cursor is.
     void set_auto_target(const AimSettings &settings, AimWorld *world);
     const AutoTarget &auto_target() const { return aim_; }
+    // Menu navigation (menu_nav.h): with a panel open in the game, a flick
+    // of the circle pad moves the cursor a cell, and B is Escape. Its flicks
+    // are the auto-target's (aim_flick_ms, aim_flick_light). No world (the
+    // default, and the pad test): neither.
+    void set_menu_nav(MenuWorld *world) { menu_world_ = world; }
     // Puts the cursor at x,y (scripted tests; a touchpad has no absolute position).
     void warp_cursor(int x, int y);
     int cursor_x() const { return cx_; }
@@ -129,7 +155,7 @@ private:
     bool walk_blocked(int x, int y) const;   // a unit a click there would act on
     void walk_read_units(int hero_x, int hero_y);
     struct KeepOut {
-        WalkBox box;
+        NavRect box;
         // A warp whose box the hero stands in (he arrived by it): only the
         // points nearer its spot than he is are kept off, so he can walk away.
         bool warp_round_hero = false;
@@ -140,16 +166,18 @@ private:
     std::vector<KeepOut> walk_units_;   // where units take clicks, this frame
     uint32_t walk_units_pump_ = 0;
     bool walk_units_read_ = false;
-    WalkBox walk_hover_box_;      // a spot the game showed a unit at, kept off until walk_hover_until_ms_
+    NavRect walk_hover_box_;      // a spot the game showed a unit at, kept off until walk_hover_until_ms_
     uint64_t walk_hover_until_ms_ = 0;
-    int walk_x_min_ = 0, walk_x_max_ = 1 << 20;   // the game's frame until a panel walk clips it
-    uint64_t walk_now_ms_ = 0;
-    bool walking_ = false;
+    int walk_x_min_ = 0, walk_x_max_ = 1 << 20;   // a panel's half: the walk's points stay off it
+    bool panel_hold_ = false;     // a panel on one side: the stick out since panel_hold_ms_
+    uint64_t panel_hold_ms_ = 0;
+    bool panel_walking_ = false;  // ...held long enough (aim_panel_walk_ms): walking
     int walk_stop_ = 0;           // let go: 1 the cursor just ahead of the hero, 2 a click there, until walk_stop_ms_
     float walk_nx_ = 0, walk_ny_ = 1;   // the walk's last direction (y up)
     uint64_t walk_stop_ms_ = 0;
     uint32_t walk_stop_pump_ = 0;
     uint32_t walk_dodges_ = 0, walk_hover_releases_ = 0, walk_blocked_polls_ = 0;
+    bool walking_ = false;
     bool walk_press_pending_ = false;   // cursor moved first; press on the next poll
     bool walk_left_ = false;      // walking holds the left button (A and taps are other sources)
     bool select_used_ = false;    // Select was used with R or the D-pad: no zoom toggle on release
@@ -184,12 +212,39 @@ private:
     AimWorld *aim_world_ = nullptr;
     float walk_dir_x_ = 0, walk_dir_y_ = 1;   // the last walking direction on the screen (y down)
     bool aiming_ = false;         // the auto-target had the cursor at the last poll
+    bool aim_on_interface_ = false;   // A or B went down on the control panel: a plain click
     int aim_saved_x_ = 0, aim_saved_y_ = 0;   // where the cursor was before; it goes back there
     uint32_t aim_pump_seen_ = 0;
     uint32_t loot_button_ = 0;    // ZR + this D-pad button: a loot command held (0: none)
     bool loot_pressed_ = false;   // ...pressed this poll
     uint64_t aim_stats_ms_ = 0;
     uint32_t aim_stats_presses_ = 0;
+    // Menu navigation.
+    void menu_flick(const Pad &pad);
+    void game_menu_flick(const Pad &pad);
+    void scroll_button_check(uint32_t held);   // the cursor off a scroll button that no longer scrolls
+    void game_menu_click(int row, uint64_t now_ms);
+    bool game_menu_buttons(uint64_t now_ms);   // the left button for a row clicked for B
+    GameMenu game_menu_;
+    bool game_menu_on_ = false;   // the game menu's rows read this poll
+    bool game_menu_armed_ = true; // the stick was centred since its last step
+    uint8_t menu_key_ = 0;        // an arrow key down for the game menu
+    uint64_t menu_key_up_ms_ = 0;
+    bool menu_snap_ = false;      // the cursor goes onto the lit row once the game moved it
+    int menu_snap_from_ = -1;
+    uint64_t menu_snap_until_ms_ = 0;
+    int menu_click_ = 0;          // B in a submenu: 1 the cursor on "Previous", 2 its button down
+    uint64_t menu_click_ms_ = 0;
+    uint32_t menu_click_pump_ = 0;
+    MenuWorld *menu_world_ = nullptr;
+    MenuNav menu_nav_;
+    AimFlicks menu_flicks_;
+    std::vector<NavWindow> menu_windows_;
+    NavScroll menu_scroll_;       // the screen's scroll column at the last flick (D2Win's character screen)
+    int flick_from_x_ = 0, flick_from_y_ = 0;   // the cursor when the stick last left the centre
+    bool menu_was_open_ = false;
+    bool flick_held_ = false;     // a flick moved the cursor a cell; the stick isn't back in the centre yet
+    uint64_t menu_now_ms_ = 0;
     uint8_t keys_[256] = {};      // which virtual keys this layer holds down
     uint8_t pad_keys_[4] = {};    // Pad::keys at the previous poll
 };

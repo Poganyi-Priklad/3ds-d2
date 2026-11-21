@@ -43,6 +43,7 @@
 #include "game/player_modes.h"
 #include "game/sprite_headers.h"
 #include "game/aim_settings.h"
+#include "game/d2_menus.h"
 #include "game/autoplay.h"
 #include "game/d2_units.h"
 #include "game/automap.h"
@@ -97,6 +98,9 @@ static bool shot_now = false;   // M4_SCRIPT "shot": save the next frame
 // The 3DS app's bottom screen (game::SecondScreen), driven by the scripted
 // pad; each "shot" also saves it, as the console would show it, as b<ms>.png.
 static game::SecondScreen second_screen;
+// The game frame's size at the last present, for the controls (as the 3DS
+// app gives them: the cursor's bounds, menu navigation's windows).
+static int g_frame_w = 0, g_frame_h = 0;
 static game::BottomView bottom_view;
 
 // The cinematics' sound on the lane: a consumer that plays in real time on
@@ -487,6 +491,7 @@ int main(int argc, char **argv)
         }
         last_yuv = false;
         game::automap_frame(f.pixels, f.width, f.height, f.stride);
+        game::menus_frame(f.pixels, f.palette, f.width, f.height, f.stride);
         if (framehash) {
             static unsigned n = 0;
             uint32_t h = 2166136261u;
@@ -549,6 +554,8 @@ int main(int argc, char **argv)
         std::memcpy(last_pal, f.palette, sizeof last_pal);
         const uint64_t now = rt::now_ms();
         second_screen.set_frame((int)f.width, (int)f.height);
+        g_frame_w = (int)f.width;
+        g_frame_h = (int)f.height;
         second_screen.stage(bottom_view, now);
         game::set_automap_capture(second_screen.wants_automap(), second_screen.map_ms(), second_screen.map_scale());
         if (shot_now) {
@@ -598,6 +605,7 @@ int main(int argc, char **argv)
             }
         }
         controls.set_auto_target(aim, &game::game_aim_world());
+        controls.set_menu_nav(&game::game_menu_world());
         second_screen.set_aim_settings(aim);   // AIM > SETTINGS, as on the console
         game::set_aim_clock([]() -> uint64_t {
             return (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
@@ -639,6 +647,7 @@ int main(int argc, char **argv)
             controls.set_auto_target(second_screen.aim_settings(), &game::game_aim_world());
             std::fprintf(stderr, "[rt] aim: changed on the bottom screen\n");
         }
+        controls.set_frame(g_frame_w, g_frame_h);
         controls.set_context(gs.in_game, gs.panel_open, gs.ui, gs.in_game && game::holding_item());
         controls.update(pad, now);
         second_screen.request(controls.take_bottom_request());

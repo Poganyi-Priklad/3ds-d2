@@ -16,11 +16,11 @@ The mapping lives in `src/game/controls.cpp`. It follows the ideas D2Vita proved
 
 | Input | Action |
 | --- | --- |
-| Circle pad | In menus and with a panel open: move the cursor. In the game world: walk. The cursor orbits the character in the stick's direction, the left button is held while the pad is pushed, and a fuller push reaches further. The walk never acts on anything: its point keeps off NPCs, monsters, objects, items and level warps (cave entrances, stairs, passages: the walk never takes the hero to another level; standing by one, he can walk away from it but not onto it). Let go, and the hero stops where he stands (a one-frame click on the next subtile ahead of him, so he stops facing the way he walked, mostly one or two subtiles on; none beside a warp; "Walk stop" off in AIM > SETTINGS, or `aim_walk_stop=0`, leaves the click out). |
+| Circle pad | In menus and with a panel open: move the cursor; a flick moves it one cell, option or button on the screens before the game (see [Menu navigation](#menu-navigation)). In the game world: walk. The cursor orbits the character in the stick's direction, the left button is held while the pad is pushed, and a fuller push reaches further. The walk never acts on anything: its point keeps off NPCs, monsters, objects, items and level warps (cave entrances, stairs, passages: the walk never takes the hero to another level; standing by one, he can walk away from it but not onto it). Let go, and the hero stops where he stands (a one-frame click on the next subtile ahead of him, so he stops facing the way he walked, mostly one or two subtiles on; none beside a warp; "Walk stop" off in AIM > SETTINGS, or `aim_walk_stop=0`, leaves the click out). |
 | C-stick (New 3DS) | Move the cursor |
 | Touch (bottom screen) | Depends on the tab (see [Bottom screen](#bottom-screen)). On MAP and INFO, a touchpad: drag moves the cursor (one drag across the pad crosses the frame); a short tap clicks where the cursor is |
 | A | Left mouse button (held). In the game world it aims first: see [Auto-target](#auto-target-a-and-b) |
-| B | Right mouse button (held): cast the right skill. In the game world it aims first, like A |
+| B | Right mouse button (held): cast the right skill. In the game world it aims first, like A. Before the game, Escape (back one screen; nothing on the main menu) (see [Menu navigation](#menu-navigation)) |
 | X | Inventory (I) |
 | Y | Show items on the ground (Alt, held). With a shop open: sells the item under the cursor. With the inventory open (and no other panel on the left): drops it on the ground. If the cursor isn't on an item, nothing happens. |
 | L | Stand still (Shift, held) |
@@ -110,6 +110,14 @@ Each button has its own mode: `enemies`, `corpses` (for corpse skills such as Ra
 An older file's `aim_turn` line is ignored and dropped when the file is written again; its other values stay, except an `aim_a_range=10` (the default then), which becomes the new default 20.
 
 game.log's `aim:` lines say what it chose and why it let go, and every 30 s of use a `aim: stats:` line counts it all.
+
+## Menu navigation
+
+On the screens before the game (the main menu, character select, the class screen, difficulty, multiplayer), a **flick** of the circle pad (the auto-target's flick: `aim_flick_ms`, `aim_flick_light`) moves the cursor one cell or control up, down, left or right (`src/game/menu_nav.cpp`). A slow tilt moves the cursor freely, as before. After a flick the cursor stays on its cell until the pad is back in the centre.
+
+On the character screen with more than eight heroes, a flick right from the right column reaches the scroll bar's up and down buttons, and A scrolls one row a press. A scroll button that has reached the end of the list sends the cursor back to the nearest slot.
+
+**B is Escape**: back from the character select to the main menu, from the class screen to the character select, and so on; on the main menu itself it does nothing (Escape there would ask to quit).
 
 ## Bottom screen
 

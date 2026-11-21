@@ -54,8 +54,8 @@ this page is the short version and a map of the code.
    go, and the hero stops where he stands (a one-frame click just ahead of
    him, so he stops facing the way he walked). Turn "Walk stop" off in
    AIM > SETTINGS, or set `aim_walk_stop=0`, to leave that click out. A
-   later branch can call this same walk with one side panel open, on the
-   free half of the screen.
+   later branch (menu navigation) calls this same walk with one side panel
+   open, on the free half of the screen.
 
 Which unit a press goes to, in order:
 
