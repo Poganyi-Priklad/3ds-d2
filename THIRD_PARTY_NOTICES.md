@@ -54,6 +54,11 @@ The repository holds the code that extracts them, never the artwork. Without a g
   - This project's patch series on top of it (`tests/d2d/patches/`, empty for now) changes GPL-3.0 files, so the patches are GPL-3.0-or-later.
   - If d2d code is ever linked into the app, the CIA as a whole is distributed under the GPL-3.0, while this project's own files stay BSD-2. Such a build will keep a switch for a CIA without d2d code.
   - The `hosttest` image installs its harness's Python modules at the versions in its `tools/emu/uv.lock`: Unicorn 2.1.4 (the engine is GPL-2.0; the Python package's metadata says BSD and the wheel carries no licence file), Capstone 5.0.9 (BSD-3-Clause, `LICENSE.TXT` in the wheel) and pefile 2024.8.26 (MIT). The image is local and never distributed.
+- **d2spec** ([IgorKonovalov/diablo-2-recompilation](https://github.com/IgorKonovalov/diablo-2-recompilation)) is the git submodule `third_party/d2spec`, pinned at `a2912c1`.
+  - It is a documentation-only specification of Diablo II: Lord of Destruction 1.14d, reverse-engineered from Game.exe, each claim tagged with its evidence: item generation, monster spawning, level generation, the server's frame and its client messages, and more. Its `LICENSE` states that the repository holds no game assets, executables or data tables. Its addresses are this project's Game.exe's.
+  - Its documentation, `re/symbols.csv` and `re/types/` are licensed CC BY 4.0 (Copyright (c) 2026 Igor Konovalov); its tools MIT (`LICENSE-CODE`).
+  - This project uses it as a reference: its names for the game's functions and data, and what it documents of the game's behaviour, inform our own implementation (the natives, the AOT work, the profile tools). What is taken from it is credited where it is used, as CC BY 4.0 asks.
+  - Its files stay in the submodule and are read from there, not copied into this repository. Nothing of it is built or linked into the CIA or the `.3dsx`.
 - The AOT recompiler `tools/aot/recompile` (Rust, issue #144) is built in the `hosttest` image from the crates its `Cargo.lock` pins, each checked against the lock's sha256 when the image is built:
   - capstone-sys 0.18.0 (MIT), which bundles Capstone 5.0.6 (BSD-3-Clause, `capstone/LICENSE.TXT` in the crate);
   - for building it only: cc 1.11.2, find-msvc-tools 0.1.15 and shlex 2.0.1 (MIT OR Apache-2.0).
@@ -68,6 +73,7 @@ The repository holds the code that extracts them, never the artwork. Without a g
 
 - D2Vita: GPL-3.0.
 - d2d: GPL-3.0-or-later. Used only by tests and tools (above).
+- d2spec: CC BY 4.0 (documentation and symbols) and MIT (tools). A reference (above); attribution where its facts are used.
 - WinVita: MIT (`LICENSE`); see also its `THIRD-PARTY-NOTICES.md`.
 - DOSBox-3DS: GPL-2.0-or-later. Its `ctr_memory.c` (credited to PicoDrive) was only read, to confirm how `svcControlProcessMemory` is called. None of its code is used.
 - D2Vita (GPL-3.0) was used only as a behavioural reference for the 1.14d game, read inside the measurement image. No D2Vita source is copied or translated into this repository; the few game facts taken from it (memory addresses, behaviour) are documented where they are used.
