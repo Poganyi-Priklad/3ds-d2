@@ -140,6 +140,35 @@ NATIVE(FrameRead, 0)
 GROUP(frame_reads, 1)
 SITE(frame_reads, 0x0041aad0, "55 8b ec 8b 45 14 83 ec 2c 85 c0 74 06 c7 00 00 00 00 00", "e8 {FrameRead} 55 8b ec 83 ec 2c 90 90 90 90 90 90 90 90")
 
+// cinematics.cpp, install_cinematics: the GDI renderer's three video entries
+// (0x6c7cc0: "return 0", "ret 4", "return 0", 16 bytes each) become the play
+// loop (fastcall: ecx the name, edx the mode, one stack argument popped):
+// VideoOpen(name, mode), then VideoStep and Sleep (through the game's import
+// slot, 0x6cc258) until the video ends. The renderer's table gets the loop
+// and two natives in the three slots (data, written by the install code).
+NATIVE(VideoOpen, 2)
+NATIVE(VideoStep, 0)
+GROUP(cinematics, 1)
+SITE(cinematics, 0x006c7cc0, "33 c0 c3 cc cc cc cc cc cc cc cc cc cc cc cc cc c2 04 00 cc cc cc cc cc cc cc cc cc cc cc cc cc 33 c0 c3 cc cc cc cc cc cc cc cc cc cc cc cc cc", "52 51 e8 {VideoOpen} 85 c0 74 13 e8 {VideoStep} 83 f8 ff 74 09 50 ff 15 58 c2 6c 00 eb ed 31 c0 c2 04 00 cc cc cc cc cc cc cc cc cc cc cc cc cc")
+
+// d2_memory.cpp, set_sprite_cache_floor: 0x457300's floor for the sprite
+// cache (mov edx, 0x01800000 at 0x4573e7) becomes the data dword's at
+// 0x6cb644, through a stub in .text's slack. Applied on every run: with no
+// floor asked for, the dword holds the game's own.
+GROUP(sprite_cache_floor, 1)
+SITE(sprite_cache_floor, 0x006cb620, "00 00 00 00 00 00 00 00 00 00 00", "8b 15 44 b6 6c 00 e9 {=0x4573ec}")
+SITE(sprite_cache_floor, 0x004573e7, "ba 00 00 80 01", "e9 {=0x6cb620}")
+
+// d2_native.cpp, install_floor_queue: the world's draw in 0x476bc0 calls two
+// natives where it called the floor's draw (0x476cdc, to 0x4ded10) and the
+// function after it (0x476ce1, to 0x473c00); each goes on to the call's own
+// target. Applied on every run: with the queue off they do nothing else.
+NATIVE(FloorQueueArm, 0)
+NATIVE(FloorQueueEnd, 0)
+GROUP(floor_queue, 1)
+SITE(floor_queue, 0x00476cdc, "e8 2f 80 06 00", "e8 {FloorQueueArm}")
+SITE(floor_queue, 0x00476ce1, "e8 1a cf ff ff", "e8 {FloorQueueEnd}")
+
 #ifdef NATIVE_SITES_TABLE_DEFAULTS
 #undef NATIVE
 #undef GROUP

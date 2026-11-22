@@ -4,7 +4,7 @@
 use crate::cs::{reg_full, Insn, OpKind};
 use crate::image::Image;
 use crate::omap::OMap;
-use crate::x86::regs_rw;
+use crate::x86::{mem_written, regs_rw};
 use crate::Refused;
 use std::collections::{BTreeSet, HashSet};
 use std::rc::Rc;
@@ -57,7 +57,11 @@ pub struct Func {
     pub noreturn: HashSet<u32>,
     pub exits: BTreeSet<u32>,
     pub callouts: OMap<u32, i64>,
+    /// Pops found for callouts whose count of pushes was a guess (Program::solve_pops).
+    pub pops_fix: Vec<(u32, i64)>,
     pub plain: bool,
+    /// ... its calls to imports too (the second fallback).
+    pub plain_all: bool,
     pub data: HashSet<u32>,
     pub refused: Option<String>,
     pub ret_pops: BTreeSet<i64>,
@@ -86,6 +90,8 @@ impl Func {
             exits: BTreeSet::new(),
             callouts: OMap::new(),
             plain: false,
+            plain_all: false,
+            pops_fix: Vec::new(),
             data: HashSet::new(),
             refused: None,
             ret_pops: BTreeSet::new(),
@@ -204,6 +210,16 @@ impl Func {
                         Tgt::Indirect
                     };
                     self.calls.insert(va, t);
+                    // exit and its like end the code here: what follows may
+                    // be a switch's table (issue #138: 4f5570's error path,
+                    // call exit; mov edi, edi; the table, read on as code).
+                    if let Tgt::Direct(d) = t {
+                        if crate::program::NORETURN_FUNCS.contains(&d) {
+                            self.noreturn.insert(va);
+                            self.succ.insert(va, vec![]);
+                            break;
+                        }
+                    }
                     if let Tgt::Import(slot) = t {
                         if NORETURN_IMPORTS.contains(&img.imports[&slot].1.as_str()) {
                             self.noreturn.insert(va);
@@ -263,19 +279,35 @@ impl Func {
 
     /// The exits Box86 runs on from (issue #115); indirect and import calls
     /// callouts, and tail calls through a pointer where the pops are known.
-    pub fn set_exits(&mut self, sites: &BTreeSet<u32>, callouts: bool, tail_pops: Option<i64>, img: &Image, enabled: bool) {
+    ///
+    /// level 0: all of them callouts. 1 (a function whose callouts' pops
+    /// threw its stack off): only its calls to imports whose pops are known,
+    /// which are no guess (issue #138: HeapAlloc and GetLastError were plain
+    /// exits in such functions, 3,900 a script). 2: none.
+    pub fn set_exits(&mut self, sites: &BTreeSet<u32>, level: u8, tail_pops: Option<i64>, img: &Image, enabled: bool) {
         self.exits = sites.clone();
-        self.plain = !callouts;
-        if enabled && callouts {
+        self.plain = level > 0;
+        self.plain_all = level > 1;
+        let callouts = level == 0;
+        if enabled && level < 2 {
             let mut co = OMap::new();
             for &va in sites {
                 if let Some(t) = self.calls.get(&va) {
-                    if !self.noreturn.contains(&va) && t.is_pointer() {
+                    let known = matches!(t, Tgt::Import(slot) if img.import_pops.get(slot).copied().flatten().is_some())
+                        || self.reg_import_pops(&self.insns[&va], img).is_some();
+                    if !self.noreturn.contains(&va) && t.is_pointer() && (callouts || known) {
                         co.insert(va, self.callout_pops(va, img));
                     }
                 }
             }
+            for &(va, p) in &self.pops_fix {
+                if co.contains_key(&va) {
+                    co.insert(va, p);
+                }
+            }
             self.callouts = co;
+        }
+        if enabled && callouts {
             let pops = if self.ret_pops.len() == 1 {
                 self.ret_pops.iter().next().copied()
             } else if self.ret_pops.is_empty() {
@@ -310,8 +342,16 @@ impl Func {
             }
         }
         let i = &self.insns[&va];
+        if let Some(p) = self.reg_import_pops(i, img) {
+            return p;
+        }
         if let Some(n) = self.insns.get(&va.wrapping_add(i.size)) {
             if n.mnemonic == "add" && n.op_str.starts_with("esp, ") {
+                return 0;
+            }
+            // ... or with pop ecx, the compiler's way to drop one or two
+            // arguments (issue #138: 688fbb's pop ecx; pop ecx at 689122).
+            if n.mnemonic == "pop" && n.op_str == "ecx" {
                 return 0;
             }
         }
@@ -399,6 +439,82 @@ impl Func {
             kept += 1;
         }
         4 * (n - popped.max(kept))
+    }
+
+    /// The callouts whose pops are a count of pushes, not an import's.
+    pub fn guessed_callouts(&self, img: &Image) -> Vec<(u32, i64)> {
+        let mut out = Vec::new();
+        for (va, p) in self.callouts.iter() {
+            let Some(t) = self.calls.get(va) else { continue };
+            let known = matches!(t, Tgt::Import(slot) if img.import_pops.get(slot).copied().flatten().is_some())
+                || self.reg_import_pops(&self.insns[va], img).is_some();
+            if !known {
+                out.push((*va, *p));
+            }
+        }
+        out
+    }
+
+    /// A call through a register that holds an import: every instruction of
+    /// the function that writes the register, but a pop (the epilogue's),
+    /// loads it from an import's slot, all with the same known pops (issue
+    /// #138: 40b600's mov esi, [HeapAlloc]; call esi, its pushes counted, was
+    /// a guess that threw the stack off, 3,211 plain exits a script).
+    fn reg_import_pops(&self, i: &Insn, img: &Image) -> Option<i64> {
+        let op = i.ops.first()?;
+        if !op.is_reg() || op.size != 4 {
+            return None;
+        }
+        let r = reg_full(op.reg())?.0;
+        let slot_pops = |j: &Insn| -> Option<i64> {
+            if j.mnemonic != "mov" || j.ops.len() != 2 || !j.ops[0].is_reg() || !j.ops[1].is_mem() {
+                return None;
+            }
+            let m = j.ops[1].mem();
+            if m.base != 0 || m.index != 0 || !(0..=u32::MAX as i64).contains(&m.disp) {
+                return None;
+            }
+            img.import_pops.get(&(m.disp as u32)).copied().flatten()
+        };
+        // The write of the register nearest before the call, in a straight
+        // line no branch comes into (the C runtime's 688b46 loads one
+        // register from several imports' slots in turn, GetProcAddress among
+        // them): that import's.
+        let mut ends = std::collections::HashMap::new();
+        for (k, j) in self.insns.iter() {
+            ends.insert(k.wrapping_add(j.size), *k);
+        }
+        let mut cur = i.address;
+        while !self.leaders.contains(&cur) {
+            let Some(&k) = ends.get(&cur) else { break };
+            let j = &self.insns[&k];
+            if j.mnemonic == "call" && ![3u8, 5, 6, 7].contains(&r) {
+                break;   // the register may be the callee's to change (688fbb's esi isn't: 688ff0)
+            }
+            if regs_rw(j).1 & (1 << r) != 0 {
+                return slot_pops(j);
+            }
+            cur = k;
+        }
+        let mut pops: Option<i64> = None;
+        for j in self.insns.values() {
+            if regs_rw(j).1 & (1 << r) == 0 || j.mnemonic == "pop" {
+                continue;
+            }
+            if j.mnemonic != "mov" || j.ops.len() != 2 || !j.ops[0].is_reg() || !j.ops[1].is_mem() {
+                return None;
+            }
+            let m = j.ops[1].mem();
+            if m.base != 0 || m.index != 0 || !(0..=u32::MAX as i64).contains(&m.disp) {
+                return None;
+            }
+            let p = img.import_pops.get(&(m.disp as u32)).copied().flatten()?;
+            if pops.is_some_and(|q| q != p) {
+                return None;
+            }
+            pops = Some(p);
+        }
+        pops
     }
 
     /// Whether `r` (ebx, esi, edi or ebp) can be at `at` as it was at the
@@ -512,6 +628,22 @@ impl Func {
                 }
                 return None;
             }
+            if jne.is_none()
+                && p.mnemonic == "mov"
+                && p.ops.len() == 2
+                && p.ops[0].is_reg()
+                && p.ops[0].size == 4
+                && reg_full(p.ops[0].reg()).map(|s| s.0) == Some(r)
+                && p.ops[1].is_imm()
+            {
+                // mov r, imm (41bfc0's mov ecx, 4; cmp eax, ecx; ja), with no
+                // branch into the code between it and the switch.
+                let into = self.succ.iter().any(|(src, ts)| {
+                    let fall = src.wrapping_add(self.insns[src].size);
+                    ts.iter().any(|&t| t > a && t <= end && t != fall)
+                });
+                return if into { None } else { Some(p.ops[1].imm()) };
+            }
             if jne.is_none() && p.mnemonic == "jne" {
                 jne = Some(a);
             } else if jne.is_some() {
@@ -525,9 +657,11 @@ impl Func {
                     ts.iter().any(|&t| t > from && t <= end && t != fall)
                 });
                 return if into { None } else { Some(ops[1].imm()) };
-            } else if regs_rw(p).1 & (1 << r) != 0 || matches!(p.mnemonic.as_str(), "call" | "jmp" | "ret") || p.mnemonic.starts_with('j') {
+            } else if regs_rw(p).1 & (1 << r) != 0 || matches!(p.mnemonic.as_str(), "call" | "jmp" | "ret") {
                 return None;
             }
+            // Another conditional jump falls through with r as it was
+            // (461dc0's mov ebx, 5; jz; mov eax, [edi]; cmp eax, ebx; ja).
             next = a;
         }
         None
@@ -548,6 +682,7 @@ impl Func {
         let mut bytes_table: Option<u32> = None;
         let mut bound: Option<i64> = None;
         let mut default: Option<i64> = None;
+        let mut slot: Option<(u16, i64)> = None;
         let mut cur = idx;
         let mut k = back.len() as i64 - 1;
         while k >= 0 && bound.is_none() {
@@ -590,6 +725,39 @@ impl Func {
                 // add ecx, -0x67; cmp ecx, edi; ja; jmp [ecx*4 + table]).
                 bound = self.pinned(reg_full(ops[1].reg()).expect("a register").0, &back[..k as usize], a, va);
                 break;
+            } else if slot.is_none()
+                && bytes_table.is_none()
+                && default.is_none()
+                && mn == "mov"
+                && ops.len() == 2
+                && ops[0].is_reg()
+                && reg_full(ops[0].reg()).map(|s| s.0) == Some(cur)
+                && ops[1].is_mem()
+                && ops[1].size == 4
+                && ops[1].mem().index == 0
+                && ops[1].mem().base != 0
+            {
+                // The index loaded from a stack slot the guard compared
+                // (issue #138: 555230's cmp dword [ebp - 4], 5; ...; ja;
+                // mov eax, [ebp - 4]; jmp [eax*4 + table]).
+                slot = Some((ops[1].mem().base, ops[1].mem().disp));
+            } else if mn == "cmp"
+                && default.is_some()
+                && slot.is_some()
+                && ops[0].is_mem()
+                && ops[0].size == 4
+                && ops[0].mem().index == 0
+                && Some((ops[0].mem().base, ops[0].mem().disp)) == slot
+                && ops[1].is_imm()
+            {
+                bound = Some(ops[1].imm());
+            } else if let Some((base, _)) = slot {
+                // Until the guard: nothing that stores, calls, or moves the slot's base.
+                let (_, w) = regs_rw(&p);
+                let b = reg_full(base).map(|s| s.0).unwrap_or(4);
+                if !mem_written(&p).is_empty() || mn == "call" || w & (1 << b) != 0 {
+                    break;
+                }
             } else {
                 let (_, w) = regs_rw(&p);
                 if w & (1 << cur) != 0 || (bytes_table.is_none() && w & (1 << idx) != 0) {
@@ -598,8 +766,42 @@ impl Func {
             }
             k -= 1;
         }
-        let (Some(bound), Some(default)) = (bound, default) else {
-            return Err(Refused(format!("a switch at {:08x} the guard rule doesn't bound", va)));
+        // No guard at all (issue #138: 6bd780's sub ebx, 1; jmp [ebx*4 + table],
+        // its index from the game's data): the table's length is its entries
+        // that point into this function's code before it, and an index past
+        // them, which the game's own code would jump into the bytes after
+        // the table with, goes to the first.
+        let (bound, default) = match (bound, default) {
+            (Some(b), Some(d)) => (b, d),
+            _ if table > self.entry => {
+                let mut n = 0u32;
+                while n < 512 {
+                    let t = img.u32(table.wrapping_add(4 * n));
+                    if t < self.entry || t >= table {
+                        break;
+                    }
+                    n += 1;
+                }
+                if n < 2 {
+                    return Err(Refused(format!("a switch at {:08x} the guard rule doesn't bound", va)));
+                }
+                match bytes_table {
+                    None => (n as i64 - 1, img.u32(table) as i64),
+                    // Through a byte table too (6bdbdd): its bytes while they
+                    // are entries of the table found.
+                    Some(bt) => {
+                        let mut b = 0u32;
+                        while b < 256 && (img.u8(bt.wrapping_add(b)) as u32) < n {
+                            b += 1;
+                        }
+                        if b < 2 {
+                            return Err(Refused(format!("a switch at {:08x} the guard rule doesn't bound", va)));
+                        }
+                        (b as i64 - 1, img.u32(table) as i64)
+                    }
+                }
+            }
+            _ => return Err(Refused(format!("a switch at {:08x} the guard rule doesn't bound", va))),
         };
         if bound > 512 {
             return Err(Refused(format!("a switch at {:08x} the guard rule doesn't bound", va)));

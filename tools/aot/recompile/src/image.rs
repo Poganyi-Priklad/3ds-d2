@@ -300,6 +300,82 @@ fn is_space(c: char) -> bool {
 
 /// recompile.py's `\b[A-Z][A-Za-z0-9_]*\(\s*"([A-Za-z0-9_]+)",\s*(\d+)\s*,`
 /// over a shim source, each (name, argc) in order.
+/// The shims declared with their DLL first, `X("IMM32.dll", "ImmGetContext",
+/// 1, ...`, or in a table by ordinal, `{115, "WSAStartup", 2, ...` (issue
+/// #138: their thunks' pops weren't known, 102 functions refused): each
+/// name with the argument count after it.
+fn shim_decls_by_dll(text: &str, out: &mut Vec<(String, i64)>) {
+    let b = text.as_bytes();
+    let n = b.len();
+    let skip = |mut k: usize| {
+        while k < n && (b[k] == b' ' || b[k] == b'\n' || b[k] == b'\t' || b[k] == b'\r') {
+            k += 1;
+        }
+        k
+    };
+    // A string literal at k: (its text, the index after its closing quote).
+    let lit = |k: usize| -> Option<(String, usize)> {
+        if k >= n || b[k] != b'"' {
+            return None;
+        }
+        let e = (k + 1..n).find(|&j| b[j] == b'"' || b[j] == b'\n')?;
+        if b[e] != b'"' {
+            return None;
+        }
+        Some((String::from_utf8_lossy(&b[k + 1..e]).into_owned(), e + 1))
+    };
+    // `, <digits>` at k: the number.
+    let count = |k: usize| -> Option<i64> {
+        let k = skip(k);
+        if k >= n || b[k] != b',' {
+            return None;
+        }
+        let k = skip(k + 1);
+        let e = (k..n).find(|&j| !b[j].is_ascii_digit())?;
+        if e == k {
+            return None;
+        }
+        std::str::from_utf8(&b[k..e]).ok()?.parse().ok()
+    };
+    let mut p = 0;
+    while p < n {
+        if b[p] != b'"' {
+            p += 1;
+            continue;
+        }
+        let Some((first, after)) = lit(p) else {
+            p += 1;
+            continue;
+        };
+        if first.to_ascii_lowercase().ends_with(".dll") {
+            let k = skip(after);
+            if k < n && b[k] == b',' {
+                if let Some((name, e)) = lit(skip(k + 1)) {
+                    if let Some(c) = count(e) {
+                        out.push((name, c));
+                    }
+                }
+            }
+        } else {
+            // { <digits>, "Name", <digits>
+            let mut k = p;
+            while k > 0 && (b[k - 1] == b' ' || b[k - 1] == b',') {
+                k -= 1;
+            }
+            let d = k;
+            while k > 0 && b[k - 1].is_ascii_digit() {
+                k -= 1;
+            }
+            if k < d && k > 0 && b[k - 1] == b'{' {
+                if let Some(c) = count(after) {
+                    out.push((first, c));
+                }
+            }
+        }
+        p = after;
+    }
+}
+
 fn shim_decls(text: &str, out: &mut Vec<(String, i64)>) {
     let s: Vec<char> = text.chars().collect();
     let n = s.len();
@@ -393,14 +469,26 @@ fn import_pops(imports: &OMap<u32, (String, String)>, root: &Path) -> HashMap<u3
         if let Ok(b) = std::fs::read(&f) {
             let mut decls = Vec::new();
             shim_decls(&String::from_utf8_lossy(&b), &mut decls);
+            shim_decls_by_dll(&String::from_utf8_lossy(&b), &mut decls);
             for (name, n) in decls {
                 argc.entry(name).or_insert(n);
             }
         }
     }
     let mut out = HashMap::new();
-    for (slot, (_, name)) in imports.iter() {
-        let v = if name == "wsprintfA" || name == "wsprintfW" {
+    for (slot, (dll, name)) in imports.iter() {
+        // Shims registered with no argument count in their source: Win32's
+        // own signatures (DSOUND.dll's are imported by ordinal).
+        let win32 = match (dll.to_lowercase().as_str(), name.as_str()) {
+            ("dsound.dll", "#1") => Some(12),                    // DirectSoundCreate
+            ("dsound.dll", "#2") => Some(8),                     // DirectSoundEnumerateA
+            ("psapi.dll", "GetModuleFileNameExA") => Some(16),
+            ("version.dll", "VerQueryValueA") => Some(16),
+            _ => None,
+        };
+        let v = if win32.is_some() {
+            win32
+        } else if name == "wsprintfA" || name == "wsprintfW" {
             Some(0)
         } else if let Some(at) = name.rfind('@').filter(|&k| {
             let t = &name[k + 1..];

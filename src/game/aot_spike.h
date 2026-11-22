@@ -52,6 +52,10 @@ AotMode aot_mode();
 // The heartbeat's lines ("aot: ..."), each window's calls and times; empty
 // when nothing ran.
 std::vector<std::string> aot_lines();
+void aot_sample();   // AOT_SAMPLE_ON builds: one sample of where compiled code is, from a host thread every 2 ms
+// D2_AOT_STRICT=1 (the lane, issue #138): what compiled code left to Box86
+// over the whole run, by cause and address ("aot strict: ..."); empty without it.
+std::vector<std::string> aot_strict_lines();
 
 // A native that hands back to the game's code (issue #115: UnitPickFilter's
 // units it doesn't answer): the trap that enters the function's compiled

@@ -1,4 +1,5 @@
 // See rt_host.h.
+#include "runtime/rt_cpu_aot.h"
 #include "runtime/rt_host.h"
 #include "runtime/rt_layout.h"
 #include "runtime/pool_fit.h"
@@ -619,6 +620,18 @@ uint32_t native_entry(const char *name, uint32_t stack_args, std::function<uint3
     return g_br->shim_trap("3DSD2NATIVE", name);
 }
 
+namespace {
+std::vector<std::pair<uint32_t, uint32_t>> g_entry_natives;   // CpuAot: (function, its native's trap)
+}
+const std::vector<std::pair<uint32_t, uint32_t>> &entry_natives() { return g_entry_natives; }
+uint32_t entry_native(uint32_t va)
+{
+    for (const auto &e : g_entry_natives)
+        if (e.first == va)
+            return e.second;
+    return 0;
+}
+
 bool hook_function(Cpu &c, uint32_t va, const uint8_t *expect, uint32_t n, uint32_t stack_args,
                    std::function<uint32_t(Cpu &)> fn, const char *name, bool in_line)
 {
@@ -632,6 +645,17 @@ bool hook_function(Cpu &c, uint32_t va, const uint8_t *expect, uint32_t n, uint3
     const uint32_t trap = native_entry(name, stack_args, std::move(fn));
     if (!trap)
         return false;
+    if (d2rt::cpu_is_aot(c)) {   // bound by address, the image as it was (rt_host.h)
+        bool known = false;
+        for (auto &e : g_entry_natives)
+            if (e.first == va)
+                e.second = trap, known = true;
+        if (!known)
+            g_entry_natives.emplace_back(va, trap);
+        c.invalidate_code(va, 5);   // the dispatcher takes the new binding at its next call
+        logf("native %s at %08x (bound, the image unchanged)", name, va);
+        return true;
+    }
     uint8_t jmp[5] = {0xE9};
     const uint32_t rel = trap - (va + 5);
     std::memcpy(jmp + 1, &rel, 4);
@@ -661,6 +685,12 @@ MemoryReport memory_report()
 Bridge &bridge() { return *g_br; }
 void set_bridge_for_tests(Bridge *b) { g_br = b; }
 uint32_t exe_base() { return g_exe_base; }
+
+// cpuid leaf 1's edx as the backend reports it (its default: FPU CMOV MMX FXSR
+// SSE SSE2; RunOptions::cpuid_edx sets both).
+constexpr uint32_t kCpuid1EdxDefault = (1u << 0) | (1u << 15) | (1u << 23) | (1u << 24) | (1u << 25) | (1u << 26);
+static uint32_t g_cpuid1_edx = kCpuid1EdxDefault;
+uint32_t cpuid1_edx() { return g_cpuid1_edx; }
 
 uint32_t current_teb()
 {
@@ -1585,7 +1615,21 @@ RunResult run_exe(std::vector<uint8_t> exe, const RunOptions &opt)
 
     if (g_opt.cpuid_edx)
         wx86_set_cpuid1_edx(g_opt.cpuid_edx);
+    g_cpuid1_edx = g_opt.cpuid_edx ? g_opt.cpuid_edx : kCpuid1EdxDefault;
+    // The CPU backend is the build's (issue #138): with D2RT_CPU_AOT, CpuAot,
+    // the AOT recompiler's C on a host stack a guest thread (rt_cpu_aot.h),
+    // and no Box86 linked: its memory is the game's. What CpuAot can't run
+    // stops the run with a report.
+#ifdef D2RT_CPU_AOT
+    Cpu *cpu = make_cpu_aot();
+    if (!cpu) {
+        logf("cpu: CpuAot isn't available on this host");
+        std::abort();
+    }
+    logf("cpu: CpuAot, a build with no Box86");
+#else
     Cpu *cpu = make_cpu_box86();
+#endif
     static std::unique_ptr<Bridge> br;
     br.reset(new Bridge(cpu));
     g_br = br.get();

@@ -64,8 +64,8 @@ namespace {
 
 // 0x4573e7: mov edx, 0x1800000 -- the floor, taken when the computed size
 // is at or below it.
-constexpr uint32_t kFloorInsn = 0x004573e7;
-constexpr uint8_t kFloorOrig[] = {0xba, 0x00, 0x00, 0x80, 0x01};
+constexpr uint32_t kFloorAt = 0x006cb644;    // the data dword the stub reads, in .text's slack
+constexpr uint32_t kFloorOwn = 0x01800000;   // the game's own floor
 constexpr uint32_t kSpriteCache = 0x0089db60;
 
 // exit(code): push 0; push 0; push [esp+0xc]; call doexit (0x681d27);
@@ -330,11 +330,28 @@ void take_all_empty_blocks(d2rt::Cpu &c)
 
 bool set_sprite_cache_floor(d2rt::Cpu &c, uint32_t bytes)
 {
-    uint8_t have[sizeof kFloorOrig];
-    if (!c.read(kFloorInsn, have, sizeof have) || std::memcmp(have, kFloorOrig, sizeof have) != 0)
-        return false;
-    c.write_u32(kFloorInsn + 1, bytes);
-    rt::logf("sprite cache floor: %u KiB (the game's own: 24576 KiB)", bytes >> 10);
+    // native_sites_table.h's sprite_cache_floor rows (issue #138): the floor
+    // is the data dword's, so the bytes written are the same on every run and
+    // the AOT recompiler compiles the code with them. Once: a later call
+    // changes the dword alone.
+    static bool applied = false;
+    if (!bytes)
+        bytes = kFloorOwn;
+    if (!applied) {
+        uint32_t slot = 0;
+        if (!c.read(kFloorAt, &slot, 4) || slot != 0)
+            return false;
+        c.write_u32(kFloorAt, bytes);
+        if (!apply_sites(c, "sprite_cache_floor", {})) {
+            c.write_u32(kFloorAt, 0);
+            return false;
+        }
+        applied = true;
+    } else {
+        c.write_u32(kFloorAt, bytes);
+    }
+    if (bytes != kFloorOwn)
+        rt::logf("sprite cache floor: %u KiB (the game's own: 24576 KiB)", bytes >> 10);
     return true;
 }
 

@@ -3,6 +3,7 @@
 // user's Game.exe), linked only when the build is given them: their tables
 // are weak here.
 #include "game/aot_spike.h"
+#include "runtime/rt_cpu_aot.h"
 #include "game/native_sites.h"
 #include "game/aot_rt.h"
 
@@ -17,6 +18,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <malloc.h>
 #include <map>
 #include <set>
 #include <unordered_map>
@@ -29,6 +31,7 @@ extern "C" {
 
 extern "C" {
 uint8_t *aot_mem = nullptr;
+uint32_t aot_eflags = 0x202;   // aot_rt.h: pushfd's word (IF set, as a thread starts)
 AotFpu *aot_fpu = nullptr;   // aot_rt.h: the running emu's x87 state (Cpu::x87_state)
 // Box86's 80-bit conversions (x87emu_private.c), for fld/fstp m80.
 void LD2D(void *ld, void *d);
@@ -48,6 +51,114 @@ extern const AotTramp aot_tramps[] __attribute__((weak));
 }
 
 using d2rt::Cpu;
+
+// CpuAot (issue #138, rt_cpu_aot.h): the run has no Box86; the dispatcher and
+// a call from compiled code are below, by aot_call_out.
+static bool g_cpu_aot = false;
+#ifdef AOT_SAMPLE_ON
+// The sampled profile (aot_rt.h): the last compiled function entered, or a
+// trap's address inside a shim, or 1 while the thread is switched away. The
+// dispatcher puts back what was there when a trap, a switch or a function it
+// ran returns, so a sample after it is the caller's again (the last function
+// entered before, which is the caller unless a callee of its own returned).
+extern "C" {
+volatile uint32_t aot_at = 0;
+}
+#define AOT_AT_SAVE const uint32_t at_was = aot_at
+#define AOT_AT_SET(v) (aot_at = (v))
+#define AOT_AT_BACK (aot_at = at_was)
+namespace {
+constexpr uint32_t kSampleSlots = 4096;   // open addressing; the sampler thread alone writes
+struct SampleSlot {
+    uint32_t va, n;
+};
+SampleSlot g_samples[kSampleSlots];
+volatile uint32_t g_sample_n = 0, g_sample_lost = 0;
+}
+namespace game {
+void aot_sample()
+{
+    const uint32_t va = aot_at;
+    uint32_t h = (va * 2654435761u) >> 20;
+    for (uint32_t k = 0; k < 64; k++, h = (h + 1) % kSampleSlots) {
+        SampleSlot &s = g_samples[h];
+        if (s.n && s.va != va)
+            continue;
+        s.va = va;
+        s.n++;
+        g_sample_n = g_sample_n + 1;
+        return;
+    }
+    g_sample_lost = g_sample_lost + 1;
+}
+// The window's samples, the most first, and the table cleared.
+static void aot_sample_lines(std::vector<std::string> &out)
+{
+    static SampleSlot top[kSampleSlots];
+    uint32_t n = 0, all = 0;
+    for (SampleSlot &s : g_samples) {
+        if (s.n)
+            top[n++] = s, all += s.n;
+        s.n = 0;
+    }
+    if (!all)
+        return;
+    std::sort(top, top + n, [](const SampleSlot &a, const SampleSlot &b) { return a.n > b.n; });
+    std::string line = "aot samples: " + std::to_string(all) + " (" + std::to_string(n) + " places, " +
+                       std::to_string((unsigned)g_sample_lost) + " lost; 1: switched away, 003xxxxx: a shim):";
+    char w[40];
+    for (uint32_t k = 0; k < n && k < 16; k++) {
+        std::snprintf(w, sizeof w, " %08x %.1f%%", (unsigned)top[k].va, 100.0 * top[k].n / all);
+        line += w;
+    }
+    out.push_back(line);
+}
+}
+#else
+#define AOT_AT_SAVE (void)0
+#define AOT_AT_SET(v) (void)0
+#define AOT_AT_BACK (void)0
+#endif
+// The lane's fault report: the last compiled function the dispatcher entered,
+// the last trap, the last hand-back (aot_resume), each a word written as it
+// happens.
+static volatile uint32_t g_at_fn = 0, g_at_trap = 0, g_at_resume = 0;
+#ifndef __3DS__
+#include <signal.h>
+#include <ucontext.h>
+#include <unistd.h>
+static void cpuaot_fault(int sig, siginfo_t *si, void *uc)
+{
+#if defined(__arm__) && defined(__linux__)
+    {
+        const ucontext_t *u = static_cast<const ucontext_t *>(uc);
+        char w[200];
+        const int m = std::snprintf(w, sizeof w, "[rt] cpu_aot: pc %08lx lr %08lx sp %08lx r0 %08lx r1 %08lx r2 %08lx r3 %08lx\n",
+                                    u->uc_mcontext.arm_pc, u->uc_mcontext.arm_lr, u->uc_mcontext.arm_sp,
+                                    u->uc_mcontext.arm_r0, u->uc_mcontext.arm_r1, u->uc_mcontext.arm_r2,
+                                    u->uc_mcontext.arm_r3);
+        if (m > 0)
+            (void)!write(2, w, (size_t)m);
+    }
+#else
+    (void)uc;
+#endif
+    char b[200];
+    const int n = std::snprintf(b, sizeof b,
+                                "[rt] cpu_aot: signal %d at host %p (guest %08lx): last function %08x, trap %08x, hand-back %08x\n",
+                                sig, si->si_addr, (unsigned long)((uint8_t *)si->si_addr - aot_mem), (unsigned)g_at_fn,
+                                (unsigned)g_at_trap, (unsigned)g_at_resume);
+    if (n > 0)
+        (void)!write(2, b, (size_t)n);
+    _Exit(86);
+}
+#endif
+static std::unordered_map<uint32_t, uint32_t> g_all_at;   // every compiled function: va -> its row
+static std::vector<uint32_t> g_native_slot;               // by row: the trap of the native bound to it, else 0
+extern "C" {   // defined among aot_rt.h's functions
+static bool cpuaot_dispatch(d2rt::Cpu &c, uint32_t eip, uint32_t until);
+static void cpuaot_call(uint32_t x, AotRegs *t);
+}
 
 namespace game {
 uint8_t *aot_guest_base();   // d2_native.cpp: its g_base
@@ -346,6 +457,43 @@ uint32_t g_handed = 0;   // natives' hand-backs to compiled code (aot_trap_for),
 uint32_t g_handed_direct = 0;   // ... and those run in C (aot_direct)
 uint32_t g_callout_shims = 0, g_callout_fns = 0, g_callout_back = 0;
 std::map<uint32_t, uint32_t> g_callout_back_by;
+
+// D2_AOT_STRICT=1 (the lane, issue #138): everything compiled code hands to
+// Box86 over the whole run, by cause and address (aot_strict_lines): what a
+// build with no Box86 has nowhere to send. The cause is set by the runtime's
+// own exits; an exit with none is one the recompiler wrote into the C.
+enum : int {
+    kLeftExit,       // an exit in the compiled code: the address it exits to
+    kLeftNotCompiled,   // a callout to code that isn't compiled
+    kLeftNotHooked,  // a callout to a compiled function not hooked
+    kLeftChanged,    // a function a native changed, with no shim at its entry
+    kLeftBack,       // a callout that came back with another esp or registers, or handed back: the callee
+    kLeftBackWait,   // a callout whose shim waited, the return not a site with an entry: the callee
+    kLeftTrap,       // a wait at a callout, on through the return sites' trap: the callee
+    kLeftReentEnd,   // a thread past its last return site: the address Box86 goes on at
+    kLeftNested,     // a nested run: the callee
+    kLeftCauses
+};
+const char *const kLeftNames[kLeftCauses] = {
+    "an exit in the compiled code, to",
+    "a callout to code that isn't compiled:",
+    "a callout to a compiled function that isn't hooked:",
+    "a function a native changed, with no shim:",
+    "a callout that came back with another esp or registers, or handed back, from",
+    "a callout whose shim waited, its return no site, from",
+    "a wait at a callout, on through the return sites' trap, from",
+    "a thread past its last return site, Box86 on at",
+    "a nested run of",
+};
+const bool g_strict = std::getenv("D2_AOT_STRICT") != nullptr;
+int g_cause = kLeftExit;
+uint32_t g_cause_at = 0;
+std::map<std::pair<int, uint32_t>, uint64_t> g_left;
+inline void left(int cause, uint32_t at)
+{
+    if (g_strict)
+        g_left[{cause, at}]++;
+}
 
 // fn(regs), an exit caught: false when the code exited (into x).
 bool run_catching(AotRootFn fn, uint32_t *regs, ExitJump &x)
@@ -753,11 +901,12 @@ void unhook(Root &R, Cpu &c) { unhook_at(c, R.r->va, R.before, R.hooked); }
 
 }  // namespace
 
-bool aot_resumable(uint32_t va) { return g_mode == AotMode::Sig && g_resume_at.count(va); }
+// (A build with CpuAot has no other mode: the app's switch starts off.)
+bool aot_resumable(uint32_t va) { return (g_mode == AotMode::Sig || g_cpu_aot) && g_resume_at.count(va); }
 
 bool aot_resume(Cpu &c, uint32_t va, uint32_t esp, uint32_t stack_args)
 {
-    if (g_mode != AotMode::Sig)
+    if (g_mode != AotMode::Sig && !g_cpu_aot)
         return false;
     const auto it = g_resume_at.find(va);
     if (it == g_resume_at.end())
@@ -766,6 +915,7 @@ bool aot_resume(Cpu &c, uint32_t va, uint32_t esp, uint32_t stack_args)
     c.regs_gp(r);
     r[4] = esp;
     const uint32_t ra = c.read_u32(esp - it->second->sp);
+    g_at_resume = va;
     Cpu *const prev = g_cpu;
     g_cpu = &c;
     ExitJump x;
@@ -819,6 +969,7 @@ uint32_t reenter(Cpu &c)
         if (it == g_reent_at.end()) {
             target = at;
             g_reent_ended[at]++;
+            left(kLeftReentEnd, at);
             break;
         }
         const uint32_t ra = c.read_u32(r[4] - it->second->sp);
@@ -881,10 +1032,10 @@ bool aot_direct(Cpu &c, uint32_t va, uint32_t *regs)
     // included: with no trap to go back to, a callout's fallback is a nested
     // run, and one through a pointer may wait on another guest thread there
     // (466870's at [6cc4b0] did, in the fight: 10 s, then for good).
-    if (g_mode != AotMode::Sig)
+    if (g_mode != AotMode::Sig && !g_cpu_aot)
         return false;
     const auto it = g_fn_at.find(va);
-    if (it == g_fn_at.end() || g_fns[it->second].f->may_exit)
+    if (it == g_fn_at.end() || (g_fns[it->second].f->may_exit && !g_cpu_aot))   // CpuAot: nothing exits
         return false;
     g_cpu = &c;
     g_no_exit++;
@@ -914,9 +1065,14 @@ void install_fns(Cpu &c)
         n += f->keep ? 1 : 0;
     if (!n)
         return;
+    // CpuAot (issue #138) hooks nothing, so it needs no trampoline, no trap
+    // and no return site's entry: 6.8 MiB of host heap and 448 KiB of the
+    // guest's on the lane. It keeps the rows (aot_direct, the natives' kept
+    // registers) and the hand-backs.
+    const bool hooks = !g_cpu_aot;
     const uint32_t bytes = (uint32_t)((32 * n + 0xfff) & ~(size_t)0xfff);
-    const uint32_t at = rt::va_alloc(bytes, 0x0067b850);
-    if (!at) {
+    const uint32_t at = hooks ? rt::va_alloc(bytes, 0x0067b850) : 0;
+    if (hooks && !at) {
         rt::logf("aot check: no memory for %u trampolines", (unsigned)n);
         return;
     }
@@ -959,6 +1115,8 @@ void install_fns(Cpu &c)
         Fn &F = g_fns.back();
         F.f = f;
         F.fj = fj;
+        if (!hooks)
+            continue;
         F.tramp = at + 32 * (uint32_t)(g_fns.size() - 1);
         uint8_t t[32];
         uint32_t len = f->keep;
@@ -994,7 +1152,8 @@ void install_fns(Cpu &c)
             in_line++;
         }
     }
-    c.invalidate_code(at, bytes);
+    if (hooks)
+        c.invalidate_code(at, bytes);
     for (uint32_t k = 0; k < g_fns.size(); k++)
         g_fn_at[g_fns[k].f->va] = k;
     // D2_AOT_NODIRECT (the lane): the natives' guest_calls nested, as before.
@@ -1018,7 +1177,7 @@ void install_fns(Cpu &c)
         rt::logf("aot: %u of the natives' hand-backs compiled", (unsigned)g_resume_at.size());
     {
         const char *e = std::getenv("D2_AOT_REENT");
-        if (aot_reents && !(e && !std::strcmp(e, "0"))) {
+        if (hooks && aot_reents && !(e && !std::strcmp(e, "0"))) {
             for (const AotReent *r = aot_reents; r->va; r++)
                 g_reent_at[r->va] = r;
             g_reent_trap = rt::native_entry("aot:reenter", 0, [](Cpu &cc) { return reenter(cc); });
@@ -1051,6 +1210,30 @@ int install_aot(Cpu &c)
     }
     aot_mem = aot_guest_base();   // guest 0 in host memory, as the natives have it
     aot_fpu = static_cast<AotFpu *>(c.x87_state());   // issue #136: compiled x87 works on it
+    if (d2rt::cpu_is_aot(c)) {
+        // No Box86 (issue #138): every compiled function reached by its
+        // address, from the dispatcher. Nothing is hooked.
+        g_cpu_aot = true;
+        g_all_at.clear();
+        for (uint32_t k = 0; aot_funcs && aot_funcs[k].va; k++)
+            g_all_at[aot_funcs[k].va] = k;
+        d2rt::cpu_aot_set_dispatch(cpuaot_dispatch);
+        {   // the image, from its PE header: what a write can change the code of
+            const uint32_t base = 0x00400000u;
+            if (aot_mem[base] == 'M' && aot_mem[base + 1] == 'Z') {
+                const uint32_t pe = base + aot_ld32(aot_mem, base + 0x3c);
+                d2rt::cpu_aot_set_code_span(c, base, base + aot_ld32(aot_mem, pe + 0x50));   // SizeOfImage
+            }
+        }
+#ifndef __3DS__
+        struct sigaction sa = {};
+        sa.sa_sigaction = cpuaot_fault;
+        sa.sa_flags = SA_SIGINFO;
+        sigaction(SIGSEGV, &sa, nullptr);
+        sigaction(SIGBUS, &sa, nullptr);
+#endif
+        rt::logf("aot: CpuAot, %u compiled functions by their address, no Box86", (unsigned)g_all_at.size());
+    }
     if (!aot_fpu) {
         rt::logf("aot: the CPU backend doesn't give its x87 state: no compiled code");
         return 0;
@@ -1106,7 +1289,9 @@ int install_aot(Cpu &c)
         n++;
     }
     c.invalidate_code(at, 0x1000);
+    const size_t host0 = mallinfo().uordblks;
     install_fns(c);
+    rt::logf("aot: the functions' rows took %u KiB of host heap", (unsigned)((mallinfo().uordblks - host0) >> 10));
     // Sig and Check hook every compiled function, which the natives' hooks
     // must go in before (issue #115: on the console they're in before the
     // OPTIONS row turns it on); aot_after_natives() turns them on.
@@ -1130,6 +1315,13 @@ void aot_after_natives(Cpu &c)
 
 bool aot_compiled(uint32_t va)
 {
+#ifdef D2RT_CPU_AOT
+    // A build with CpuAot runs nothing but compiled code, from the start
+    // (before install_aot: d2_native asks while it installs).
+    for (uint32_t k = 0; aot_funcs && aot_funcs[k].va; k++)
+        if (aot_funcs[k].va == va)
+            return true;
+#endif
     const AotMode m = g_pending != AotMode::Off ? g_pending : g_mode;
     return (m == AotMode::Sig || m == AotMode::Check) && g_fn_at.count(va);
 }
@@ -1248,6 +1440,8 @@ void set_aot_mode(Cpu &c, AotMode mode)
     if (mode == AotMode::Check && (g_fns.empty() || !g_fns[0].fj))
         mode = AotMode::Sig;
     g_mode = mode;
+    if (g_cpu_aot)   // nothing runs the x86: no hooks; the dispatcher finds what natives changed
+        return;
     // Sig and Check hook every function they can (the roots among them); the
     // spike's other modes the roots alone.
     const bool fns = (mode == AotMode::Sig || mode == AotMode::Check) && !g_fns.empty();
@@ -1308,9 +1502,69 @@ void set_aot_mode(Cpu &c, AotMode mode)
                  unapplied.c_str());
 }
 
+std::vector<std::string> aot_strict_lines()
+{
+    std::vector<std::string> out;
+    if (!g_strict)
+        return out;
+    // The compiled function an address is in, if any.
+    auto owner = [](uint32_t a) -> const AotFunc * {
+        for (size_t k = 0; aot_funcs && aot_funcs[k].va; k++)
+            for (uint32_t j = 0; j + 1 < 2u * aot_funcs[k].nranges; j += 2)
+                if (aot_funcs[k].ranges[j] <= a && a < aot_funcs[k].ranges[j + 1])
+                    return &aot_funcs[k];
+        return nullptr;
+    };
+    uint64_t by[kLeftCauses] = {}, all = 0;
+    size_t places[kLeftCauses] = {};
+    for (const auto &kv : g_left) {
+        by[kv.first.first] += kv.second;
+        places[kv.first.first]++;
+        if (kv.first.first != kLeftTrap)
+            all += kv.second;
+    }
+    char line[256];
+    std::snprintf(line, sizeof line,
+                  "aot strict: %llu times compiled code left to Box86 (a build without it has nowhere to send them), "
+                  "and %llu waits on through the return sites' trap",
+                  (unsigned long long)all, (unsigned long long)by[kLeftTrap]);
+    out.push_back(line);
+    for (int cause = 0; cause < kLeftCauses; cause++) {
+        if (!by[cause])
+            continue;
+        std::vector<std::pair<uint64_t, uint32_t>> rows;
+        for (const auto &kv : g_left)
+            if (kv.first.first == cause)
+                rows.push_back({kv.second, kv.first.second});
+        std::sort(rows.rbegin(), rows.rend());
+        std::snprintf(line, sizeof line, "aot strict: %llu %s %zu places", (unsigned long long)by[cause],
+                      kLeftNames[cause], places[cause]);
+        out.push_back(line);
+        for (size_t k = 0; k < rows.size() && k < 60; k++) {
+            const AotFunc *f = owner(rows[k].second);
+            const d2rt::Shim *sh = rt::bridge().slot_shim(rows[k].second);
+            const bool stale = f && aot_stale[f - aot_funcs];
+            std::snprintf(line, sizeof line, "aot strict:   %08x %llu%s%s%s%s", rows[k].second,
+                          (unsigned long long)rows[k].first,
+                          sh ? " " : f ? (f->va == rows[k].second ? " compiled" : " in ") : " not compiled",
+                          sh ? sh->tag.c_str() : f && f->va != rows[k].second ? f->name : "",
+                          f && !f->keep ? ", can't be hooked" : "", stale ? ", changed by a native" : "");
+            out.push_back(line);
+        }
+        if (rows.size() > 60) {
+            std::snprintf(line, sizeof line, "aot strict:   ... and %zu more places", rows.size() - 60);
+            out.push_back(line);
+        }
+    }
+    return out;
+}
+
 std::vector<std::string> aot_lines()
 {
     std::vector<std::string> out;
+#ifdef AOT_SAMPLE_ON
+    aot_sample_lines(out);
+#endif
     const double empty_us = g_empty_n ? (double)g_empty_ticks / g_empty_n / kTicksPerUs : 0;
     for (int k = 0; k < g_root_count; k++) {
         Root &R = g_roots[k];
@@ -1541,6 +1795,11 @@ void aot_guest_call(uint32_t va, AotRegs *r)
 {
     game::g_nested++;
     game::g_nested_by[va]++;
+    game::left(game::kLeftNested, va);
+    if (g_cpu_aot) {
+        cpuaot_call(va, r);
+        return;
+    }
     if (game::g_journaling)
         game::g_impure = true;   // the check (issue #114): Box86's writes aren't journaled
     if (aot_guest_hook) {
@@ -1551,6 +1810,120 @@ void aot_guest_call(uint32_t va, AotRegs *r)
     game::nested_run(*game::g_cpu, va, r->r);
     game::g_nested_ticks += game::ticks() - t0;
     game::g_nested_n++;
+}
+
+// ---- CpuAot (issue #138, rt_cpu_aot.h): no Box86 ----------------------------
+//
+// The code at eip run until control is at `until` (0: until the thread's
+// sentinel): a compiled function from its entry, then on at the return
+// address it popped; the Bridge's trap (a shim, with its redirects); a
+// native's hook at an entry, its shim. Anything else stops the run.
+static std::map<uint32_t, uint32_t> g_aot_esp_off;        // callouts that came back with another esp, by callee
+
+static void cpuaot_bind(d2rt::Cpu &c)
+{
+    game::g_cpu = &c;
+    aot_fpu = static_cast<AotFpu *>(d2rt::cpu_aot_fpu(c));
+}
+
+static bool cpuaot_dispatch(d2rt::Cpu &c, uint32_t eip, uint32_t until)
+{
+    using namespace game;
+    for (;;) {
+        if (until && eip == until)
+            return true;
+        if (d2rt::cpu_aot_is_trap(c, eip)) {
+            c.set_reg(d2rt::R_EIP, eip);
+            g_at_trap = eip;
+            AOT_AT_SAVE;
+            AOT_AT_SET(eip);
+            if (!d2rt::cpu_aot_trap(c, eip)) {
+                if (eip == rt::bridge().sentinel())
+                    return false;        // the thread's, or a nested run's, end
+                AOT_AT_SET(1);
+                d2rt::cpu_aot_yield(c);  // a yield or a wait: here until the scheduler runs the thread again
+            } else if (d2rt::cpu_aot_slice_over(c)) {
+                AOT_AT_SET(1);
+                d2rt::cpu_aot_yield(c);  // preempted: its slice's share of trap calls made
+            }
+            AOT_AT_BACK;
+            cpuaot_bind(c);
+            eip = c.reg(d2rt::R_EIP);
+            continue;
+        }
+        if (d2rt::cpu_aot_take_code_changed(c) && aot_funcs && aot_funcs[0].va) {
+            uint32_t changed = 0;   // a native hooked: what it changed, for the compiled callers (AOT_STALE)
+            std::string names;
+            stale_funcs(c, changed, names);
+            g_stale_slot.clear();
+            // The natives bound to a function's address (rt::entry_natives):
+            // each one's trap by the function's row, and the row marked so
+            // that compiled callers go to it (aot_call_stale) instead of the
+            // compiled original, which is the hand-backs' alone.
+            g_native_slot.assign(g_all_at.size(), 0);
+            for (const auto &e : rt::entry_natives()) {
+                const auto f = g_all_at.find(e.first);
+                if (f == g_all_at.end())
+                    continue;   // not compiled: the dispatcher asks rt::entry_native
+                g_native_slot[f->second] = e.second;
+                aot_stale[f->second] = 1;
+            }
+            // Each one named: the game writes none of its code, so this is
+            // the natives' installs (one check after them) and then a native
+            // turned on or off, nothing else.
+            static uint32_t checks = 0;
+            rt::logf("aot: the compiled functions' bytes checked against the image (check %u): %u differ%s%s; %u natives bound "
+                     "to their functions' addresses",
+                     (unsigned)++checks, (unsigned)changed, changed ? ": " : "", names.substr(0, 400).c_str(),
+                     (unsigned)rt::entry_natives().size());
+        }
+        if (aot_mem[eip] == 0xe9) {   // a native's hook at the entry: its shim's trap
+            int32_t rel;
+            std::memcpy(&rel, aot_mem + eip + 1, 4);
+            const uint32_t to = eip + 5u + (uint32_t)rel;
+            if (d2rt::cpu_aot_is_trap(c, to)) {
+                eip = to;
+                continue;
+            }
+        }
+        const auto it = g_all_at.find(eip);
+        if (const uint32_t slot = it != g_all_at.end() ? (it->second < g_native_slot.size() ? g_native_slot[it->second] : 0)
+                                                       : rt::entry_native(eip)) {
+            eip = slot;   // a native bound to this function: its trap
+            continue;
+        }
+        if (it == g_all_at.end())
+            d2rt::cpu_aot_stop("no compiled code here", eip);
+        const AotFunc &f = aot_funcs[it->second];
+        if (aot_stale[it->second])   // compiled as a group changes it, and the group isn't applied here
+            d2rt::cpu_aot_stop("the code here isn't what was compiled (a natives' group compiled, not applied)", eip);
+        uint32_t r[8];
+        c.regs_gp(r);
+        const uint32_t esp0 = r[4], ra = aot_ld32(aot_mem, esp0);
+        cpuaot_bind(c);
+        g_at_fn = eip;
+        AOT_AT_SAVE;
+        f.sig(r);
+        AOT_AT_BACK;
+        r[4] = esp0 + 4u + f.pops;
+        for (int k = 0; k < 8; k++)
+            c.set_reg(k, r[k]);
+        eip = ra;
+    }
+}
+
+// A call from compiled code to x, the return address at [esp]: until control
+// is back there, with the registers as the callee left them.
+static void cpuaot_call(uint32_t x, AotRegs *t)
+{
+    d2rt::Cpu &c = *game::g_cpu;
+    const uint32_t ra = aot_ld32(aot_mem, t->r[4]);
+    for (int k = 0; k < 8; k++)
+        c.set_reg(k, t->r[k]);
+    if (!cpuaot_dispatch(c, x, ra))
+        d2rt::cpu_aot_stop("a thread ended inside a call from compiled code to", x);
+    c.regs_gp(t->r);
+    cpuaot_bind(c);
 }
 
 [[noreturn]] static void call_out_back(uint32_t x, uint32_t to, const uint32_t *r, bool clean = false);
@@ -1573,12 +1946,17 @@ void aot_call_stale(uint32_t va, AotRegs *t)
 {
     using namespace game;
     g_stale_by[va]++;
+    if (g_cpu_aot) {
+        cpuaot_call(va, t);
+        return;
+    }
     const d2rt::Shim *sh = game::stale_shim(va);
     if (!sh && !g_no_exit) {
         // No shim at its entry (a patch in line): Box86 runs it from there and
         // returns through the compiled callers' return addresses (issue #138).
         g_stale_guest++;
         uint32_t *r = t->r;
+        g_cause = kLeftChanged;
         aot_exit(va, r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7]);
     }
     if (!sh) {   // nothing to exit to: Box86's call, nested
@@ -1638,6 +2016,14 @@ void aot_exit(uint32_t target, uint32_t eax, uint32_t ecx, uint32_t edx, uint32_
               uint32_t esi, uint32_t edi)
 {
     target = game::aot_site_target(target);
+    if (g_cpu_aot) {
+        rt::logf("cpu_aot: an exit in the compiled code to %08x, its return address %08x", target,
+                 aot_ld32(aot_mem, esp));
+        d2rt::cpu_aot_stop("an exit in the compiled code (a call it can't make in C), to", target);
+    }
+    game::left(game::g_cause, game::g_cause_at ? game::g_cause_at : target);
+    game::g_cause = game::kLeftExit;
+    game::g_cause_at = 0;
     game::ExitJump *x = game::g_exit_jump;
     if (!x || game::g_no_exit) {   // compiled code entered other than by a trap (AotFunc::may_exit not honoured): a bug of ours
         rt::logf("aot: an exit to %08x with no trap to go back to", target);
@@ -1677,9 +2063,12 @@ void aot_exit(uint32_t target, uint32_t eax, uint32_t ecx, uint32_t edx, uint32_
     using namespace game;
     g_callout_back++;
     g_callout_back_by[x]++;
+    g_cause = clean ? kLeftBackWait : kLeftBack;
+    g_cause_at = x;
     if (clean && g_reent_trap && g_mode == AotMode::Sig && g_reent_at.count(to)) {
         g_reent_pending[r[4]] = to;
         to = g_reent_trap;
+        g_cause = kLeftTrap;
     }
     aot_exit(to, r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7]);
 }
@@ -1690,6 +2079,16 @@ void aot_call_out(uint32_t x, AotRegs *t, uint32_t pops)
     x = aot_site_target(x);   // a native's call at one of its sites (native_sites_table.h)
     uint32_t *r = t->r;
     const uint32_t esp0 = r[4], ra = aot_ld32(aot_mem, esp0), want = esp0 + 4u + pops;
+    if (g_cpu_aot) {
+        // No trap to go back to: the callee where it is, whatever it is. One
+        // that pops other than the site counted is named once and goes on
+        // (the code after takes esp as it comes back).
+        cpuaot_call(x, t);
+        if (r[4] != want && !g_aot_esp_off[x]++)
+            rt::logf("cpu_aot: a callout to %08x (return %08x) came back with esp %08x, the site counted %08x", x, ra,
+                     r[4], want);
+        return;
+    }
     const uint32_t keep[4] = {r[3], r[5], r[6], r[7]};
     if (g_no_exit) {
         // No trap to exit to: a compiled callee in C if it can't exit
@@ -1762,8 +2161,10 @@ void aot_call_out(uint32_t x, AotRegs *t, uint32_t pops)
                                     : !g_journaling       ? &aot_funcs[k]
                                     : aotj_funcs && aotj_funcs[k].va == x ? &aotj_funcs[k]
                                                                           : nullptr;
-                if (!af)
+                if (!af) {
+                    g_cause = kLeftNotCompiled;
                     aot_exit(x, r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7]);
+                }
                 af->sig(r);
                 r[4] = esp0 + 4u + aot_funcs[k].pops;
                 if (g_journaling)
@@ -1782,9 +2183,10 @@ void aot_call_out(uint32_t x, AotRegs *t, uint32_t pops)
                 g_callout_fns++;
                 if (r[4] != want)
                     call_out_back(x, ra, r);
-            } else if ((!F.hooked && !F.dropped) || !af)
+            } else if ((!F.hooked && !F.dropped) || !af) {
+                g_cause = kLeftNotHooked;
                 aot_exit(x, r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7]);
-            else {
+            } else {
                 af->sig(r);   // an exit inside goes back to our own trap, as from a direct call
                 r[4] = esp0 + 4u + F.f->pops;
                 if (g_journaling)
@@ -1799,6 +2201,43 @@ void aot_call_out(uint32_t x, AotRegs *t, uint32_t pops)
         return;
     }
     aot_exit(x, r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7]);
+}
+
+// As the backend's ReadTSC (shim_impl.c).
+#ifdef __3DS__
+extern uint64_t svcGetSystemTick(void);
+#endif
+uint64_t aot_rdtsc(void)
+{
+    if (game::g_journaling)
+        game::g_impure = true;   // the check: two reads of the clock never agree
+#ifdef __3DS__
+    return svcGetSystemTick();
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+#endif
+}
+
+// As the backend's my_cpuid (shim_impl.c): compiled code and Box86 see one CPU.
+void aot_cpuid(uint32_t *eax, uint32_t *ebx, uint32_t *ecx, uint32_t *edx)
+{
+    const uint32_t leaf = *eax;
+    *eax = 0;
+    if (leaf == 0) {
+        *eax = 1;
+        *ebx = 0x756e6547;   // GenuineIntel
+        *edx = 0x49656e69;
+        *ecx = 0x6c65746e;
+    } else if (leaf == 1) {
+        *eax = 0x00000681;   // family 6, model 8, stepping 1
+        *ebx = 0;
+        *ecx = 0;
+        *edx = rt::cpuid1_edx();
+    } else {
+        *ebx = *ecx = *edx = 0;
+    }
 }
 
 void aot_bad_ret(uint32_t fn, uint32_t esp0, uint32_t esp)

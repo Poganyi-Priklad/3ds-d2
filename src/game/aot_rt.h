@@ -145,6 +145,14 @@ __attribute__((noreturn)) void aot_exit(uint32_t target, uint32_t eax, uint32_t 
  * or to run guest code, an exit: Box86 goes on at x, or at the return. */
 void aot_call_out(uint32_t x, AotRegs *r, uint32_t pops);
 __attribute__((noreturn)) void aot_fault(uint32_t va);
+/* cpuid, the leaf in eax: what the Box86 backend reports (a Pentium III, the
+ * runtime's feature bits). */
+void aot_cpuid(uint32_t *eax, uint32_t *ebx, uint32_t *ecx, uint32_t *edx);
+/* rdtsc: the backend's clock for it (ReadTSC: the host's monotonic clock in
+ * ns, the system tick on the 3DS). A checked run that reads it isn't compared. */
+uint64_t aot_rdtsc(void);
+/* The flags register's word for pushfd and popfd (not the arithmetic flags). */
+extern uint32_t aot_eflags;
 void aot_journal(uint32_t va, uint32_t n);        /* AOT_JOURNAL: before a store */
 /* d2_native.cpp: our natives, called in C. The high word: 1 if the native
  * covered the call (the low word is its eax), 0 if it hands back. */
@@ -174,7 +182,13 @@ uint64_t aot_native_64d4e0(uint32_t esi, uint32_t room, uint32_t x, uint32_t y);
 
 /* AOT_TRACE_ON (debugging the recompiler): each compiled function's entry
  * and registers, to compare with the game's run under Unicorn. */
-#ifdef AOT_TRACE_ON
+#if defined(AOT_SAMPLE_ON)
+/* AOT_SAMPLE_ON (a profile of a build with no Box86, docs/aot.md): each
+ * compiled function writes its address at its entry, and a host thread reads
+ * the word every 2 ms (aot_sample). */
+extern volatile uint32_t aot_at;
+#define AOT_TRACE(va, ...) (aot_at = (va))
+#elif defined(AOT_TRACE_ON)
 void aot_trace(uint32_t va, uint32_t eax, uint32_t ecx, uint32_t edx, uint32_t ebx, uint32_t esp, uint32_t ebp,
                uint32_t esi, uint32_t edi);
 #define AOT_TRACE(...) aot_trace(__VA_ARGS__)

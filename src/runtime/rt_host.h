@@ -378,6 +378,8 @@ void set_last_error(d2rt::Cpu &c, uint32_t err);
 // Calls guest code from inside a shim (window procedures, callbacks): builds the
 // frame below the caller's ESP, runs to the bridge sentinel, restores registers.
 uint32_t guest_call(d2rt::Cpu &c, uint32_t va, std::initializer_list<uint32_t> args);
+// cpuid leaf 1's edx, as the CPU backend reports it to the game.
+uint32_t cpuid1_edx();
 // AOT (issue #115): guest_call's callee as compiled code, in C, instead of a
 // nested run (8-10 us each on the lane): true when it ran, regs (eax..edi,
 // esp at the return address) in and out. Off: nullptr.
@@ -454,6 +456,13 @@ std::string module_name_of(uint32_t base);
 // guest code (guest_call) and never blocks.
 bool hook_function(d2rt::Cpu &c, uint32_t va, const uint8_t *expect, uint32_t n, uint32_t stack_args,
                    std::function<uint32_t(d2rt::Cpu &)> fn, const char *name, bool in_line = false);
+// On CpuAot (issue #138) hook_function writes nothing into the image: nothing
+// runs the x86, so the native is bound to the function's address here, and
+// the compiled code's dispatcher and callers go to its trap (game/
+// aot_spike.cpp). The image stays the Game.exe that was compiled.
+// entry_natives: each (function, trap); entry_native: a function's, else 0.
+const std::vector<std::pair<uint32_t, uint32_t>> &entry_natives();
+uint32_t entry_native(uint32_t va);
 // Native code the guest can call (or a guest function pointer can hold):
 // registers `fn` as a shim taking `stack_args` dwords, popped on return,
 // and returns its guest address (0 on failure). hook_function is this plus

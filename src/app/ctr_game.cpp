@@ -94,8 +94,16 @@ u32 __ctru_linear_heap_size = 2u << 20;
 // pool refuses new chunks without trying the heap (issue #90), and the JIT
 // evicts old code (#23: exact at 6 MiB of the fight's 7.2 on the lane).
 // Box86 takes it in 2 MiB chunks, so its size is a multiple of 2 MiB.
+#ifdef D2RT_CPU_AOT
+// A build with CpuAot (issue #138) has no translated code to keep: a page
+// stands for the pool, which the memory services (mman_ctr.c) name, and its
+// 14 MiB are the game's.
+alignas(0x1000) uint8_t dyn86_ctr_jitpool[0x1000];
+extern const uint32_t dyn86_ctr_jitpool_size = 0x1000;
+#else
 alignas(0x1000) uint8_t dyn86_ctr_jitpool[14u << 20];
 extern const uint32_t dyn86_ctr_jitpool_size = 14u << 20;
+#endif
 extern uint32_t dyn86_ctr_jitpool_refused;   // mman_ctr.c: chunks refused, the pool full
 // The tile prefetch's store (issue #89, rt::set_prefetch_arena), here for
 // the same reason: out of the heap, whose last MiB the JIT's records and
@@ -1223,6 +1231,25 @@ void sampler_main(void *)
         rt::profile_tick();
     }
 }
+
+#ifdef AOT_SAMPLE_ON
+// The AOT build's own profile (game/aot_spike.cpp, aot_sample): the compiled
+// function the game is in, every 2 ms, from the render core.
+void aot_sampler_main(void *)
+{
+    for (;;) {
+        svcSleepThread(2000000);
+        game::aot_sample();
+    }
+}
+void start_aot_sampler()
+{
+    s32 prio = 0x30;
+    svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
+    const Thread t = threadCreate(aot_sampler_main, nullptr, 4 * 1024, prio - 3, g_render_core >= 0 ? g_render_core : 2, false);
+    status("aot sampler: %s", t ? "every 2 ms" : "not started");
+}
+#endif
 
 void start_sampler()
 {
@@ -2438,6 +2465,27 @@ extern "C" __attribute__((noreturn)) void __wrap_abort(void)
 // heap and the linear memory set aside for jump tables allow.
 static const rt::Layout *reserve_arena()
 {
+#ifdef D2RT_CPU_AOT
+    // A build with CpuAot (issue #138): no jump tables, no JIT records and no
+    // alignment the backend asks for, so the arena is the heap less what the
+    // host itself uses, whatever the heap's size (the compiled code is in the
+    // executable, and the heap is the smaller for it: 93 MiB in Azahar).
+    // kAotHostHeap: the host used 8.3 MiB at most outside the arena in
+    // Azahar's town-walk (the cinematics; 7.3 in town), and Box86's builds
+    // run with 4 MiB of room. The map is kCtrGameLayoutN3's with the pool's
+    // end moved.
+    constexpr u32 kAotHostHeap = 12u << 20;
+    static rt::Layout aot = rt::kCtrGameLayoutN3;
+    const u32 span = __ctru_heap_size > kAotHostHeap ? (__ctru_heap_size - kAotHostHeap) & ~0xFFFFFu : 0;
+    if (span >= rt::kCtrGameLayout.span && (g_arena = memalign(0x1000, span))) {
+        aot.name = "ctr-game-aot";
+        aot.span = span;
+        aot.va_size = span - aot.va_base;
+        g_arena_block = g_arena;
+        g_arena_size = span;
+        return &aot;
+    }
+#endif
     const bool full = __ctru_heap_size >= (95u << 20);
     // The larger arena only with 3 MiB of jump tables in linear memory. The
     // console set 1,792 KiB aside, so it has always run ctr-game-n3-heap;
@@ -2778,6 +2826,9 @@ int main()
     game::sprite_trace_set_wrap([](FILE *f, char *buf, size_t n) { return app::writer_wrap(f, buf, n, "sprites.trc"); });
     aptHook(&g_apt_cookie, apt_hook, nullptr);
     start_input_sampler();
+#ifdef AOT_SAMPLE_ON
+    start_aot_sampler();
+#endif
     rt::RunResult r = rt::run_exe(std::move(exe), opt);
     stop_input_sampler();
     join_io_thread();

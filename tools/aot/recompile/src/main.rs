@@ -172,6 +172,11 @@ fn main() {
     let mut starts = driver::load_starts(&a.functions);
     let site_calls = img.site_call_targets();
     starts.extend(site_calls.iter().copied());
+    // An address inside an applied site is no function's entry any more
+    // (issue #138: cinematics' play loop goes over the GDI renderer's three
+    // video stubs; 6c7cd0 and 6c7ce0, still listed, cut it at its second call).
+    let within_site = |v: u32| img.sites.iter().any(|&(_, s, n)| s < v && v < s + n as u32) && !site_calls.contains(&v);
+    starts.retain(|v| !within_site(*v));
     if a.census {
         census::census(&img, &starts, &a.functions, &a.out, &a.hot, &modes(&a.modes), callouts);
         return;
@@ -207,9 +212,11 @@ fn main() {
         let mut have: HashSet<u32> = extra.iter().chain(roots.iter()).copied().collect();
         let mut inside: HashSet<u32> = HashSet::new();
         let mut found: BTreeSet<u32> = BTreeSet::new();
+        let mut insn_at: std::collections::BTreeMap<u32, u32> = std::collections::BTreeMap::new();
         for &va in &extra {
             let f = prog.func(va);
             inside.extend(f.insns.keys().filter(|&&a| a != va).copied());
+            insn_at.extend(f.insns.iter().map(|(a, i)| (*a, i.size)));
             for i in f.insns.values() {
                 if i.mnemonic.starts_with("call") || i.mnemonic.starts_with('j') {
                     continue;
@@ -217,9 +224,15 @@ fn main() {
                 for op in &i.ops {
                     if let cs::OpKind::Imm(v) = op.kind {
                         let t = v as u32;
-                        if t >= img.text_lo && t < img.text_hi && t % 16 == 0 && !have.contains(&t) {
+                        if t >= img.text_lo && t < img.text_hi && !have.contains(&t) {
                             let pad = img.mem[(t - 1 - img.base) as usize];
-                            if pad == 0xcc || pad == 0x90 {
+                            // ... or, moved or pushed, right after a ret on any
+                            // byte: the C runtime's functions have no pads
+                            // (688c2b, its TlsAlloc wrapper, stored by 688fbb).
+                            let ret = pad == 0xc3 || img.mem[(t - 3 - img.base) as usize] == 0xc2;
+                            if (t % 16 == 0 && (pad == 0xcc || pad == 0x90))
+                                || (ret && matches!(i.mnemonic.as_str(), "mov" | "push"))
+                            {
                                 found.insert(t);
                             }
                         }
@@ -227,7 +240,10 @@ fn main() {
                 }
             }
         }
-        found.retain(|t| !inside.contains(t));
+        // Not at, nor inside, an instruction of a listed function.
+        found.retain(|t| {
+            !inside.contains(t) && !insn_at.range(..*t).next_back().is_some_and(|(a, n)| a.wrapping_add(*n) > *t)
+        });
         println!("aot: {} code pointers in the listed functions' immediates added", found.len());
         for t in found {
             have.insert(t);
@@ -238,9 +254,22 @@ fn main() {
         // which a compiled caller reached only as an exit).
         let mut found: BTreeSet<u32> = BTreeSet::new();
         for &(_, t) in &img.data_pointers {
-            if t >= img.text_lo && t < img.text_hi && t % 16 == 0 && !have.contains(&t) && !inside.contains(&t) {
+            if t >= img.text_lo && t < img.text_hi && !have.contains(&t) && !inside.contains(&t) {
                 let pad = img.mem[(t - 1 - img.base) as usize];
-                if pad == 0xcc || pad == 0x90 {
+                // ... or right after a ret (6c9270, in the table at 0x74c56c,
+                // follows 6c9260's ret 4 with no pad), on any byte: the C
+                // runtime's initializers in its table at 0x6cc728 (6837b9)
+                // have no pads. Not inside an instruction of a listed function.
+                let ret = pad == 0xc3 || img.mem[(t - 3 - img.base) as usize] == 0xc2;
+                let within = insn_at.range(..t).next_back().is_some_and(|(a, n)| a.wrapping_add(*n) > t);
+                // ... or on 16 bytes after anything (a switch's table before
+                // it: 676280, 6768c0, 58ea50), where it decodes as a function
+                // that returns.
+                let decodes = || {
+                    let f = prog.func(t);
+                    f.refused.is_none() && !f.rets.is_empty()
+                };
+                if (t % 16 == 0 && (pad == 0xcc || pad == 0x90)) || (ret && !within) || (t % 16 == 0 && !within && decodes()) {
                     found.insert(t);
                 }
             }
@@ -250,6 +279,79 @@ fn main() {
             have.insert(t);
             extra.push(t);
         }
+        // And what all of these call or jump to directly that isn't on any
+        // list (issue #138: 43eb30, 4408b0 and some 25 more were exits, with
+        // nothing to exit to on CpuAot): the targets of direct calls are
+        // functions' entries.
+        let all: Vec<u32> = extra.iter().chain(roots.iter()).copied().collect();
+        let mut callees: Vec<u32> = prog
+            .closure(&all, 1 << 20)
+            .into_iter()
+            .filter(|t| !have.contains(t) && *t >= img.text_lo && *t < img.text_hi)
+            .collect();
+        callees.sort();
+        println!("aot: {} direct callees of those added", callees.len());
+        for t in callees {
+            have.insert(t);
+            extra.push(t);
+        }
+        // And the code pointers in the immediates of the functions found
+        // since, with their direct callees, until none is new (44bbb0, pushed
+        // by 44bc30, which the data's pointers found).
+        let mut scanned: HashSet<u32> = HashSet::new();
+        let mut more = 0usize;
+        loop {
+            let mut found: BTreeSet<u32> = BTreeSet::new();
+            for &va in &extra {
+                if !scanned.insert(va) {
+                    continue;
+                }
+                let f = prog.func(va);
+                inside.extend(f.insns.keys().filter(|&&a| a != va).copied());
+                insn_at.extend(f.insns.iter().map(|(a, i)| (*a, i.size)));
+                for i in f.insns.values() {
+                    if i.mnemonic.starts_with("call") || i.mnemonic.starts_with('j') {
+                        continue;
+                    }
+                    for op in &i.ops {
+                        if let cs::OpKind::Imm(v) = op.kind {
+                            let t = v as u32;
+                            if t >= img.text_lo && t < img.text_hi && !have.contains(&t) {
+                                let pad = img.mem[(t - 1 - img.base) as usize];
+                                let ret = pad == 0xc3 || img.mem[(t - 3 - img.base) as usize] == 0xc2;
+                                if (t % 16 == 0 && (pad == 0xcc || pad == 0x90))
+                                    || (ret && matches!(i.mnemonic.as_str(), "mov" | "push"))
+                                {
+                                    found.insert(t);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            found.retain(|t| {
+                !inside.contains(t) && !insn_at.range(..*t).next_back().is_some_and(|(a, n)| a.wrapping_add(*n) > *t)
+            });
+            let mut add: Vec<u32> = found.into_iter().collect();
+            let reach: Vec<u32> = prog
+                .closure(&add, 1 << 20)
+                .into_iter()
+                .filter(|t| !have.contains(t) && *t >= img.text_lo && *t < img.text_hi)
+                .collect();
+            add.extend(reach);
+            add.sort();
+            add.dedup();
+            if add.is_empty() {
+                break;
+            }
+            more += add.len();
+            for t in add {
+                have.insert(t);
+                extra.push(t);
+            }
+        }
+        println!("aot: {} more from the immediates of those found", more);
+        extra.retain(|v| !within_site(*v));
     }
     let intr = intrinsics();
     let nat = natives();

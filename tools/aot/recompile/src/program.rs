@@ -53,6 +53,10 @@ pub fn natives() -> HashMap<u32, Native> {
     m
 }
 
+/// The C runtime's x87 math entries compiled as libm's (st0 in, st0 out; fpow
+/// takes st1 and st0).
+pub const FMATH: [&str; 6] = ["fsin", "fcos", "fsqrt", "flog", "flog10", "fpow"];
+
 pub fn intrinsics() -> HashMap<u32, &'static str> {
     let mut m = HashMap::new();
     m.insert(0x00681ef0, "memset");
@@ -61,9 +65,20 @@ pub fn intrinsics() -> HashMap<u32, &'static str> {
     // The C runtime's sine and cosine of st0, in st0 (issue #138): hand-written
     // code that passes flags and the stack between its pieces (688590 into
     // 6885e8, 6987d8, 6987fb), refused. 61bb80 calls them.
+    m.insert(0x00682990, "strrchr");   // repne scasb twice, the second with the direction flag set
     m.insert(0x00688590, "fsin");
     m.insert(0x006886c0, "fcos");
+    // ... and its square root, logarithms and power, the same way (6879dd,
+    // 687b18, 687ef8, 687c6d refused). A build that reports no SSE2 (the
+    // 3DS's) takes these x87 paths; the lane's takes the SSE2 ones.
+    m.insert(0x006879c0, "fsqrt");
+    m.insert(0x00687ac0, "flog");
+    m.insert(0x00687ea0, "flog10");
+    m.insert(0x00687c10, "fpow");   // st1 to the power st0, popped
     m.insert(0x006831b0, "alloca_probe");
+    // The same with the block's address on 16 bytes: eax rounded up by what
+    // the caller's esp less eax leaves over, then alloca_probe (a tail call).
+    m.insert(0x006869d0, "alloca_probe_16");
     m
 }
 
@@ -208,6 +223,10 @@ pub struct Program<'a> {
     pub may_exit: HashSet<u32>,
     pub may_hard: HashSet<u32>,
     pub plain: HashSet<u32>,
+    /// ... and those whose calls to imports are plain exits too.
+    pub plain_all: HashSet<u32>,
+    /// Pops found for a function's guessed callouts (solve_pops), kept across its rebuilds.
+    pub pops_fix: HashMap<u32, Vec<(u32, i64)>>,
     /// Why each of plain's was made plain: the refusal its callouts gave.
     pub plain_why: HashMap<u32, String>,
     pub noreturn_funcs: HashSet<u32>,
@@ -241,6 +260,8 @@ impl<'a> Program<'a> {
             may_exit: HashSet::new(),
             may_hard: HashSet::new(),
             plain: HashSet::new(),
+            plain_all: HashSet::new(),
+            pops_fix: HashMap::new(),
             plain_why: HashMap::new(),
             noreturn_funcs: HashSet::new(),
             why: HashMap::new(),
@@ -318,7 +339,7 @@ impl<'a> Program<'a> {
         }
         if let Some(&name) = self.intrinsics.get(&t) {
             return match name {
-                "alloca_probe" => Summary {
+                "alloca_probe" | "alloca_probe_16" => Summary {
                     reads: set_of(&[EAX, ECX, ESP]),
                     preserved: set_of(&[ECX, EDX, EBX, EBP, ESI, EDI]),
                     pops: Some(0),
@@ -374,6 +395,49 @@ impl<'a> Program<'a> {
         out
     }
 
+    fn renderer_slot_pops(&self, f: &Func) -> Option<i64> {
+        const RENDERER: i64 = 0x007c8cc0;
+        const GDI_TABLE: u32 = 0x0074c4a8;
+        let mut order: Vec<u32> = f.insns.keys().copied().collect();
+        order.sort();
+        let mut table_reg: Option<u16> = None;
+        for a in order {
+            let i = &f.insns[&a];
+            for (k, op) in i.ops.iter().enumerate() {
+                if !op.is_mem() {
+                    continue;
+                }
+                let m = op.mem();
+                if m.base == 0 && m.index == 0 && m.disp == RENDERER && i.mnemonic == "mov" && k == 1 && i.ops[0].is_reg() {
+                    table_reg = Some(i.ops[0].reg());
+                } else if table_reg.is_some_and(|r| m.base == r) && m.index == 0 && (0..0x400).contains(&m.disp) && m.disp % 4 == 0 {
+                    // The three video slots hold cinematics.cpp's play loop
+                    // and two natives when it is installed, with the game's
+                    // own pops ("return 0", "ret 4", "return 0").
+                    match m.disp {
+                        0x34 | 0x3c => return Some(0),
+                        0x38 => return Some(4),
+                        _ => {}
+                    }
+                    let mut b = [0u8; 4];
+                    for (j, x) in b.iter_mut().enumerate() {
+                        *x = self.img.u8(GDI_TABLE + m.disp as u32 + j as u32);
+                    }
+                    let t = u32::from_le_bytes(b);
+                    if !self.img.in_text(t) {
+                        return None;
+                    }
+                    let g = self.func(t);
+                    if g.refused.is_some() || g.ret_pops.len() != 1 {
+                        return None;
+                    }
+                    return g.ret_pops.iter().next().copied();
+                }
+            }
+        }
+        None
+    }
+
     /// What each thunk through a pointer pops (issue #138).
     pub fn compute_thunk_pops(&self) -> HashMap<u32, i64> {
         let img = self.img;
@@ -394,6 +458,15 @@ impl<'a> Program<'a> {
                 };
                 if !imp.contains(&v) {
                     imp.push(v);
+                }
+            }
+            // A jump through the renderer's table (issue #138: 4f5d60's mov
+            // eax, [7c8cc0]; mov eax, [eax + 0x34]; jmp eax): what the GDI
+            // renderer's function in that slot pops (its table at 0x74c4a8;
+            // every renderer's has the slot's signature).
+            if imp == vec![Some(-1)] {
+                if let Some(p) = self.renderer_slot_pops(&f) {
+                    imp = vec![Some(p)];
                 }
             }
             thunks.insert(va, if imp == vec![Some(-1)] { Vec::new() } else { imp });
@@ -436,18 +509,36 @@ impl<'a> Program<'a> {
         out
     }
 
+    /// The function with `fix` as its guessed callouts' pops (solve_pops).
+    pub fn with_pops(&mut self, va: u32, fix: Vec<(u32, i64)>) {
+        let f = self.func(va);
+        let mut g = Func::new(self.img, va, &self.starts);
+        g.pops_fix = fix.clone();
+        let tp = self.thunk_pops.as_ref().and_then(|m| m.get(&va).copied());
+        g.set_exits(&f.exits, 0, tp, self.img, self.callouts);
+        self.pops_fix.insert(va, fix);
+        self.set_func(va, g);
+    }
+
     /// A function whose callouts' pops threw its stack off: its indirect
-    /// and import calls plain exits instead. False if they were already.
+    /// calls plain exits instead, its calls to imports whose pops are known
+    /// still callouts; a second time, those too. False if they all were
+    /// already.
     pub fn make_plain(&mut self, va: u32, why: &str) -> bool {
         let f = self.func(va);
-        if f.plain || f.callouts.is_empty() {
+        if f.plain_all || f.callouts.is_empty() {
             return false;
+        }
+        let level = if f.plain { 2 } else { 1 };
+        if level == 2 {
+            self.plain_all.insert(va);
         }
         self.plain.insert(va);
         self.plain_why.insert(va, why.to_string());
         let mut g = Func::new(self.img, va, &self.starts);
+        g.pops_fix = self.pops_fix.get(&va).cloned().unwrap_or_default();
         let tp = self.thunk_pops.as_ref().and_then(|m| m.get(&va).copied());
-        g.set_exits(&f.exits, false, tp, self.img, self.callouts);
+        g.set_exits(&f.exits, level, tp, self.img, self.callouts);
         self.set_func(va, g);
         true
     }
@@ -472,13 +563,15 @@ impl<'a> Program<'a> {
             } else {
                 BTreeSet::new()
             };
-            if want == f.exits && f.plain == self.plain.contains(&va) {
+            if want == f.exits && f.plain == self.plain.contains(&va) && f.plain_all == self.plain_all.contains(&va) {
                 continue;
             }
             let mut g = Func::new(self.img, va, &self.starts);
+            g.pops_fix = self.pops_fix.get(&va).cloned().unwrap_or_default();
             if !want.is_empty() {
                 let tp = self.thunk_pops.as_ref().and_then(|m| m.get(&va).copied());
-                g.set_exits(&want, !self.plain.contains(&va), tp, self.img, self.callouts);
+                let level = if self.plain_all.contains(&va) { 2 } else if self.plain.contains(&va) { 1 } else { 0 };
+                g.set_exits(&want, level, tp, self.img, self.callouts);
             }
             self.set_func(va, g);
             n += 1;

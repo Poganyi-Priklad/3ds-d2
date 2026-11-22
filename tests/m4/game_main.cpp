@@ -44,6 +44,7 @@
 #include "game/cinematics.h"
 #include "game/controls.h"
 #include "game/d2_memory.h"
+#include "runtime/rt_cpu_aot.h"
 #include "game/aot_spike.h"
 #include "game/d2_native.h"
 #include "game/d2_state.h"
@@ -236,8 +237,7 @@ int main(int argc, char **argv)
     static const bool sprite_frames = ctr && (!std::getenv("M4_SPRITE_FRAMES") || std::string(std::getenv("M4_SPRITE_FRAMES")) != "0");
     opt.install_native = [](d2rt::Cpu &c) {
         guest_cpu = &c;
-        if (sprite_floor)
-            game::set_sprite_cache_floor(c, sprite_floor);
+        game::set_sprite_cache_floor(c, sprite_floor);   // 0: the game's own floor, its code as the AOT code is compiled
         game::install_sprite_cache_counter(c);
         game::install_sprite_decode_timer(c);
         game::install_sprite_trace(c);
@@ -266,6 +266,8 @@ int main(int argc, char **argv)
             game::install_d2_native(c);
         if (video)
             game::install_cinematics(c);
+        else
+            game::install_cinematics(c, false);   // its code as the AOT code is compiled, nothing played
         game::install_automap_capture(c);
         game::aot_after_natives(c);   // D2_AOT's Sig or Check, once the natives are in (issue #115)
     };
@@ -652,6 +654,10 @@ int main(int argc, char **argv)
         std::fprintf(stderr, "[rt] FATAL %s\n", r.error.c_str());
         return 3;
     }
+    for (const std::string &l : game::aot_strict_lines())   // D2_AOT_STRICT=1 (issue #138)
+        std::fprintf(stderr, "[rt] %s\n", l.c_str());
+    for (const std::string &l : d2rt::cpu_aot_lines())      // a CPU=aot build: the threads' host stacks
+        std::fprintf(stderr, "[rt] %s\n", l.c_str());
     std::fprintf(stderr, "[rt] RESULT exited=%d timed_out=%d code=%u %s\n", r.exited, r.timed_out, r.exit_code,
                  r.error.c_str());
     std::fflush(stdout);

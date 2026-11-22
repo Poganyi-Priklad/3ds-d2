@@ -261,6 +261,16 @@ impl<'p, 'a> Analysis<'p, 'a> {
             return;
         };
         let e = ESP as usize;
+        if m == "pushfd" {
+            self.prologue = false;
+            slots.insert(sp - 4, None);
+            regs[e] = Some(Val::Sp(sp - 4));
+            return;
+        }
+        if m == "popfd" {
+            regs[e] = Some(Val::Sp(sp + 4));
+            return;
+        }
         if m == "push" {
             let v = self.val(&ops[0], regs, slots);
             let r = if ops[0].is_reg() { reg_full(ops[0].reg()).map(|s| s.0) } else { None };
@@ -309,6 +319,13 @@ impl<'p, 'a> Analysis<'p, 'a> {
                     self.frame_helper(name, i, regs, slots);
                     return;
                 }
+                if name == "alloca_probe_16" {
+                    // The size rounded by esp's low bits: not known here; the
+                    // frame's own register finds the stack again.
+                    regs[e] = None;
+                    regs[EAX as usize] = None;
+                    return;
+                }
                 if name == "alloca_probe" {
                     let Some(Val::K(n)) = regs[EAX as usize] else {
                         regs[e] = None;
@@ -333,12 +350,12 @@ impl<'p, 'a> Analysis<'p, 'a> {
                     regs[r as usize] = None;
                 }
             }
-            let mm = matches!(intr, Some("memset") | Some("memcpy"));
+            let mm = matches!(intr, Some("memset") | Some("memcpy") | Some("strrchr"));
             if mm || t.direct().is_some_and(|d| p.native_direct(d)) {
                 regs[ECX as usize] = Some(Val::Clob);
                 regs[EDX as usize] = Some(Val::Clob);
             }
-            if matches!(intr, Some("fsin") | Some("fcos")) {
+            if intr.is_some_and(|n| crate::program::FMATH.contains(&n)) {
                 regs[EAX as usize] = Some(Val::Clob);
                 regs[ECX as usize] = Some(Val::Clob);
                 regs[EDX as usize] = Some(Val::Clob);

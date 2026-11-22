@@ -3,7 +3,7 @@
 # inside the ctrtools image, started by `scripts/docker.sh package-cia
 # [--slim|--full <game-dir>]`. D2_CIA_MODE:
 #   sdcard  (default) the app alone, ~2 MB: it reads the game files from
-#           sdmc:/3ds/3ds-d2/game/ (copied there once). dist/cia/3ds-d2-<version>-<id>.cia
+#           sdmc:/3ds/3ds-d2/game/ (copied there once). dist/cia/3ds-d2-<cpu>-<version>-<id>.cia
 #   slim    with the user's Game.exe, d2data, d2exp, d2char, d2sfx and patch_d2
 #           in its RomFS; the cinematic, music and speech archives become empty
 #           MPQs (the game only checks that they exist). ~0.8 GB. ...-slim.cia
@@ -21,7 +21,10 @@
 # needs the SMDH's extendedbanner flag.
 set -eu
 cd /work
-elf=build/cpu/ctr/3ds-d2-game-cia.elf
+# D2_CIA_CPU (docker.sh): the CPU backend this CIA is built with, x86 (Box86)
+# or aot (CpuAot, no Box86), in its name; its code is in D2_CIA_ELF_DIR.
+cpu="${D2_CIA_CPU:-x86}"
+elf="${D2_CIA_ELF_DIR:-build/cpu/ctr}/3ds-d2-game-cia.elf"
 [ -f "$elf" ] || { echo "package-cia.sh: $elf missing" >&2; exit 1; }
 mode="${D2_CIA_MODE:-sdcard}"
 romfs=build/cia/romfs
@@ -84,7 +87,7 @@ bannertool makesmdh -s "3ds-d2" -l "Diablo II LoD 1.14d on the n3DS" -p "https:/
 id="${D2_BUILD_ID:-$(sh scripts/build-id.sh 2>/dev/null || echo unversioned)}"
 # The name says the version reports carry: "0.4.0-dev" unless built from the
 # release tag (docker.sh passes scripts/version.sh's; issue #61).
-name="3ds-d2-${D2_VERSION:-$version-dev}-$id"
+name="3ds-d2-$cpu-${D2_VERSION:-$version-dev}-$id"
 case "$mode" in sdcard) cia="$out/$name.cia" ;; *) cia="$out/$name-$mode.cia" ;; esac
 size="$(du -shL "$romfs" | cut -f1)"
 echo "packing $cia ($mode, RomFS $size)..."
