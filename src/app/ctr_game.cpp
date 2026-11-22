@@ -1594,11 +1594,7 @@ void load_settings()
             g_dyn_budgettail = std::atoi(line + 11);
         else if (std::strncmp(line, "forward=", 8) == 0)
             g_dyn_forward = std::atoi(line + 8);
-        else if (std::strncmp(line, "cpu=", 4) == 0) {   // "cpu=aot" (issue #138): CpuAot, no Box86 (rt_cpu_aot.h)
-            char v[16] = {};
-            std::sscanf(line + 4, "%15[a-z0-9]", v);
-            setenv("D2_CPU", v, 1);
-        } else if (std::strncmp(line, "aotfns=", 7) == 0) {   // a measurement's (Azahar), issue #115: D2_AOT_FNS
+        else if (std::strncmp(line, "aotfns=", 7) == 0) {   // a measurement's (Azahar), issue #115: D2_AOT_FNS
             unsigned first = 0, last = 0;
             if (std::sscanf(line + 7, "%u-%u", &first, &last) == 2)
                 game::set_aot_fns(first, last);

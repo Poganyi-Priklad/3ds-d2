@@ -47,6 +47,11 @@ AOT   ?=
 # AOT_VARIANTS=d AOT_OPT=-O1, in an OUT of its own: the runtime's lookups of
 # the other two are weak.
 AOT_VARIANTS ?= d n j
+# CPU: the CPU backend the binary is built with, at compile time (issue #138):
+# box86, or aot (CpuAot, rt_cpu_aot.h: the AOT code alone, the dynarec not
+# linked; needs AOT=).
+CPU ?= box86
+CPUDEF := $(if $(filter aot,$(CPU)),-DD2RT_CPU_AOT,-DD2RT_CPU_BOX86)
 AOT_OPT ?= -O2 -g
 AOT_SPLIT ?=
 AOTDIR := $(BIN_OUT)/aot$(if $(AOT_SPLIT),-split)
@@ -101,8 +106,8 @@ $(AOTDIR)/j/%.o: $(AOT)/%.c $(ROOT)/src/game/aot_rt.h
 $(HOST): $(SRCS) png.h $(wildcard $(ROOT)/src/runtime/rt_*.h) $(wildcard $(ROOT)/src/game/*.h) \
                $(wildcard $(ROOT)/src/game/bink/*.h) $(LIB) $(AOTOBJ)
 	@mkdir -p $(BIN_OUT)
-	$(CXX) -std=gnu++17 -O2 -g $(ARCH) -DD2RT_CPU_BOX86 $(PROFDEF) -Wall -Wextra -Wno-unused-parameter $(INC) \
-	  -static -o $@ $(SRCS) $(AOTOBJ) $(LIB) -lpthread -lm
+	$(CXX) -std=gnu++17 -O2 -g $(ARCH) $(CPUDEF) $(PROFDEF) -Wall -Wextra -Wno-unused-parameter $(INC) \
+	  -static -Wl,-Map=$@.map -o $@ $(SRCS) $(AOTOBJ) $(LIB) -lpthread -lm
 
 clean:
 	rm -rf $(OUT)

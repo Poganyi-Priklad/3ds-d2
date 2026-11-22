@@ -1593,16 +1593,20 @@ RunResult run_exe(std::vector<uint8_t> exe, const RunOptions &opt)
     if (g_opt.cpuid_edx)
         wx86_set_cpuid1_edx(g_opt.cpuid_edx);
     g_cpuid1_edx = g_opt.cpuid_edx ? g_opt.cpuid_edx : kCpuid1EdxDefault;
-    // D2_CPU=aot (the lane, issue #138): no Box86, the AOT recompiler's C on
-    // a host stack a guest thread (rt_cpu_aot.h); what it can't run stops the
-    // run with a report.
-    Cpu *cpu = nullptr;
-    if (const char *which = std::getenv("D2_CPU"); which && std::string(which) == "aot") {
-        cpu = make_cpu_aot();
-        logf(cpu ? "cpu: CpuAot, no Box86 (D2_CPU=aot)" : "cpu: D2_CPU=aot isn't available on this host; Box86");
+    // The CPU backend is the build's (issue #138): with D2RT_CPU_AOT, CpuAot,
+    // the AOT recompiler's C on a host stack a guest thread (rt_cpu_aot.h),
+    // and no Box86 linked: its memory is the game's. What CpuAot can't run
+    // stops the run with a report.
+#ifdef D2RT_CPU_AOT
+    Cpu *cpu = make_cpu_aot();
+    if (!cpu) {
+        logf("cpu: CpuAot isn't available on this host");
+        std::abort();
     }
-    if (!cpu)
-        cpu = make_cpu_box86();
+    logf("cpu: CpuAot, a build with no Box86");
+#else
+    Cpu *cpu = make_cpu_box86();
+#endif
     static std::unique_ptr<Bridge> br;
     br.reset(new Bridge(cpu));
     g_br = br.get();

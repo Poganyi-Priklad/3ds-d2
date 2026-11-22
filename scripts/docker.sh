@@ -140,6 +140,7 @@ aot_recompile() {
 aot_make_opts() {
     [ -z "${AOT_VARIANTS:-}" ] || AOT_MAKE+=("AOT_VARIANTS=$AOT_VARIANTS")
     [ -z "${AOT_OPT:-}" ] || AOT_MAKE+=("AOT_OPT=$AOT_OPT")
+    [ -z "${AOT_CPU:-}" ] || AOT_MAKE+=("CPU=$AOT_CPU")   # aot: built with CpuAot, no Box86 (issue #138)
 }
 aot_prepare() {
     case "${D2_AOT_BUILD:-}" in
