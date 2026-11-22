@@ -226,7 +226,13 @@ void Controls::menu_flick(const Pad &pad)
     if (!flick.happened)
         return;
     flick_held_ = std::sqrt(x * x + y * y) >= AimFlicks::kCentre;
-    const NavDirection dir = nav_direction(flick.dir_x, flick.dir_y);
+    menu_step(nav_direction(flick.dir_x, flick.dir_y), "flick");
+}
+
+// One cell step `dir` from where the flick began (or, for the D-pad, the
+// cursor): `how` names it in game.log.
+void Controls::menu_step(NavDirection dir, const char *how)
+{
     menu_world_->windows(ui_, w_, h_, menu_windows_);
     menu_scroll_ = NavScroll();
     for (const NavWindow &win : menu_windows_)
@@ -235,12 +241,12 @@ void Controls::menu_flick(const Pad &pad)
     const MenuNav::Step step =
         menu_nav_.step(menu_windows_, flick_from_x_, flick_from_y_, dir, holding_, w_, h_);
     if (step.moved) {
-        rt::logf("menu: flick %s from %d,%d: %s, to %d,%d", nav_direction_name(dir), flick_from_x_, flick_from_y_,
+        rt::logf("menu: %s %s from %d,%d: %s, to %d,%d", how, nav_direction_name(dir), flick_from_x_, flick_from_y_,
                  step.why, step.x, step.y);
         move_cursor(step.x, step.y);
         circle_acc_x_ = circle_acc_y_ = 0;
     } else {
-        rt::logf("menu: flick %s from %d,%d: nowhere to go (%u windows)", nav_direction_name(dir), flick_from_x_,
+        rt::logf("menu: %s %s from %d,%d: nowhere to go (%u windows)", how, nav_direction_name(dir), flick_from_x_,
                  flick_from_y_, (unsigned)menu_windows_.size());
         move_cursor(flick_from_x_, flick_from_y_);
     }
@@ -310,7 +316,15 @@ void Controls::game_menu_flick(const Pad &pad)
         return;
     game_menu_armed_ = false;
     flick_held_ = true;
-    const NavDirection dir = nav_direction(x, y);
+    game_menu_step(nav_direction(x, y));
+}
+
+// One step of the game menu `dir`: Up or Down moves the game's light (the
+// cursor follows it), Left or Right changes a choice or a slider.
+void Controls::game_menu_step(NavDirection dir)
+{
+    const int n = (int)game_menu_.rows.size();
+    const int lit = game_menu_.lit;
     uint8_t vk = 0;
     if (dir == NavDirection::kUp || dir == NavDirection::kDown) {
         vk = dir == NavDirection::kUp ? VK_UP : VK_DOWN;
@@ -331,6 +345,18 @@ void Controls::game_menu_flick(const Pad &pad)
     menu_key_ = vk;
     menu_key_up_ms_ = menu_now_ms_ + kMenuKeyMs;
     rt::logf("menu: game menu, %s from row %d of %d", nav_direction_name(dir), lit, n);
+}
+
+// ---- the D-pad in a menu ----
+//
+// Before the game (D2Win's screens) and in the game menu (Start) and its
+// submenus, a D-pad press is one step, as a flick is: no belt key. Not in
+// Configure Controls (a free cursor), and not in the game otherwise.
+bool Controls::dpad_menu() const
+{
+    if (!menu_world_)
+        return false;
+    return in_game_ ? game_menu_on_ : true;
 }
 
 // B in a submenu: a click on its "Previous" row, the cursor there a frame
@@ -706,6 +732,13 @@ void Controls::update(const Pad &pad, uint64_t now_ms)
         } else if ((pressed & b.button) && gold_on_ && !r_layer && !zr_layer &&
                    (b.button & (kUp | kDown | kLeft | kRight))) {
             bound_[i] = 0;   // the gold dialog: the D-pad types its amount (gold_step), no belt key
+        } else if ((pressed & b.button) && !r_layer && !zr_layer && (b.button & (kUp | kDown | kLeft | kRight)) &&
+                   dpad_menu()) {
+            bound_[i] = 0;   // a menu: the D-pad steps it (below), no belt key
+            dpad_step_ = (int)(b.button == kUp     ? NavDirection::kUp
+                               : b.button == kDown ? NavDirection::kDown
+                               : b.button == kLeft ? NavDirection::kLeft
+                                                   : NavDirection::kRight);
         } else if ((pressed & b.button) && b.button == kY && !r_layer && !zr_layer && in_game_ && !item_step_ &&
                    ((ui_ & kUiShop) || ((ui_ & kUiInventory) && !(ui_ & kUiLeftPanels)))) {
             bound_[i] = 0;   // Y with the inventory open: sell or drop, not Alt (issue #99)
@@ -751,6 +784,17 @@ void Controls::update(const Pad &pad, uint64_t now_ms)
 
     if (gold_on_)
         gold_step(held, r_layer || zr_layer || select_layer, now_ms);
+    if (dpad_step_ >= 0) {
+        const NavDirection dir = (NavDirection)dpad_step_;
+        dpad_step_ = -1;
+        if (in_game_) {
+            game_menu_step(dir);
+        } else {
+            flick_from_x_ = cx_;
+            flick_from_y_ = cy_;
+            menu_step(dir, "D-pad");
+        }
+    }
 
     // ---- keys held by the bottom screen's buttons ----
     for (uint8_t old : pad_keys_) {

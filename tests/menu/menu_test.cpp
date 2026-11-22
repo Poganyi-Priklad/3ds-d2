@@ -4,9 +4,10 @@
 // only; the 640x480 windows and the NPC menu's options; the gold dialog;
 // and the controls around it (src/game/controls.cpp): a slow tilt still
 // moves the cursor freely, B the right button with a panel open (Escape in
-// the game menu and the gold dialog), the other buttons as before, and with one side panel open a held stick walks (the auto-target's
-// walk, on the free half). Made-up windows with the game's own numbers (inventory.txt's
-// rows as the lane read them) stand in for the game. Run through
+// the game menu and the gold dialog), the D-pad a step in menus, the other
+// buttons as before, and with one side panel open a held stick walks (the
+// auto-target's walk, on the free half). Made-up windows with the game's own
+// numbers (inventory.txt's rows as the lane read them) stand in for the game. Run through
 // `scripts/docker.sh test menu`.
 #include "game/controls.h"
 #include "game/menu_nav.h"
@@ -954,6 +955,73 @@ static void test_control_panel_plain_click()
     c.update(pad_with(0), t += 16);
 }
 
+// ---- the D-pad in a menu: before the game and in the game menu, one step
+// a press (no belt key); in the game otherwise, the belt as before ----
+static void test_dpad_menus()
+{
+    FakeMenus menus;
+    NavWindow screen;   // a D2Win screen: three buttons down the middle
+    screen.area = NavRect{0, 0, 800, 600};
+    for (int y : {200, 260, 320})
+        screen.cells.push_back(NavRect{300, y - 15, 500, y + 15});
+    menus.open = {screen};
+    Controls c;
+    c.set_frame(800, 600);
+    c.set_menu_nav(&menus);
+    c.set_context(false, false, 0, false);
+    c.warp_cursor(400, 200);
+    uint64_t t = 1000;
+    std::memset(g_ever, 0, sizeof g_ever);
+    c.update(pad_with(0), t);
+    c.update(pad_with(kDown), t += 16);
+    CHECK(c.cursor_x() == 400 && c.cursor_y() == 260);
+    for (int i = 0; i < 20; i++)   // held: still one step
+        c.update(pad_with(kDown), t += 16);
+    CHECK(c.cursor_y() == 260);
+    c.update(pad_with(0), t += 16);
+    c.update(pad_with(kDown), t += 16);
+    c.update(pad_with(0), t += 16);
+    CHECK(c.cursor_y() == 320);
+    c.update(pad_with(kDown), t += 16);   // round to the top
+    c.update(pad_with(0), t += 16);
+    CHECK(c.cursor_y() == 200);
+    c.update(pad_with(kUp), t += 16);
+    c.update(pad_with(0), t += 16);
+    CHECK(c.cursor_y() == 320);
+    CHECK(!g_ever['1'] && !g_ever['2'] && !g_ever['3'] && !g_ever['4']);
+    // The game menu (Start): Up and Down keys, as a flick, no belt key.
+    menus.menu_on = true;
+    game_menu_rows(3, 50, nullptr, 640, 480, menus.menu);
+    menus.menu.lit = 0;
+    menus.menu.previous = -1;
+    c.set_frame(640, 480);
+    c.set_context(true, true, 1ull << 0x09, false);
+    c.update(pad_with(0), t += 16);
+    c.update(pad_with(kDown), t += 16);
+    CHECK(g_keys[0x28] && !g_ever['3']);
+    c.update(pad_with(0), t += 200);
+    CHECK(!g_keys[0x28]);
+    // R + D-pad there: still the skill hotkey.
+    c.update(pad_with(kR), t += 16);
+    c.update(pad_with(kR | kUp), t += 16);
+    CHECK(g_keys[0x70]);
+    c.update(pad_with(0), t += 16);
+    // In the game with a panel open (not the game menu): the belt.
+    menus.menu_on = false;
+    menus.open = {inventory()};
+    c.set_context(true, true, 1ull << 0x01, false);
+    c.update(pad_with(0), t += 16);
+    c.update(pad_with(kUp), t += 16);
+    CHECK(g_keys['1']);
+    c.update(pad_with(0), t += 16);
+    // And with nothing open.
+    c.set_context(true, false, 0, false);
+    c.update(pad_with(kDown), t += 16);
+    CHECK(g_keys['3']);
+    c.update(pad_with(0), t += 16);
+    CHECK(!g_keys['3']);
+}
+
 // ---- the on-screen keyboard open: the game still gets the sticks and A ----
 static void test_keyboard_pass_through()
 {
@@ -1425,6 +1493,7 @@ int main()
     test_controls_game_menu();
     test_b_out_of_game();
     test_weapon_tabs();
+    test_dpad_menus();
     test_keyboard_pass_through();
     test_control_panel_plain_click();
     test_panel_hold_walks();

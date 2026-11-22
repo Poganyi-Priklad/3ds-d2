@@ -41,10 +41,11 @@ down, left or right:
 - **In the game menu** (Start) and its submenus: a push of the circle pad up
   or down (half way out, back to the centre between two) is the game's own
   Up or Down arrow key, and the cursor follows the lit row, so **A** takes
-  it; left and right change a choice or a slider.
+  it; left and right change a choice or a slider. The D-pad does the same,
+  a step a press (no belt potion while the menu is open).
 - **Before the game** (main menu, character select, class screen, difficulty,
   multiplayer screens): the cursor jumps to the next enabled button, text
-  field, list, character slot or hero. On the character screen with more than
+  field, list, character slot or hero; a D-pad press does the same. On the character screen with more than
   eight heroes, a flick right from the right column reaches the scroll bar's
   up and down buttons, and A scrolls one row a press.
 - **With one side panel open** (inventory or skill tree on the right; character
@@ -65,6 +66,7 @@ down, left or right:
 | B, gold dialog open | Right mouse button | **Escape**: closes the dialog |
 | B, game submenu | Right mouse button | **Previous** (one menu back); in the top menu, Escape |
 | B, before the game (character select, class screen, difficulty, multiplayer screens) | Right mouse button | **Escape**: back to the screen before; on the main menu B does nothing |
+| D-pad, game menu (Start) open or before the game | Belt keys 1–4 | One step a press, as a flick (no belt key) |
 | D-pad, gold dialog open | Belt potions 1–4 | The amount: up/down +1/-1, right/left +100/-100, faster while held |
 | A, the game's interface (bottom bar, globes, mini-panel) | Left button, possibly aimed | A plain click where the cursor is |
 | R + B, ZR + B | As before | As before |

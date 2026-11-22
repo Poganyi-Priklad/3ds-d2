@@ -225,7 +225,11 @@ private:
     uint32_t aim_stats_presses_ = 0;
     // Menu navigation.
     void menu_flick(const Pad &pad);
+    void menu_step(NavDirection dir, const char *how);
     void game_menu_flick(const Pad &pad);
+    void game_menu_step(NavDirection dir);
+    bool dpad_menu() const;
+    int dpad_step_ = -1;   // a D-pad press stepping a menu this poll (a NavDirection), -1: none
     void scroll_button_check(uint32_t held);   // the cursor off a scroll button that no longer scrolls
     void game_menu_click(int row, uint64_t now_ms);
     bool game_menu_buttons(uint64_t now_ms);   // the left button for a row clicked for B
