@@ -2029,6 +2029,23 @@ void aot_call_out(uint32_t x, AotRegs *t, uint32_t pops)
     aot_exit(x, r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7]);
 }
 
+// As the backend's ReadTSC (shim_impl.c).
+#ifdef __3DS__
+extern uint64_t svcGetSystemTick(void);
+#endif
+uint64_t aot_rdtsc(void)
+{
+    if (game::g_journaling)
+        game::g_impure = true;   // the check: two reads of the clock never agree
+#ifdef __3DS__
+    return svcGetSystemTick();
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+#endif
+}
+
 // As the backend's my_cpuid (shim_impl.c): compiled code and Box86 see one CPU.
 void aot_cpuid(uint32_t *eax, uint32_t *ebx, uint32_t *ecx, uint32_t *edx)
 {

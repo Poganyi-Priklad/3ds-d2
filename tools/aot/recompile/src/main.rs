@@ -267,6 +267,22 @@ fn main() {
             have.insert(t);
             extra.push(t);
         }
+        // And what all of these call or jump to directly that isn't on any
+        // list (issue #138: 43eb30, 4408b0 and some 25 more were exits, with
+        // nothing to exit to on CpuAot): the targets of direct calls are
+        // functions' entries.
+        let all: Vec<u32> = extra.iter().chain(roots.iter()).copied().collect();
+        let mut callees: Vec<u32> = prog
+            .closure(&all, 1 << 20)
+            .into_iter()
+            .filter(|t| !have.contains(t) && *t >= img.text_lo && *t < img.text_hi)
+            .collect();
+        callees.sort();
+        println!("aot: {} direct callees of those added", callees.len());
+        for t in callees {
+            have.insert(t);
+            extra.push(t);
+        }
     }
     let intr = intrinsics();
     let nat = natives();

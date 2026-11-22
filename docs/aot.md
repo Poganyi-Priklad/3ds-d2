@@ -663,6 +663,17 @@ How `CpuAot` runs code (from reading `cpu.h`, `sched_cooperative.cpp` and `aot_c
 
 `CpuAot` then stops at 40e850 (refused: `rdtsc`). On the Box86 lanes, profiled production with `D2_AOT_STRICT=1`: left to Box86 2,701 times in town-walk against 3,248, 4,850 in the fight against 5,459, 6,311 in Act II against 6,959; Box86 ran 2,441,893 x86 bytes against 2,442,565.
 
+**Into the game's own start** (the check on the Box86 lanes: 0 differ, town-walk 10.3M calls, fight 10.2M, Act II 47.2M; 14,212 functions compiled, 218 refused, 290 plain exits to a direct callee in the C against 340):
+
+- **40e850, `rdtsc`:** `aot_rdtsc`, the backend's clock for it (the host's monotonic clock in ns, the system tick on the 3DS; the lane's `WX86_FAKETSC` isn't in our backend). A checked run that reads it isn't compared.
+- **6b0132, the thunk of WS2_32's WSAStartup:** 102 refused functions were imports' thunks whose pops weren't known, because the recompiler read only one way a shim's argument count is declared. It now reads the declarations with the DLL first (`REG("IMM32.dll", "ImmGetContext", 1, ...`) and the tables by ordinal (`{115, "WSAStartup", 2, ...`), and has Win32's own signatures for four registered with no count (DSOUND's two by ordinal, GetModuleFileNameExA, VerQueryValueA). 59 thunks stay refused: the game's own, through its tables of function pointers (4bae60 to 4bc320).
+- **41bfc0, 555230, 461dc0, switches:** the guard's register pinned by a `mov r, imm` before it; the guard on a stack slot the index is then loaded from (`cmp dword [ebp - 4], 5; ...; ja; mov eax, [ebp - 4]`), with nothing between that stores, calls or moves the slot's base; a pinned register kept across another conditional jump.
+- **4f5570 and five more, "a switch table overlaps code":** their error path ends in a call to `exit` (681e09), and the decoder read on into the table after it. Decoding ends at a call to a function that never returns.
+- **Some 25 functions that listed code calls directly and no list had:** the direct callees of everything listed are added (49).
+- **Tried and dropped:** 689635 (the C runtime's invalid-parameter report, 131 call sites) as an error path. Its calls then weren't exits, it is refused itself (a jump through its handler's pointer), and 30 callers lost their stack's balance.
+
+`CpuAot` then runs town-walk through the game's start, its archives read, to an exit to 415210 in 6b0330 (a function with plain exits). On the Box86 lanes, profiled production with `D2_AOT_STRICT=1`: left to Box86 2,474 times in town-walk against 2,701, 4,160 in the fight against 4,850, 6,101 in Act II against 6,311; Box86 ran 1,931,240 x86 bytes against 2,441,893.
+
 Recommendations on the open points: fibers rather than host threads (one runs at a time anyway, and a switch costs nothing in the kernel); 256 KiB of host stack a thread at first, measured on the lane with a guard page and then cut (four threads in play); the placeholder-result contract kept, so no shim changes; a lane run compared with another run of the same build, since switch points move.
 
 ### The natives' site table (#138)

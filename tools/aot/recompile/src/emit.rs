@@ -698,6 +698,9 @@ impl<'p, 'a> Emitter<'p, 'a> {
         if m == "popfd" {
             return Ok("{ aot_eflags = (LD32(esp) & 0x00244dd5u) | 2u; esp += 4u; }".to_string());
         }
+        if m == "rdtsc" {
+            return Ok("{ uint64_t t = aot_rdtsc(); eax = (uint32_t)t; edx = (uint32_t)(t >> 32); }".to_string());
+        }
         if m == "cpuid" {
             return Ok("aot_cpuid(&eax, &ebx, &ecx, &edx);".to_string());
         }

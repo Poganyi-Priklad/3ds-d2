@@ -4,7 +4,7 @@
 use crate::cs::{reg_full, Insn, OpKind};
 use crate::image::Image;
 use crate::omap::OMap;
-use crate::x86::regs_rw;
+use crate::x86::{mem_written, regs_rw};
 use crate::Refused;
 use std::collections::{BTreeSet, HashSet};
 use std::rc::Rc;
@@ -210,6 +210,16 @@ impl Func {
                         Tgt::Indirect
                     };
                     self.calls.insert(va, t);
+                    // exit and its like end the code here: what follows may
+                    // be a switch's table (issue #138: 4f5570's error path,
+                    // call exit; mov edi, edi; the table, read on as code).
+                    if let Tgt::Direct(d) = t {
+                        if crate::program::NORETURN_FUNCS.contains(&d) {
+                            self.noreturn.insert(va);
+                            self.succ.insert(va, vec![]);
+                            break;
+                        }
+                    }
                     if let Tgt::Import(slot) = t {
                         if NORETURN_IMPORTS.contains(&img.imports[&slot].1.as_str()) {
                             self.noreturn.insert(va);
@@ -618,6 +628,22 @@ impl Func {
                 }
                 return None;
             }
+            if jne.is_none()
+                && p.mnemonic == "mov"
+                && p.ops.len() == 2
+                && p.ops[0].is_reg()
+                && p.ops[0].size == 4
+                && reg_full(p.ops[0].reg()).map(|s| s.0) == Some(r)
+                && p.ops[1].is_imm()
+            {
+                // mov r, imm (41bfc0's mov ecx, 4; cmp eax, ecx; ja), with no
+                // branch into the code between it and the switch.
+                let into = self.succ.iter().any(|(src, ts)| {
+                    let fall = src.wrapping_add(self.insns[src].size);
+                    ts.iter().any(|&t| t > a && t <= end && t != fall)
+                });
+                return if into { None } else { Some(p.ops[1].imm()) };
+            }
             if jne.is_none() && p.mnemonic == "jne" {
                 jne = Some(a);
             } else if jne.is_some() {
@@ -631,9 +657,11 @@ impl Func {
                     ts.iter().any(|&t| t > from && t <= end && t != fall)
                 });
                 return if into { None } else { Some(ops[1].imm()) };
-            } else if regs_rw(p).1 & (1 << r) != 0 || matches!(p.mnemonic.as_str(), "call" | "jmp" | "ret") || p.mnemonic.starts_with('j') {
+            } else if regs_rw(p).1 & (1 << r) != 0 || matches!(p.mnemonic.as_str(), "call" | "jmp" | "ret") {
                 return None;
             }
+            // Another conditional jump falls through with r as it was
+            // (461dc0's mov ebx, 5; jz; mov eax, [edi]; cmp eax, ebx; ja).
             next = a;
         }
         None
@@ -654,6 +682,7 @@ impl Func {
         let mut bytes_table: Option<u32> = None;
         let mut bound: Option<i64> = None;
         let mut default: Option<i64> = None;
+        let mut slot: Option<(u16, i64)> = None;
         let mut cur = idx;
         let mut k = back.len() as i64 - 1;
         while k >= 0 && bound.is_none() {
@@ -696,6 +725,39 @@ impl Func {
                 // add ecx, -0x67; cmp ecx, edi; ja; jmp [ecx*4 + table]).
                 bound = self.pinned(reg_full(ops[1].reg()).expect("a register").0, &back[..k as usize], a, va);
                 break;
+            } else if slot.is_none()
+                && bytes_table.is_none()
+                && default.is_none()
+                && mn == "mov"
+                && ops.len() == 2
+                && ops[0].is_reg()
+                && reg_full(ops[0].reg()).map(|s| s.0) == Some(cur)
+                && ops[1].is_mem()
+                && ops[1].size == 4
+                && ops[1].mem().index == 0
+                && ops[1].mem().base != 0
+            {
+                // The index loaded from a stack slot the guard compared
+                // (issue #138: 555230's cmp dword [ebp - 4], 5; ...; ja;
+                // mov eax, [ebp - 4]; jmp [eax*4 + table]).
+                slot = Some((ops[1].mem().base, ops[1].mem().disp));
+            } else if mn == "cmp"
+                && default.is_some()
+                && slot.is_some()
+                && ops[0].is_mem()
+                && ops[0].size == 4
+                && ops[0].mem().index == 0
+                && Some((ops[0].mem().base, ops[0].mem().disp)) == slot
+                && ops[1].is_imm()
+            {
+                bound = Some(ops[1].imm());
+            } else if let Some((base, _)) = slot {
+                // Until the guard: nothing that stores, calls, or moves the slot's base.
+                let (_, w) = regs_rw(&p);
+                let b = reg_full(base).map(|s| s.0).unwrap_or(4);
+                if !mem_written(&p).is_empty() || mn == "call" || w & (1 << b) != 0 {
+                    break;
+                }
             } else {
                 let (_, w) = regs_rw(&p);
                 if w & (1 << cur) != 0 || (bytes_table.is_none() && w & (1 << idx) != 0) {

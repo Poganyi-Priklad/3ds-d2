@@ -148,6 +148,9 @@ __attribute__((noreturn)) void aot_fault(uint32_t va);
 /* cpuid, the leaf in eax: what the Box86 backend reports (a Pentium III, the
  * runtime's feature bits). */
 void aot_cpuid(uint32_t *eax, uint32_t *ebx, uint32_t *ecx, uint32_t *edx);
+/* rdtsc: the backend's clock for it (ReadTSC: the host's monotonic clock in
+ * ns, the system tick on the 3DS). A checked run that reads it isn't compared. */
+uint64_t aot_rdtsc(void);
 /* The flags register's word for pushfd and popfd (not the arithmetic flags). */
 extern uint32_t aot_eflags;
 void aot_journal(uint32_t va, uint32_t n);        /* AOT_JOURNAL: before a store */
