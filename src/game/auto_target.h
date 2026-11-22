@@ -116,6 +116,15 @@ struct AimUnit {
 };
 
 // The hero, the screen and the unit under the cursor, this frame.
+// An item's name drawn on the ground while the items are shown (Alt): the
+// game takes a click there for that item, before any unit under it.
+struct AimLabel {
+    int left = 0, top = 0, right = 0, bottom = 0;   // screen pixels, edges included
+    uint32_t item_id = 0;
+    bool contains(int x, int y) const { return x >= left && x <= right && y >= top && y <= bottom; }
+};
+constexpr int kAimMaxLabels = 32;   // the game draws at most this many
+
 struct AimView {
     int hero_x = 0, hero_y = 0;  // the hero's feet on the screen
     int width = 640, height = 480;
@@ -125,6 +134,10 @@ struct AimView {
     bool right_skill_on_corpses = false;   // ...is cast on a corpse (skills.txt's TargetCorpse)
     bool hover_on = false;       // the game shows a unit under the cursor
     uint32_t hover_type = 0, hover_id = 0;
+    // The items' names on the ground, while the game shows them (Alt held
+    // or latched); none otherwise.
+    int label_count = 0;
+    AimLabel labels[kAimMaxLabels];
     // The part of the screen a target may be in, across (AimPoll's, copied
     // in by AutoTarget::update); 0 and 0: all of it.
     int area_left = 0, area_right = 0;
@@ -166,6 +179,13 @@ public:
         return false;
     }
 };
+
+// Where the cursor goes on a target: its own name for an item whose name
+// is shown, else feet_y - heights[first] (and the next heights, then a step
+// to either side) at the first point no item's name covers, since the game
+// takes a click on a name for that item. Pure.
+void aim_point(const AimView &view, uint32_t type, uint32_t id, int feet_x, int feet_y, const int heights[4],
+               int first, int &x, int &y);
 
 // What a unit counts as. Pure: from the fields alone.
 AimKind classify_unit(const AimUnit &unit, bool in_town);

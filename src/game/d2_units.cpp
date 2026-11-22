@@ -293,6 +293,13 @@ constexpr uint32_t kCameraXVa = 0x007A520C, kCameraXShiftVa = 0x007A5214, kCamer
 constexpr uint32_t kFrameWidthVa = 0x0071146C, kFrameHeightVa = 0x00711470;
 constexpr uint32_t kHoverFlagVa = 0x007A6A94, kHoverTypeVa = 0x007A6A8C, kHoverIdVa = 0x007A6A78;
 constexpr uint32_t kPetListVa = 0x007BB5BC;
+// The items' names on the ground (Alt): shown while the UI flag 0x0D
+// (0x007A27F4) is set; the game's table of what it drew last at 0x007C54A0
+// (a count, at most 32), then 0x120-byte entries from 0x007C54A8: left, top,
+// right, bottom (screen pixels), +0x10 the item's unit (Game.exe 0x4C0860
+// fills it, 0x4C06B0 reads the rectangles).
+constexpr uint32_t kItemsShownVa = 0x007A27F4, kLabelCountVa = 0x007C54A0, kLabelsVa = 0x007C54A8;
+constexpr uint32_t kLabelStride = 0x120;
 constexpr uint32_t kDataTablesVa = 0x00744304;   // the loaded .txt tables
 constexpr float kAimReadSubtiles = 40.0f;          // units further away are never targets
 constexpr uint32_t kItem = 4;
@@ -396,6 +403,19 @@ public:
         out.hover_on = rd32(kHoverFlagVa) != 0;
         out.hover_type = rd32(kHoverTypeVa);
         out.hover_id = rd32(kHoverIdVa);
+        out.label_count = 0;
+        const uint32_t labels = rd32(kItemsShownVa) ? rd32(kLabelCountVa) : 0;
+        for (uint32_t i = 0; i < labels && i < (uint32_t)kAimMaxLabels; i++) {
+            uint32_t e[5] = {};
+            if (!rt::guest_read(kLabelsVa + i * kLabelStride, e, sizeof e) || !e[4] || rd32(e[4]) != kItem)
+                continue;
+            AimLabel &l = out.labels[out.label_count++];
+            l.left = (int)e[0];
+            l.top = (int)e[1];
+            l.right = (int)e[2];
+            l.bottom = (int)e[3];
+            l.item_id = rd32(e[4] + 0xC);
+        }
         const uint32_t skills = rd32(player + kSkillInfo), right = skills ? rd32(skills + kRightSkill) : 0;
         const uint32_t row = right ? rd32(right) : 0;
         out.right_skill = row ? rd32(row) : 0;

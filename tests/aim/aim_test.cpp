@@ -71,8 +71,17 @@ struct FakeWorld : AimWorld {
         out = v;
         if (hover_follows_cursor) {
             out.hover_on = false;
+            // Items shown (Alt): a name under the cursor is that item, before
+            // any unit; an item's own figure shows nothing then (the lane).
+            for (int i = 0; i < v.label_count; i++)
+                if (v.labels[i].contains(last_cursor_x, last_cursor_y)) {
+                    out.hover_on = true;
+                    out.hover_type = 4;
+                    out.hover_id = v.labels[i].item_id;
+                    return true;
+                }
             for (const AimUnit &u : list)
-                if (std::abs(last_cursor_x - u.feet_x) <= 12 &&
+                if (!(u.type == 4 && v.label_count) && std::abs(last_cursor_x - u.feet_x) <= 12 &&
                     (u.type == 5   ? last_cursor_y >= u.feet_y + 8 && last_cursor_y <= u.feet_y + 40
                      : u.mode == 12 ? last_cursor_y >= u.feet_y + 4 && last_cursor_y <= u.feet_y + 16   // a corpse
                                     : last_cursor_y <= u.feet_y && last_cursor_y >= u.feet_y - 60) &&
@@ -1799,8 +1808,81 @@ static void test_walk_keeps_off_warps()
     }
 }
 
+// Items shown (Alt held or latched): a name over an enemy is skipped (the
+// cursor goes where no name is, so the game shows the enemy and A hits it),
+// and A on an item goes to its own name (the item and no other).
+static void label(FakeWorld &w, int left, int top, int right, int bottom, uint32_t item)
+{
+    AimLabel &l = w.v.labels[w.v.label_count++];
+    l.left = left, l.top = top, l.right = right, l.bottom = bottom, l.item_id = item;
+}
+
+static void test_aim_point_labels()
+{
+    AimView v;
+    const int heights[4] = {40, 20, 60, 80};
+    int x, y;
+    aim_point(v, 1, 7, 300, 200, heights, 0, x, y);
+    CHECK(x == 300 && y == 160);
+    v.label_count = 1;
+    v.labels[0] = AimLabel{250, 150, 350, 165, 9};
+    aim_point(v, 1, 7, 300, 200, heights, 0, x, y);   // 160 covered: the next height, 180
+    CHECK(x == 300 && y == 180);
+    v.labels[0] = AimLabel{290, 110, 310, 190, 9};   // every height covered, and 10 to either side
+    aim_point(v, 1, 7, 300, 200, heights, 0, x, y);
+    CHECK(x == 280 && y == 160);
+    aim_point(v, 4, 9, 300, 200, heights, 0, x, y);   // the item 9 itself: the middle of its name
+    CHECK(x == 300 && y == 150);
+    v.label_count = 0;
+    aim_point(v, 4, 9, 300, 200, heights, 2, x, y);   // names not shown: its figure, as before
+    CHECK(x == 300 && y == 140);
+}
+
+static void test_alt_labels()
+{
+    // An enemy straight right of the hero, a name over its middle (where
+    // the cursor goes first): A still hits it, never the item.
+    FakeWorld w;
+    double dx, dy;
+    right_of_hero(5, dx, dy);
+    AimUnit &e = w.add(1, dx, dy);
+    w.add_item(50, dx, dy + 0.1, "hax ");
+    label(w, e.feet_x - 60, e.feet_y - 44, e.feet_x + 60, e.feet_y - 30, 50);
+    AutoTarget aim;
+    AimResult r{};
+    bool hit = false, on_item = false;
+    for (int i = 0; i < 12; i++) {
+        r = poll(aim, w, 1000 + i * 40, true, false, i == 0, false, kAimRight);
+        on_item |= r.aiming && w.v.labels[0].contains(r.cursor_x, r.cursor_y) && r.left;
+        hit |= r.left && r.aiming && r.cursor_x == e.feet_x && !w.v.labels[0].contains(r.cursor_x, r.cursor_y);
+    }
+    CHECK(hit && !on_item);
+    CHECK(aim.stats().confirmed >= 1 && aim.stats().fallbacks == 0);
+
+    // Plain A with no enemy about: the nearest item, clicked on its name.
+    FakeWorld items;
+    right_of_hero(3, dx, dy);
+    AimUnit &axe = items.add_item(60, dx, dy, "hax ");
+    label(items, axe.feet_x - 30, axe.feet_y - 30, axe.feet_x + 30, axe.feet_y - 17, 60);
+    AimUnit &gold = items.add_item(61, dx + 0.3, dy + 0.3, "gld ");
+    label(items, gold.feet_x - 20, gold.feet_y - 16, gold.feet_x + 20, gold.feet_y - 3, 61);
+    AutoTarget pick;
+    bool clicked_axe = false, clicked_other = false;
+    for (int i = 0; i < 10; i++) {
+        r = poll(pick, items, 1000 + i * 40, true, false, i == 0, false, kAimRight);
+        if (r.aiming && r.left) {
+            clicked_axe |= items.v.labels[0].contains(r.cursor_x, r.cursor_y);
+            clicked_other |= !items.v.labels[0].contains(r.cursor_x, r.cursor_y);
+        }
+    }
+    CHECK(clicked_axe && !clicked_other);
+    CHECK(pick.stats().fallbacks == 0);
+}
+
 int main()
 {
+    test_aim_point_labels();
+    test_alt_labels();
     test_classify();
     test_cone();
     test_near_rule();
@@ -1839,6 +1921,6 @@ int main()
         std::printf("aim: %d check(s) failed\n", g_fail);
         return 1;
     }
-    std::printf("aim: all checks passed (34 tests)\n");
+    std::printf("aim: all checks passed (36 tests)\n");
     return 0;
 }

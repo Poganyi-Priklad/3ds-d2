@@ -262,6 +262,43 @@ void target_heights(uint32_t type, bool corpse, int height_px, int out[4])
     }
 }
 
+}  // namespace
+
+void aim_point(const AimView &view, uint32_t type, uint32_t id, int feet_x, int feet_y, const int heights[4],
+               int first, int &x, int &y)
+{
+    x = feet_x;
+    y = feet_y - heights[first & 3];
+    const int n = view.label_count < 0 ? 0 : view.label_count > kAimMaxLabels ? kAimMaxLabels : view.label_count;
+    if (!n)
+        return;
+    if (type == 4)
+        for (int i = 0; i < n; i++)
+            if (view.labels[i].item_id == id) {   // the item's own name: a click there is that item
+                x = (view.labels[i].left + view.labels[i].right) / 2;
+                y = (view.labels[i].top + view.labels[i].bottom) / 2;
+                return;
+            }
+    auto covered = [&](int px, int py) {
+        for (int i = 0; i < n; i++)
+            if (view.labels[i].contains(px, py))
+                return true;
+        return false;
+    };
+    static const int kSteps[] = {0, -10, 10, -20, 20};
+    for (int dx : kSteps)
+        for (int k = 0; k < 4; k++) {
+            const int px = feet_x + dx, py = feet_y - heights[(first + k) & 3];
+            if (!covered(px, py)) {
+                x = px;
+                y = py;
+                return;
+            }
+        }
+}
+
+namespace {
+
 // How high above its feet a unit is seen by point_visible (its body; a
 // corpse's below its feet, where the game shows it).
 int visible_height(uint32_t type, int height_px, bool corpse = false)
@@ -965,13 +1002,16 @@ AimResult AutoTarget::update(const AimPoll &poll, AimWorld &world)
 
     last_attack_ms_ = now;
     result.aiming = true;
-    result.cursor_x = current.feet_x;
-    result.cursor_y = current.feet_y - heights[height_index_];
+    aim_point(view, target_type_, target_id_, current.feet_x, current.feet_y, heights, height_index_,
+              result.cursor_x, result.cursor_y);
     // A point on the hero's own figure is a click on nothing: for a unit
     // standing just below the hero, its lowest part (by its feet) is used.
     const bool on_hero = std::abs(result.cursor_x - view.hero_x) < kHeroHalfWidthPx &&
                          result.cursor_y > view.hero_y - kHeroHeightPx && result.cursor_y < view.hero_y + kHeroFeetPx;
-    if (on_hero && current.feet_y - kFeetLiftPx >= view.hero_y + kHeroFeetPx)
+    bool on_label = false;   // an item's own name: clicked there, wherever it is
+    for (int i = 0; target_type_ == 4 && i < view.label_count && i < kAimMaxLabels; i++)
+        on_label |= view.labels[i].item_id == target_id_;
+    if (on_hero && !on_label && current.feet_y - kFeetLiftPx >= view.hero_y + kHeroFeetPx)
         result.cursor_y = current.feet_y - kFeetLiftPx;
     // A loot command and plain A pick up with the left button.
     result.left = press && (poll.a_held || active_profile_ == 2);
