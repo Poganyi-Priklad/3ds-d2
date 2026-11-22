@@ -9,8 +9,8 @@
 //   aim_b_mode=enemies    the same for B (the right mouse button)
 //   aim_b_cone=45
 //   aim_b_range=20
-//   aim_near=4            an enemy this close always comes first (subtiles)
-//   aim_near_cone=90      ...when within this many degrees of the stick
+//   aim_near=4            the circle: with no enemy in the cone, the nearest this close, all round (subtiles)
+//   aim_near_cone=90      no longer used (the circle is all round); kept for older files
 //   aim_flick_cone=30     degrees each side of a circle pad flick's direction
 //   aim_flick_ms=150      a flick gets from the centre to aim_flick_light within this time
 //   aim_flick_light=40    percent of the full tilt a flick reaches

@@ -30,7 +30,7 @@ this page is the short version and a map of the code.
      sidestep);
    - strongly in another direction: the hero turns to the nearest enemy in that
      direction.
-5. With no enemy in the cone, plain **A** uses objects (shrines, chests,
+5. With no enemy in the cone or the circle, plain **A** uses objects (shrines, chests,
    waypoints and portals, doors, levers and level warps such as cave
    entrances, stairs and passages to the next area, barrels), then NPCs, then
    the nearest item on the ground. In town, A and B go to the NPCs first.
@@ -55,8 +55,21 @@ this page is the short version and a map of the code.
    later branch can call this same walk with one side panel open, on the
    free half of the screen.
 
-An enemy right next to the hero always comes first, so a ranged attack never
-ignores the monster hitting you. The mercenary, summons and other players are
+Which unit a press goes to, in order:
+
+- **Hover first:** with the circle pad centred, if the game already shows a
+  unit under the cursor (an enemy, an NPC, an object, an item or an item's
+  name) that the button aims at, A or B clicks exactly that one; the cursor
+  is not moved and no other target replaces it while the button is held.
+- **Zone I, the cone:** the enemy in the circle pad's direction (or the last
+  walking direction) comes first.
+- **Zone II, the circle:** with no enemy in the cone, the nearest enemy
+  within a melee hit's reach of the hero (`aim_near`, 4 subtiles), all
+  round him.
+- A monster always comes before an item (or an object): plain A takes items
+  only with no enemy in the cone or the circle.
+
+The mercenary, summons and other players are
 never targets. **L** (stand still), **R + A/B** and **ZR + A/B** never aim.
 
 ## Button mapping (what this branch changes)

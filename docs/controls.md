@@ -73,10 +73,11 @@ In the game world (no panel open, nothing on the cursor), A and B aim before the
   - a light flick another way: the enemy nearest the target in that direction from it (within 30°), to step sideways;
   - a strong flick another way: the hero turns to the nearest enemy in the button's cone round that direction;
   - nobody there: the target stays. The pad has to come back to the centre between two flicks: one flick, one step. Flicks don't switch away from an NPC, an object or an item.
-- An enemy right next to the hero comes first when a button is pressed, even for a long range.
+- Hover first: with the circle pad centred, a press on a unit the game already shows under the cursor (an enemy, an NPC, an object, an item or an item's name) that the button aims at clicks exactly that one. The cursor is not moved, and the rules below don't replace it while the button is held; if it moves out from under the cursor, the cursor follows it. While the pad walks, the cursor is the walk's point, so the rules choose.
+- Otherwise the cone (zone I) comes first; with no enemy in it, the nearest enemy within `aim_near` subtiles (a melee hit's reach) all round the hero (zone II, the circle). A monster in either comes before any object, NPC or item.
 - The target is kept when you let go and press again, or switch between A and B. It is let go when it dies, leaves the screen, when the hero gets no closer to it for 1.5 s, or 2.5 s after the last attack.
 - Nothing in the cone: a plain click where the cursor is, as before.
-- With no enemy in the cone, plain A takes, in this order: an object (shrines, then chests and other containers, waypoints and portals, doors, levers and level warps (cave entrances, stairs, passages to the next area), barrels; used ones are skipped, exploding barrels never), an NPC (Cain, Tyrael), the nearest item on the ground (gold first with `aim_gold_first=1`). Held, A goes from one to the next. B aims only at enemies and NPCs. An enemy coming into the cone takes over from an NPC, an object or an item.
+- With no enemy in the cone or the circle, plain A takes, in this order: an object (shrines, then chests and other containers, waypoints and portals, doors, levers and level warps (cave entrances, stairs, passages to the next area), barrels; used ones are skipped, exploding barrels never), an NPC (Cain, Tyrael), the nearest item on the ground (gold first with `aim_gold_first=1`). Held, A goes from one to the next. B aims only at enemies and NPCs. An enemy coming into the cone takes over from an NPC, an object or an item.
 - **With the items shown** (Y held, or Items latched on the KEYS page): the game takes a click on an item's name for that item, before any unit under it, and an item's own figure is not clickable then. So the auto-target reads the names the game drew (their rectangles, Game.exe's table at `0x7C54A0`, while the UI flag `0x0D` is set): an item is clicked on its own name (that item, no other), and the cursor on an enemy, an object, an NPC or a corpse goes to the first of its heights, then a step to either side, that no name covers. Alt stays down all the time.
 - In town it aims at the NPCs (to talk to) first, then (A) objects and items. The mercenary, summons and other players are never aimed at.
 - When the right button's skill is cast on a corpse (Raise Skeleton, Corpse Explosion, Revive, Find Item...), B aims at corpses by itself. The cursor goes just below the corpse's feet (where the game shows a corpse under the cursor); once the skill has been cast on a corpse (the hero's casting mode), it is skipped for 10 minutes and B goes on to the next one.
@@ -91,8 +92,8 @@ Each button has its own mode: `enemies`, `corpses` (for corpse skills such as Ra
 | `aim_a_mode`, `aim_b_mode` | `enemies` | `enemies`, `corpses` or `off` |
 | `aim_a_cone`, `aim_b_cone` | `45` | degrees each side of the circle pad's direction |
 | `aim_a_range`, `aim_b_range` | `20` | subtiles from the hero (a subtile is a third of a floor tile) |
-| `aim_near` | `4` | an enemy this close (subtiles) always comes first |
-| `aim_near_cone` | `90` | ...when within this many degrees of the pad's direction |
+| `aim_near` | `4` | the circle (zone II): with no enemy in the cone, the nearest enemy this close (subtiles), all round the hero |
+| `aim_near_cone` | `90` | no longer used (the circle is all round); kept for older files |
 | `aim_flick_cone` | `30` | degrees each side of a flick's direction |
 | `aim_flick_ms` | `150` | a flick gets from the centre to `aim_flick_light` within this time |
 | `aim_flick_light` | `40` | percent of the full tilt a flick reaches |

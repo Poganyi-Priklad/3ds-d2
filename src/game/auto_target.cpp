@@ -316,8 +316,6 @@ int choose_target(const std::vector<AimUnit> &units, const std::vector<AimKind> 
         *near_rule = false;
     if (profile.mode == AimMode::kOff)
         return -1;
-    const float near_cone =
-        (float)(settings.near_cone_degrees > profile.cone_degrees ? settings.near_cone_degrees : profile.cone_degrees);
     int nearest_near_enemy = -1, best_enemy = -1, nearest_npc = -1, nearest_corpse = -1, best_object = -1,
         best_item = -1;
     float best_enemy_score = 0;
@@ -335,12 +333,13 @@ int choose_target(const std::vector<AimUnit> &units, const std::vector<AimKind> 
         const float angle = aim_angle_degrees(dir_x, dir_y, view.hero_x, view.hero_y, u.feet_x, u.feet_y);
         const bool in_cone = angle <= (float)profile.cone_degrees && u.distance <= (float)profile.range_subtiles;
         if (kind == AimKind::kEnemy) {
-            // The safety rule: an enemy next to the hero, anywhere in front.
-            if (u.distance <= (float)settings.near_subtiles && angle <= near_cone &&
+            // Zone II, the circle: an enemy within a melee hit's reach of
+            // the hero (near_subtiles), all round him.
+            if (u.distance <= (float)settings.near_subtiles &&
                 (nearest_near_enemy < 0 || u.distance < units[nearest_near_enemy].distance))
                 nearest_near_enemy = (int)i;
-            // Otherwise the nearest in the cone, a little in favour of the
-            // one the stick points at most exactly.
+            // Zone I, the cone: the nearest in it, a little in favour of
+            // the one the stick points at most exactly.
             if (in_cone) {
                 const float score = u.distance * (1.0f + 0.5f * (1.0f - std::cos(angle * 3.14159265f / 180.0f)));
                 if (best_enemy < 0 || score < best_enemy_score) {
@@ -383,14 +382,18 @@ int choose_target(const std::vector<AimUnit> &units, const std::vector<AimKind> 
             return nearest_npc;
         return best_object >= 0 ? best_object : best_item;
     }
+    // Zone I first: an enemy in the cone. Then zone II: the nearest enemy
+    // in the circle round the hero. A monster always comes before an
+    // object, an NPC or an item.
+    if (best_enemy >= 0)
+        return best_enemy;
     if (nearest_near_enemy >= 0) {
         if (near_rule)
             *near_rule = true;
         return nearest_near_enemy;
     }
-    if (best_enemy >= 0)
-        return best_enemy;
-    // No enemy in the cone: plain A's order is objects, NPCs, then items.
+    // No enemy in the cone or the circle: plain A's order is objects, NPCs,
+    // then items (in the cone).
     if (best_object >= 0)
         return best_object;
     if (nearest_npc >= 0)
@@ -596,6 +599,7 @@ void AutoTarget::drop(const char *why, uint32_t &counter, uint64_t now_ms)
 void AutoTarget::start_confirming(uint64_t now_ms)
 {
     phase_ = Phase::kConfirming;
+    hover_pinned_ = false;   // the cursor goes to the target again
     confirm_frames_ = 0;
     cursor_moving_ = true;   // the cursor goes there this poll; the game looks from the next frame on
     missed_frames_ = 0;
@@ -645,6 +649,7 @@ void AutoTarget::take(const AimUnit &u, AimKind kind, const AimPoll &poll, const
     target_id_ = u.id;
     target_type_ = u.type;
     target_kind_ = kind;
+    from_hover_ = false;
     height_index_ = 0;
     npc_clicked_ = false;
     reached_ms_ = 0;
@@ -661,6 +666,56 @@ void AutoTarget::take(const AimUnit &u, AimKind kind, const AimPoll &poll, const
                                                   : "enemy";
     say(poll.now_ms, "%s %u (class %u) %.1f subtiles away, %s", name, u.id, u.cls, (double)u.distance, why);
     start_confirming(poll.now_ms);
+}
+
+// Hover first: on a press of A or B with the circle pad centred, the unit
+// the game already shows under the cursor (or the item whose name is
+// there, with the items shown) is clicked as it is, if it is something
+// this button aims at: the cursor is not moved and no other target is
+// chosen. While the pad walks, the cursor is the walk's point, not the
+// player's, so the rules below choose. False: nothing to take there.
+bool AutoTarget::take_hovered(const AimPoll &poll, const AimView &view, AimWorld &world, const AimProfile &profile)
+{
+    if (active_profile_ == 2 || poll.stick_engaged)
+        return false;
+    uint32_t type = 0, id = 0;
+    // An item's name under the cursor: the game takes the click for it.
+    for (int i = 0; poll.cursor_x >= 0 && i < view.label_count && i < kAimMaxLabels; i++)
+        if (view.labels[i].contains(poll.cursor_x, poll.cursor_y)) {
+            type = 4;
+            id = view.labels[i].item_id;
+            break;
+        }
+    if (!id && view.hover_on && (view.hover_type == 1 || view.hover_type == 2 || view.hover_type == 4 ||
+                                 view.hover_type == 5)) {
+        type = view.hover_type;
+        id = view.hover_id;
+    }
+    AimUnit u;
+    if (!id || !look_up(world, type, id, u))
+        return false;
+    const AimKind kind = classify_unit(u, view.in_town);
+    if (!fits(kind, u, profile, view.in_town))
+        return false;
+    if (u.id != target_id_ || u.type != target_type_) {
+        if (target_id_)
+            say(poll.now_ms, "target %u replaced by %u (under the cursor)", target_id_, u.id);
+        take(u, kind, poll, active_profile_ ? "B pressed: hover" : "A pressed: hover");
+    } else {
+        say(poll.now_ms, "%s pressed: hover, target %u", active_profile_ ? "B" : "A", u.id);
+    }
+    // The game shows it there already: confirmed, the cursor kept where it is.
+    from_hover_ = true;
+    hover_pinned_ = poll.cursor_x >= 0;
+    pin_x_ = poll.cursor_x;
+    pin_y_ = poll.cursor_y;
+    phase_ = Phase::kConfirmed;
+    cursor_moving_ = false;
+    missed_frames_ = 0;
+    best_distance_ = u.distance;
+    progress_ms_ = poll.now_ms;
+    stats_.confirmed++;
+    return true;
 }
 
 // A full read of the units, and the active button's choice in it.
@@ -689,27 +744,35 @@ bool AutoTarget::pick(const AimPoll &poll, const AimView &view, AimWorld &world,
     if (target_id_) {
         // A target is kept: no switching to "the nearest" by itself (a
         // flick switches). Only an enemy beats an NPC, an object or an item
-        // (the hero is in danger), and on a fresh press an enemy next to the
-        // hero beats one further away.
-        if (u.id == target_id_ && u.type == target_type_)
+        // (the hero is in danger), and on a fresh press an enemy in the
+        // circle round the hero (none in the cone) beats one further away.
+        if (u.id == target_id_ && u.type == target_type_) {
+            if (pressed)
+                say(poll.now_ms, "%s pressed: target %u kept", active_profile_ ? "B" : "A", target_id_);
             return true;
+        }
         const bool enemy_over_other = kind == AimKind::kEnemy && target_kind_ != AimKind::kEnemy;
         AimUnit current;
         const bool current_near = look_up(world, target_type_, target_id_, current) &&
                                   current.distance <= (float)settings_.near_subtiles;
         const bool near_on_press = pressed && near_rule && !current_near;
-        if (!enemy_over_other && !near_on_press)
+        if (!enemy_over_other && !near_on_press) {
+            if (pressed)
+                say(poll.now_ms, "%s pressed: target %u kept", active_profile_ ? "B" : "A", target_id_);
             return true;
+        }
         say(poll.now_ms, "target %u replaced by %u (%s)", target_id_, u.id,
-            enemy_over_other ? "an enemy comes first" : "an enemy next to the hero");
+            enemy_over_other ? "an enemy comes first" : "an enemy in the circle round the hero");
     }
     if (near_rule)
         stats_.near_rule++;
+    // The log says which rule chose it: the cone (zone I) or the circle
+    // round the hero (zone II); the hover's own line is in take_hovered.
     take(u, kind, poll,
          active_profile_ == 2 ? "picking up"
-         : near_rule          ? (pressed ? "next to the hero, pressed" : "next to the hero, while held")
-         : pressed            ? (active_profile_ ? "B pressed" : "A pressed")
-                              : "while held");
+         : pressed            ? (near_rule ? (active_profile_ ? "B pressed: circle" : "A pressed: circle")
+                                           : (active_profile_ ? "B pressed: cone" : "A pressed: cone"))
+                              : (near_rule ? "while held: circle" : "while held: cone"));
     return true;
 }
 
@@ -818,6 +881,11 @@ AimResult AutoTarget::update(const AimPoll &poll, AimWorld &world)
         }
     }
 
+    // Hover first (take_hovered): a press on what the game shows under the cursor.
+    const bool hover_taken = pressed && take_hovered(poll, view, world, profile);
+    if (hover_taken)
+        look_up(world, target_type_, target_id_, current);
+
     // A flick of the circle pad while fighting an enemy: another enemy.
     if (flick.happened && target_id_ && target_kind_ == AimKind::kEnemy && active_profile_ != 2 &&
         profile.mode == AimMode::kEnemies) {
@@ -838,14 +906,18 @@ AimResult AutoTarget::update(const AimPoll &poll, AimWorld &world)
     // the cone while the hero goes to an NPC, an object or an item; the
     // next item to pick up). An enemy is never replaced while held.
     const uint64_t rescan_ms = target_id_ ? 250 : 150;
-    const bool may_be_beaten = target_id_ && !view.in_town && active_profile_ != 2 &&
+    // A target taken from the hover is the player's own choice: kept.
+    const bool may_be_beaten = target_id_ && !view.in_town && active_profile_ != 2 && !from_hover_ &&
                                profile.mode == AimMode::kEnemies && target_kind_ != AimKind::kEnemy;
-    if ((!target_id_ || may_be_beaten || (pressed && target_kind_ == AimKind::kEnemy &&
-                                          current.distance > (float)settings_.near_subtiles)) &&
+    if (!hover_taken &&
+        (!target_id_ || may_be_beaten ||
+         (pressed && target_kind_ == AimKind::kEnemy && current.distance > (float)settings_.near_subtiles)) &&
         (pressed || scan_now_ || now - last_scan_ms_ >= rescan_ms)) {
         scan_now_ = false;
         if (pick(poll, view, world, profile, pressed) && target_id_ != current.id)
             look_up(world, target_type_, target_id_, current);
+    } else if (pressed && !hover_taken && target_id_ && active_profile_ != 2) {
+        say(now, "%s pressed: target %u kept", active_profile_ ? "B" : "A", target_id_);
     }
     if (!target_id_) {
         // A or B: a plain click where the cursor is. ZR + D-pad: nothing at
@@ -1002,6 +1074,15 @@ AimResult AutoTarget::update(const AimPoll &poll, AimWorld &world)
 
     last_attack_ms_ = now;
     result.aiming = true;
+    if (hover_pinned_) {
+        // Taken from the hover: the cursor stays where the player put it
+        // (until the target is lost under it and looked for again).
+        result.cursor_x = pin_x_;
+        result.cursor_y = pin_y_;
+        result.left = press && poll.a_held;
+        result.right = press && poll.b_held;
+        return result;
+    }
     aim_point(view, target_type_, target_id_, current.feet_x, current.feet_y, heights, height_index_,
               result.cursor_x, result.cursor_y);
     // A point on the hero's own figure is a click on nothing: for a unit

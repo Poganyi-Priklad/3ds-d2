@@ -10,10 +10,14 @@
 //     cone (degrees each side of the stick's direction) and a range.
 //   - The direction is the circle pad's, or the last walking direction
 //     while the pad is centred.
-//   - An enemy within the "near" radius always comes first, even for a
-//     long-range profile, so a ranged attack never ignores the enemy next
-//     to the hero.
-//   - Plain A with no enemy in the cone takes, in this order: an object
+//   - Hover first: a press with the circle pad centred on a unit the game
+//     already shows under the cursor (or an item's name, items shown) that
+//     the button aims at clicks exactly that one; the cursor is not moved.
+//   - Otherwise zone I, the cone, comes first: the enemy the stick points
+//     at; then zone II, the circle: the nearest enemy within the "near"
+//     radius (a melee hit's reach) all round the hero. A monster in either
+//     comes before any object, NPC or item.
+//   - Plain A with no enemy in the cone or the circle takes, in this order: an object
 //     (shrine, chest, waypoint or portal, door or lever or a level's warp -
 //     a cave entrance, stairs, a passage to the next area -, barrel; used
 //     ones skipped), an NPC, the nearest item on the ground (gold first if the
@@ -77,8 +81,8 @@ struct AimSettings {
     bool enabled = true;                                 // aim=
     AimProfile a{AimMode::kEnemies, 45, 20};             // A, the left mouse button
     AimProfile b{AimMode::kEnemies, 45, 20};             // B, the right one
-    int near_subtiles = 4;      // an enemy this close always comes first
-    int near_cone_degrees = 90; // ...when it is within this angle of the stick (90: anywhere in front)
+    int near_subtiles = 4;      // zone II: an enemy this close, all round the hero (a melee hit's reach), when none is in the cone
+    int near_cone_degrees = 90; // no longer used (the circle is all round); read and kept for older files
     // Flicks of the circle pad (choose_flick, AimFlicks): a flick is a quick
     // move out of the centre; a slow tilt is not one.
     int flick_cone_degrees = 30;    // each side of a flick's direction
@@ -310,6 +314,9 @@ struct AimPoll {
     // under the cursor again. The 3DS app replays several pad readings in one
     // message pump; only the first of each pump is a new frame.
     bool new_frame = true;
+    // Where the cursor is (game pixels): an item's name under it is that
+    // item (take_hovered). -1: not known.
+    int cursor_x = -1, cursor_y = -1;
 };
 
 // What the controls do with the cursor and buttons this poll.
@@ -359,6 +366,7 @@ private:
     enum class Phase : uint8_t { kIdle, kConfirming, kConfirmed, kFallback };
     void drop(const char *why, uint32_t &counter, uint64_t now_ms);
     bool pick(const AimPoll &poll, const AimView &view, AimWorld &world, const AimProfile &profile, bool pressed);
+    bool take_hovered(const AimPoll &poll, const AimView &view, AimWorld &world, const AimProfile &profile);
     void read_units(const AimPoll &poll, const AimView &view, AimWorld &world, bool ground);
     void take(const AimUnit &u, AimKind kind, const AimPoll &poll, const char *why);
     bool look_up(AimWorld &world, uint32_t type, uint32_t id, AimUnit &out);
@@ -376,6 +384,11 @@ private:
     uint32_t target_id_ = 0;
     uint32_t target_type_ = 1;     // 1 a monster or NPC, 2 an object, 4 an item, 5 a warp
     AimKind target_kind_ = AimKind::kNone;
+    // Taken from the hover (take_hovered): never replaced by the rules
+    // while held; the cursor kept at pin_x_, pin_y_ while hover_pinned_.
+    bool from_hover_ = false;
+    bool hover_pinned_ = false;
+    int pin_x_ = 0, pin_y_ = 0;
     uint64_t last_attack_ms_ = 0;                 // a button was held on it
     // Waiting for the game to show it under the cursor.
     Phase phase_ = Phase::kIdle;

@@ -580,6 +580,8 @@ void Controls::update(const Pad &pad, uint64_t now_ms)
         poll.dir_y = walk_dir_y_;
         poll.stick_x = vx;
         poll.stick_y = -vy;
+        poll.cursor_x = cx_;   // hover first: an item's name under the cursor
+        poll.cursor_y = cy_;
         // ZR + D-pad: held until the D-pad button is let go.
         if (loot_button_ && !(held & loot_button_))
             loot_button_ = 0;

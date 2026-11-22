@@ -1,6 +1,7 @@
 // The auto-target on A and B (src/game/auto_target.h): which unit the cone
-// picks, the rules (an enemy next to the hero first, NPCs in town, the
-// mercenary never; plain A's objects, NPCs and items after the enemies),
+// picks, the rules (hover first; the cone, then the circle round the hero;
+// NPCs in town, the mercenary never; plain A's objects, NPCs and items
+// after the enemies),
 // how the target sticks and when it is let go, the circle pad's flicks,
 // picking up items (ZR + D-pad, the order, the ones with no room), the
 // settings.txt keys and the AIM tab's rows (src/game/aim_settings.h), and
@@ -355,28 +356,32 @@ static void test_cone()
 // ---- the rules ----
 static void test_near_rule()
 {
-    // B (long range): a far enemy straight ahead, a near one 70 degrees
-    // off. The near one comes first.
+    // Zone I, the cone, first: B (long range), a far enemy straight ahead
+    // and a near one 90 degrees off: the one in the cone.
     FakeWorld w;
     double dx, dy;
     right_of_hero(12, dx, dy);
     w.add(1, dx, dy);
     w.add(2, 1.5, 1.5);   // 2.1 subtiles, straight down the screen: 90 degrees from the stick
     AimSettings s;
-    bool near_rule = false;
-    CHECK(choose(w, s.b, kAimRight, &near_rule, s) == 2 && near_rule);
-    // Behind the hero (beyond the near cone): not chosen, the far one is.
-    w.list[1].feet_x = w.v.hero_x - 30;
-    w.list[1].feet_y = w.v.hero_y;
+    bool near_rule = true;
     CHECK(choose(w, s.b, kAimRight, &near_rule, s) == 1 && !near_rule);
-    // The radius is a setting.
-    w.list[1].feet_x = w.v.hero_x + 10;
-    w.list[1].feet_y = w.v.hero_y + 20;
+    // Zone II, the circle: nothing in the cone, the nearest enemy within
+    // near_subtiles all round the hero, behind him too.
+    w.find(1)->mode = 0;   // the far one dies
+    CHECK(choose(w, s.b, kAimRight, &near_rule, s) == 2 && near_rule);
+    w.list[1].feet_x = w.v.hero_x - 30;   // behind the hero
+    w.list[1].feet_y = w.v.hero_y;
+    CHECK(choose(w, s.b, kAimRight, &near_rule, s) == 2 && near_rule);
+    // The radius is a setting (a melee hit's reach, 4 by default).
     w.list[1].distance = 3.5f;
     s.near_subtiles = 3;
-    CHECK(choose(w, s.b, kAimRight, &near_rule, s) == 1);
+    CHECK(choose(w, s.b, kAimRight, &near_rule, s) == 0);
     s.near_subtiles = 4;
     CHECK(choose(w, s.b, kAimRight, &near_rule, s) == 2);
+    // Two in the circle: the nearer.
+    w.add(4, -1, 0.5);   // 1.1 subtiles, behind
+    CHECK(choose(w, s.b, kAimRight, &near_rule, s) == 4 && near_rule);
     // Corpse mode keeps its corpses (a Necromancer's B).
     w.add(3, 4, -3, AimKind::kCorpse);
     AimProfile corpses = s.b;
@@ -386,6 +391,149 @@ static void test_near_rule()
     AimProfile off = s.a;
     off.mode = AimMode::kOff;
     CHECK(choose(w, off, kAimRight, nullptr, s) == 0);
+}
+
+// A monster beats an item: an item (or an object) in the cone is taken
+// only with no enemy in the cone or the circle.
+static void test_monster_beats_item()
+{
+    FakeWorld w;
+    double dx, dy;
+    right_of_hero(5, dx, dy);
+    w.add_item(30, dx, dy, "hax ");   // an axe ahead, in the cone
+    w.add(1, -1.5, 1);                 // an enemy behind the hero, in the circle
+    AimSettings s;
+    bool near_rule = false;
+    CHECK(choose(w, s.a, kAimRight, &near_rule, s) == 1 && near_rule);
+    right_of_hero(8, dx, dy);
+    w.add(2, dx, dy);                  // an enemy further ahead, in the cone
+    CHECK(choose(w, s.a, kAimRight, &near_rule, s) == 2 && !near_rule);
+    w.find(1)->mode = 0;
+    w.find(2)->mode = 0;               // both die: the axe
+    CHECK(choose(w, s.a, kAimRight, &near_rule, s) == 30 && !near_rule);
+    // An enemy outside the circle and the cone doesn't keep the item off.
+    w.add(3, -4, 3);                   // 5 subtiles, behind
+    CHECK(choose(w, s.a, kAimRight, &near_rule, s) == 30);
+    // A chest ahead and an enemy in the circle: the enemy.
+    FakeWorld c;
+    right_of_hero(4, dx, dy);
+    c.add_object(20, dx, dy, 4);
+    c.add(1, 0.5, 1.5);
+    CHECK(choose(c, s.a, kAimRight, &near_rule, s) == 1 && near_rule);
+}
+
+// Hover first: a press with the circle pad centred on what the game shows
+// under the cursor clicks exactly that, the cursor left where it is.
+static AimResult press_at(AutoTarget &aim, FakeWorld &w, uint64_t t, bool a, bool b, bool pressed, int cx, int cy,
+                          bool stick = false)
+{
+    w.last_cursor_x = cx;
+    w.last_cursor_y = cy;
+    AimPoll p;
+    p.now_ms = t;
+    p.allowed = true;
+    p.a_held = a;
+    p.b_held = b;
+    p.a_pressed = a && pressed;
+    p.b_pressed = b && pressed;
+    p.stick_engaged = stick;
+    p.dir_x = 1;
+    p.dir_y = 0;
+    p.cursor_x = cx;
+    p.cursor_y = cy;
+    return run(aim, w, p);
+}
+
+static void test_hover_first()
+{
+    FakeWorld w;
+    double dx, dy;
+    right_of_hero(5, dx, dy);
+    w.add(7, dx, dy);             // in the cone (the last walk went right)
+    right_of_hero(-6, dx, dy);
+    AimUnit &left = w.add(9, dx, dy);   // to the left, outside the cone
+    const int lx = left.feet_x + 3, ly = left.feet_y - 20;
+    AutoTarget aim;
+    // A on the one under the cursor: that one, at once, the cursor not moved.
+    AimResult r = press_at(aim, w, 0, true, false, true, lx, ly);
+    CHECK(aim.target_id() == 9 && r.aiming && r.left && r.cursor_x == lx && r.cursor_y == ly);
+    // Held: it stays, and the cursor stays.
+    for (uint64_t t = 40; t < 600; t += 40) {
+        r = press_at(aim, w, t, true, false, false, lx, ly);
+        CHECK(aim.target_id() == 9 && r.left && r.cursor_x == lx && r.cursor_y == ly);
+    }
+    // It walks off from under the cursor: followed, the same one.
+    w.place(*w.find(9), -4, 1);
+    for (uint64_t t = 600; t < 900; t += 40)
+        r = run(aim, w, [&] {
+            AimPoll p;
+            p.now_ms = t, p.allowed = true, p.a_held = true, p.dir_x = 1, p.dir_y = 0;
+            return p;
+        }());
+    CHECK(aim.target_id() == 9 && r.cursor_x == w.find(9)->feet_x && r.left);
+    // A kept target is replaced by the one under the cursor on a press (B too).
+    press_at(aim, w, 1000, false, false, false, 0, 0);
+    right_of_hero(5, dx, dy);
+    const int ex = w.find(7)->feet_x, ey = w.find(7)->feet_y - 25;
+    r = press_at(aim, w, 1100, false, true, true, ex, ey);
+    CHECK(aim.target_id() == 7 && r.right && r.cursor_x == ex && r.cursor_y == ey);
+
+    // While the circle pad walks the cursor is the walk's: the rules choose.
+    FakeWorld w2;
+    right_of_hero(5, dx, dy);
+    w2.add(7, dx, dy);
+    right_of_hero(-6, dx, dy);
+    AimUnit &l2 = w2.add(9, dx, dy);
+    AutoTarget aim2;
+    r = press_at(aim2, w2, 0, true, false, true, l2.feet_x, l2.feet_y - 20, true);
+    CHECK(aim2.target_id() == 7 && !r.left);
+
+    // The mercenary under the cursor is not a target: the rules choose.
+    FakeWorld w3;
+    right_of_hero(5, dx, dy);
+    w3.add(7, dx, dy);
+    right_of_hero(-3, dx, dy);
+    AimUnit &merc = w3.add(9, dx, dy);
+    merc.owned = true;
+    AutoTarget aim3;
+    r = press_at(aim3, w3, 0, true, false, true, merc.feet_x, merc.feet_y - 20);
+    CHECK(aim3.target_id() == 7);
+
+    // An item under the cursor with an enemy in the cone: A takes the item
+    // (the player pointed at it); B doesn't aim at items: the enemy.
+    FakeWorld w4;
+    right_of_hero(5, dx, dy);
+    w4.add(7, dx, dy);
+    right_of_hero(-3, dx, dy);
+    AimUnit &axe = w4.add_item(30, dx, dy, "hax ");
+    const int ix = axe.feet_x, iy = axe.feet_y - 4;
+    AutoTarget aim4;
+    r = press_at(aim4, w4, 0, true, false, true, ix, iy);
+    CHECK(aim4.target_id() == 30 && aim4.target_type() == 4 && r.left && r.cursor_x == ix && r.cursor_y == iy);
+    // Held: the enemy in the cone doesn't replace it.
+    for (uint64_t t = 40; t < 1000; t += 40)
+        press_at(aim4, w4, t, true, false, false, ix, iy);
+    CHECK(aim4.target_id() == 30);
+    AutoTarget aim5;
+    r = press_at(aim5, w4, 0, false, true, true, ix, iy);
+    CHECK(aim5.target_id() == 7);
+
+    // With the items shown, an item's name under the cursor is that item.
+    FakeWorld w6;
+    right_of_hero(5, dx, dy);
+    w6.add(7, dx, dy);
+    right_of_hero(-3, dx, dy);
+    w6.add_item(31, dx, dy, "r08");
+    w6.v.label_count = 1;
+    w6.v.labels[0] = AimLabel{100, 100, 160, 112, 31};
+    AutoTarget aim6;
+    r = press_at(aim6, w6, 0, true, false, true, 130, 106);
+    CHECK(aim6.target_id() == 31 && r.left && r.cursor_x == 130 && r.cursor_y == 106);
+
+    // Nothing under the cursor: the rules (the cone).
+    AutoTarget aim7;
+    r = press_at(aim7, w6, 0, true, false, true, 600, 60);
+    CHECK(aim7.target_id() == 7 && !r.left);
 }
 
 static void test_npcs()
@@ -519,8 +667,9 @@ static void test_sticky_and_forgotten()
     // Let go of A, the stick centred, then B: still 7.
     AimResult r = poll(aim, w, 100, false, false, false, false, kAimRight, false);
     CHECK(!r.aiming);
+    // (the cursor is still on 7: hover first, the button down at once)
     r = poll(aim, w, 600, false, true, false, true, kAimRight, false);
-    CHECK(aim.target_id() == 7 && r.aiming && !r.right);
+    CHECK(aim.target_id() == 7 && r.aiming && r.right);
     r = poll(aim, w, 640, false, true, false, false, kAimRight, false);
     CHECK(r.right && !r.left);
     // A and B swapped while held: still 7.
@@ -629,9 +778,15 @@ static void test_held_target_not_replaced_by_nearer()
     for (uint64_t t = 80; t < 1000; t += 40)
         poll(aim, w, t, false, true, false, false, kAimRight, false);
     CHECK(aim.target_id() == 7 && aim.stats().near_rule == 0);
-    // A fresh press: the one next to the hero comes first.
+    // A fresh press with the stick still right: 7 is in the cone (zone I
+    // comes first), kept.
     poll(aim, w, 1040, false, false, false, false, kAimRight, false);
-    poll(aim, w, 1080, false, true, false, true, kAimRight, false);
+    poll(aim, w, 1080, false, true, false, true, kAimRight);
+    CHECK(aim.target_id() == 7 && aim.stats().near_rule == 0);
+    // The stick turned away (up: 7 out of the cone, nobody there): the
+    // one in the circle next to the hero.
+    poll(aim, w, 1120, false, false, false, false, kAimUp);
+    poll(aim, w, 1160, false, true, false, true, kAimUp);
     CHECK(aim.target_id() == 8 && aim.stats().near_rule == 1);
 }
 
@@ -1886,6 +2041,8 @@ int main()
     test_classify();
     test_cone();
     test_near_rule();
+    test_monster_beats_item();
+    test_hover_first();
     test_npcs();
     test_press_waits_for_hover();
     test_never_shown();
@@ -1921,6 +2078,6 @@ int main()
         std::printf("aim: %d check(s) failed\n", g_fail);
         return 1;
     }
-    std::printf("aim: all checks passed (36 tests)\n");
+    std::printf("aim: all checks passed (38 tests)\n");
     return 0;
 }
