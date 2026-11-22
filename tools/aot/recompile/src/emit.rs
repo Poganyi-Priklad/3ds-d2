@@ -1077,6 +1077,19 @@ if (!r) {{ ST32(a, ebx); ST32(a + 4u, ecx); }} else {{ eax = lo; edx = hi; }} {}
             ));
         }
         let w = ops[0].size;
+        if w == 2 {
+            // 16 bits (49d3f3's imul cx, cx, 0xf): the product's low word,
+            // carry and overflow where it doesn't fit a signed word.
+            let a = self.get(i, if ops.len() == 3 { &ops[1] } else { &ops[0] }, None)?;
+            let b = self.get(i, if ops.len() == 3 { &ops[2] } else { &ops[1] }, Some(2))?;
+            return Ok(format!(
+                "{{ int32_t p = (int32_t)(int16_t)({}) * (int32_t)(int16_t)({}); uint32_t r = (uint32_t)p & 0xffffu; {}{} }}",
+                a,
+                b,
+                self.flag_store(va, "0u", "0u", "r", "(p != (int32_t)(int16_t)p)"),
+                self.put(i, &ops[0], "r")?
+            ));
+        }
         if w != 4 {
             return refused(format!("imul of {} bytes at {:08x}", w, va));
         }
