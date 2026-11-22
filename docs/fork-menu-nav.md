@@ -26,7 +26,9 @@ down, left or right:
   In the inventory, the weapon swap tabs drawn as "I" and "II" over each
   weapon are one button per weapon (either swaps the weapons, as W does): a
   flick up from a weapon reaches the tab over it.
-  The gold coins are cells too: the stash's (withdraw) over its grid, the
+  The panels' close buttons are cells too (inventory, stash, shop,
+  character screen, skill tree, quest log, waypoints), so A there closes
+  the panel. The gold coins are cells too: the stash's (withdraw) over its grid, the
   inventory's (drop, or deposit with the stash open) under it. A on a coin
   opens the game's gold dialog.
 - **In the gold dialog** (drop, deposit, withdraw, trade): a flick goes

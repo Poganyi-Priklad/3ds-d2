@@ -263,11 +263,22 @@ static void test_fixed_windows()
     CHECK(out.size() == 1 && out[0].cells.size() == 3 && out[0].up_down_only);   // the game menu over the rest
     out.clear();
     fixed_windows(1ull << 0x04 | 1ull << 0x0F, small, false, out);
-    CHECK(out.size() == 2 && out[0].cells.size() == 21 && out[1].cells.size() == 6);
+    CHECK(out.size() == 2 && out[0].cells.size() == 22 && out[1].cells.size() == 7);
+    // Their close buttons, last.
+    CHECK(out[0].cells[21].centre_x() == 507 && out[0].cells[21].centre_y() == 401);
+    CHECK(out[1].cells[6].centre_x() == 291 && out[1].cells[6].centre_y() == 404);
     out.clear();
     fixed_windows(1ull << 0x14, small, false, out);
-    CHECK(out.size() == 1 && out[0].cells.size() == 9 && out[0].cells[0].centre_y() == 77 &&
-          out[0].cells[8].centre_y() == 77 + 36 * 8);
+    CHECK(out.size() == 1 && out[0].cells.size() == 10 && out[0].cells[0].centre_y() == 77 &&
+          out[0].cells[8].centre_y() == 77 + 36 * 8 && !out[0].up_down_only);
+    {
+        // Down from the last waypoint: its close button; down again: round to the first.
+        MenuNav wp;
+        MenuNav::Step d = flick_at(wp, out, 158, 77 + 36 * 8, NavDirection::kDown);
+        CHECK(d.moved && d.x == 288 && d.y == 401);
+        d = flick_at(wp, out, 288, 401, NavDirection::kDown);
+        CHECK(d.moved && d.y == 77);
+    }
     out.clear();
     // The game menu: down from Return to Game round to Options.
     fixed_windows(1ull << 0x09, small, false, out);
@@ -1268,6 +1279,10 @@ static void test_gold_buttons()
     CHECK(stash640.contains(84, 32) && inv640.contains(414, 401));
     const NavRect stash800 = stash_gold_button(big), inv800 = inventory_gold_button(big);
     CHECK(stash800.contains(164, 92) && inv800.contains(494, 461));
+    // The close buttons under the inventory and under the stash or a shop.
+    CHECK(inventory_close_button(none).centre_x() == 354 && inventory_close_button(none).centre_y() == 402);
+    CHECK(stash_close_button(none).centre_x() == 287 && stash_close_button(none).centre_y() == 401);
+    CHECK(inventory_close_button(big).contains(434, 462) && stash_close_button(big).contains(367, 461));
 }
 
 static void test_controls_gold_dialog()

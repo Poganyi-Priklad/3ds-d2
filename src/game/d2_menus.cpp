@@ -470,12 +470,16 @@ public:
         // The right half: the inventory, also beside a shop, the stash, the
         // cube and a trade.
         const bool inventory = ui & (ui_bit(0x01) | ui_bit(0x0C) | ui_bit(0x17) | ui_bit(0x19) | ui_bit(0x1A));
-        if (inventory && add_window("inventory", inventory_row(cls), width, true, true, out, true))
+        if (inventory && add_window("inventory", inventory_row(cls), width, true, true, out, true)) {
             out.back().cells.push_back(inventory_gold_button(shift));
-        if (ui & ui_bit(0x0C))
-            add_window("shop", kShopRow, width, true, false, out);
-        if ((ui & ui_bit(0x19)) && add_window("stash", kStashRow, width, true, false, out))
+            out.back().cells.push_back(inventory_close_button(shift));
+        }
+        if ((ui & ui_bit(0x0C)) && add_window("shop", kShopRow, width, true, false, out))
+            out.back().cells.push_back(stash_close_button(shift));
+        if ((ui & ui_bit(0x19)) && add_window("stash", kStashRow, width, true, false, out)) {
             out.back().cells.push_back(stash_gold_button(shift));
+            out.back().cells.push_back(stash_close_button(shift));
+        }
         if (ui & ui_bit(0x1A))
             add_window("cube", kCubeRow, width, true, false, out);
         if (ui & ui_bit(0x17)) {

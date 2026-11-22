@@ -403,6 +403,16 @@ NavRect inventory_gold_button(const PanelShift &shift)
     return NavRect{402 + shift.right_x, 392 + shift.right_y, 427 + shift.right_x, 412 + shift.right_y};
 }
 
+NavRect inventory_close_button(const PanelShift &shift)
+{
+    return NavRect{340 + shift.right_x, 388 + shift.right_y, 368 + shift.right_x, 416 + shift.right_y};
+}
+
+NavRect stash_close_button(const PanelShift &shift)
+{
+    return NavRect{273 + shift.left_x, 387 + shift.left_y, 301 + shift.left_x, 415 + shift.left_y};
+}
+
 void fixed_windows(uint64_t ui, const PanelShift &shift, bool stat_points, std::vector<NavWindow> &out)
 {
     // A 640x480 rectangle or spot moved with the left half, the right half
@@ -443,8 +453,8 @@ void fixed_windows(uint64_t ui, const PanelShift &shift, bool stat_points, std::
         out.push_back(w);
     }
     if (ui & ui_bit(0x04)) {
-        // The skill tree (the right half): three columns of six skills, and
-        // its three tabs down the right.
+        // The skill tree (the right half): three columns of six skills, its
+        // three tabs down the right, and the close button at the bottom.
         NavWindow w;
         w.name = "skill tree";
         w.area = right(NavRect{320, 0, 640, 432});
@@ -453,27 +463,30 @@ void fixed_windows(uint64_t ui, const PanelShift &shift, bool stat_points, std::
                 w.cells.push_back(right(spot(x, y, 14)));
         for (int y : {160, 270, 375})
             w.cells.push_back(right(spot(595, y, 14)));
+        w.cells.push_back(right(spot(507, 401, 14)));
         out.push_back(w);
     }
     if (ui & ui_bit(0x0F)) {
-        // The quest log (the left half): two rows of three quests.
+        // The quest log (the left half): two rows of three quests, and the
+        // close button at the bottom.
         NavWindow w;
         w.name = "quest log";
         w.area = left(NavRect{0, 0, 320, 432});
         for (int y : {85, 180})
             for (int x : {62, 158, 255})
                 w.cells.push_back(left(spot(x, y, 20)));
+        w.cells.push_back(left(spot(291, 404, 14)));
         out.push_back(w);
     }
     if (ui & ui_bit(0x14)) {
         // The waypoints (the left half): nine places down the left, each
-        // a box 36 pixels apart.
+        // a box 36 pixels apart, and the close button under them.
         NavWindow w;
         w.name = "waypoints";
         w.area = left(NavRect{0, 0, 320, 432});
-        w.up_down_only = true;
         for (int i = 0; i < 9; i++)
             w.cells.push_back(left(NavRect{17, 63 + 36 * i, 300, 91 + 36 * i}));
+        w.cells.push_back(left(spot(288, 401, 14)));
         out.push_back(w);
     }
 }

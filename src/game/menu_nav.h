@@ -198,6 +198,13 @@ private:
 NavRect stash_gold_button(const PanelShift &shift);
 NavRect inventory_gold_button(const PanelShift &shift);
 
+// The close buttons ("X" in a circle) under the inventory (right half) and
+// under the stash or a shop (left half), measured the same way. The
+// character screen's, the skill tree's, the quest log's and the waypoints'
+// are in fixed_windows.
+NavRect inventory_close_button(const PanelShift &shift);
+NavRect stash_close_button(const PanelShift &shift);
+
 // Where the open windows are: the game's side (d2_menus.h's
 // game_menu_world), or made-up ones in the tests. ui: GameState::ui.
 // Out of the game (D2Win's screens: the main menu, the character and class
