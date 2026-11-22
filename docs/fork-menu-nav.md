@@ -55,7 +55,9 @@ down, left or right:
   multiplayer screens): the cursor jumps to the next enabled button, text
   field, list, character slot or hero; a D-pad press does the same. On the character screen with more than
   eight heroes, a flick right from the right column reaches the scroll bar's
-  up and down buttons, and A scrolls one row a press.
+  up and down buttons, and A scrolls one row a press. While a popup is up
+  (Normal / Nightmare / Hell, or a confirmation), only its buttons are
+  stops, round from the last to the first.
 - **With one side panel open** (inventory or skill tree on the right; character
   screen, quest log, party or mercenary on the left): hold the circle pad out
   for `aim_panel_walk_ms` (280 ms; `0`: never) to walk the hero on the free
