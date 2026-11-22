@@ -12,11 +12,11 @@
 #include <string>
 #include <vector>
 
-#if defined(__linux__)
-#include <sys/mman.h>
-#else
-#include <malloc.h>
+#if defined(__linux__) || defined(__3DS__)
+#include <sys/mman.h>   // the 3DS's is the backend's (shim/ctr/mman_ctr.c: svcControlMemory)
+#define CPU_AOT_MMAP 1
 #endif
+#include <malloc.h>
 
 // A guest thread's host context is a stack and the registers a call keeps
 // (AAPCS: r4-r11, lr, d8-d15), saved on it. One switch for the lane (ARMv6
@@ -66,10 +66,14 @@ public:
     {
         // The guest's whole span as one block, guest 0 at base_ (WX86_ARENA, as
         // the Box86 backend takes it).
+        // (WX86_ARENA is the layout's span and 16 MiB the Box86 backend
+        // aligns its block with; the span alone is taken here.)
         const char *as = std::getenv("WX86_ARENA");
         span_ = as ? (uint32_t)std::strtoul(as, nullptr, 16) : 0x10000000u;
-#if defined(__linux__)
-        void *p = mmap(nullptr, span_, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (span_ > 0x1000000u)
+            span_ -= 0x1000000u;
+#ifdef CPU_AOT_MMAP
+        void *p = mmap(nullptr, span_, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
         if (p == MAP_FAILED)
             p = nullptr;
 #else
