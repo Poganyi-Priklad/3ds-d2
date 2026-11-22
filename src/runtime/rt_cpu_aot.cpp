@@ -9,10 +9,29 @@
 #include <cstring>
 #include <map>
 #include <memory>
+#include <string>
+#include <vector>
 
 #if defined(__linux__)
 #include <sys/mman.h>
-#include <ucontext.h>
+#else
+#include <malloc.h>
+#endif
+
+// A guest thread's host context is a stack and the registers a call keeps
+// (AAPCS: r4-r11, lr, d8-d15), saved on it. One switch for the lane (ARMv6
+// under qemu) and the 3DS: aot_ctx_switch(&from_sp, to_sp).
+#if defined(__arm__)
+extern "C" void aot_ctx_switch(void **save_sp, void *load_sp);
+__asm__(".text\n.arm\n.fpu vfp\n.align 2\n.global aot_ctx_switch\n.type aot_ctx_switch, %function\n"
+        "aot_ctx_switch:\n"
+        "    push {r4-r11, lr}\n"
+        "    vpush {d8-d15}\n"
+        "    str sp, [r0]\n"
+        "    mov sp, r1\n"
+        "    vpop {d8-d15}\n"
+        "    pop {r4-r11, pc}\n"
+        ".size aot_ctx_switch, .-aot_ctx_switch\n");
 #define CPU_AOT_FIBERS 1
 #endif
 
@@ -21,13 +40,21 @@ namespace d2rt {
 #ifdef CPU_AOT_FIBERS
 namespace {
 
-constexpr size_t kFiberStack = 1u << 20;   // measured on the lane first, then cut (docs/aot.md)
+// A thread's host stack. The lane's is large and reports what was used
+// (cpu_aot_lines), which sets the 3DS's.
+#if defined(__linux__)
+constexpr size_t kFiberStack = 1u << 20;
+#else
+constexpr size_t kFiberStack = 128u << 10;   // the lane's scripts use 10 KiB at most (docs/aot.md)
+#endif
+constexpr uint8_t kStackFill = 0xa5;
 
 struct Fiber {
-    ucontext_t ctx;
-    void *stack = nullptr;
+    void *sp = nullptr;      // its saved context, while it isn't running
+    uint8_t *stack = nullptr;
+    uint32_t tib = 0;
     uint32_t entry = 0;
-    bool started = false, done = false, stopped = false;
+    bool done = false;
     alignas(8) uint8_t fpu[416] = {};   // AotFpu holds doubles
 };
 
@@ -41,8 +68,14 @@ public:
         // the Box86 backend takes it).
         const char *as = std::getenv("WX86_ARENA");
         span_ = as ? (uint32_t)std::strtoul(as, nullptr, 16) : 0x10000000u;
+#if defined(__linux__)
         void *p = mmap(nullptr, span_, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-        if (p == MAP_FAILED) {
+        if (p == MAP_FAILED)
+            p = nullptr;
+#else
+        void *p = std::calloc(1, span_);
+#endif
+        if (!p) {
             std::fprintf(stderr, "[cpu_aot] no %u MiB for the guest's memory\n", (unsigned)(span_ >> 20));
             std::abort();
         }
@@ -124,28 +157,43 @@ public:
         if (!slot) {
             slot.reset(new Fiber);
             Fiber *f = slot.get();
-            f->stack = mmap(nullptr, kFiberStack, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-            if (f->stack == MAP_FAILED)
+#if defined(__linux__)
+            void *st = mmap(nullptr, kFiberStack + 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            if (st == MAP_FAILED)
                 cpu_aot_stop("no host stack for a thread", eip);
-            mprotect(f->stack, 4096, PROT_NONE);   // a guard page under it
+            mprotect(st, 4096, PROT_NONE);   // a guard page under it
+            f->stack = (uint8_t *)st + 4096;
+#else
+            f->stack = (uint8_t *)memalign(8, kFiberStack);
+            if (!f->stack)
+                cpu_aot_stop("no host stack for a thread", eip);
+#endif
+            std::memset(f->stack, kStackFill, kFiberStack);
+            f->tib = fs_;
             const uint16_t cw = 0x27f;
             std::memcpy(f->fpu, &cw, 2);
             const uint32_t empty = 0xffffu;        // every x87 register empty
             std::memcpy(f->fpu + 140, &empty, 4);
             f->entry = eip;
-            getcontext(&f->ctx);
-            f->ctx.uc_stack.ss_sp = f->stack;
-            f->ctx.uc_stack.ss_size = kFiberStack;
-            f->ctx.uc_link = &sched_;
-            makecontext(&f->ctx, (void (*)())&CpuAot::fiber_main, 0);
+            // What aot_ctx_switch pops: d8-d15, r4-r11, then pc.
+            uint32_t *top = (uint32_t *)(((uintptr_t)f->stack + kFiberStack) & ~(uintptr_t)7) - 25;
+            std::memset(top, 0, 25 * 4);
+            top[24] = (uint32_t)(uintptr_t)&CpuAot::fiber_main;
+            f->sp = top;
         }
         Fiber *f = slot.get();
         cur_ = f;
         calls_ = 0;
-        swapcontext(&sched_, &f->ctx);
+        aot_ctx_switch(&sched_sp_, f->sp);
         cur_ = nullptr;
         if (f->done) {
-            munmap(f->stack, kFiberStack);
+            rt::logf("cpu_aot: the thread at TIB %08x ended, %u KiB of its %u KiB host stack used", f->tib,
+                     (unsigned)(used(*f) >> 10), (unsigned)(kFiberStack >> 10));
+#if defined(__linux__)
+            munmap(f->stack - 4096, kFiberStack + 4096);
+#else
+            std::free(f->stack);
+#endif
             fibers_.erase(fs_);
         }
         return true;
@@ -160,8 +208,18 @@ public:
         Fiber *f = cur_;
         if (!f)
             cpu_aot_stop("a yield outside a thread's fiber", regs_[R_EIP]);
-        swapcontext(&f->ctx, &sched_);
+        aot_ctx_switch(&f->sp, sched_sp_);
         cur_ = f;   // run() set it again; kept explicit
+    }
+    // Each live thread's host stack: the most of it used so far.
+    void lines(std::vector<std::string> &out)
+    {
+        for (const auto &kv : fibers_) {
+            char line[128];
+            std::snprintf(line, sizeof line, "cpu_aot: the thread at TIB %08x: %u KiB of its %u KiB host stack used",
+                          kv.second->tib, (unsigned)(used(*kv.second) >> 10), (unsigned)(kFiberStack >> 10));
+            out.push_back(line);
+        }
     }
     void *fpu() { return cur_ ? cur_->fpu : boot_fpu_; }
     bool take_code_changed()
@@ -178,7 +236,15 @@ private:
         Fiber *f = self->cur_;
         g_dispatch(*self, f->entry, 0);
         f->done = true;
-        swapcontext(&f->ctx, &self->sched_);
+        aot_ctx_switch(&f->sp, self->sched_sp_);
+        __builtin_unreachable();
+    }
+    static size_t used(const Fiber &f)
+    {
+        size_t k = 0;
+        while (k < kFiberStack && f.stack[k] == kStackFill)
+            k++;
+        return kFiberStack - k;
     }
     bool in(uint32_t va, uint32_t n) const { return (uint64_t)va + n <= span_; }
 
@@ -190,7 +256,7 @@ private:
     TrapFn trap_;
     std::map<uint32_t, std::unique_ptr<Fiber>> fibers_;   // by the thread's TIB
     Fiber *cur_ = nullptr;
-    ucontext_t sched_;
+    void *sched_sp_ = nullptr;
     bool code_changed_ = true;
     uint64_t limit_ = 0, calls_ = 0;
     bool hit_ = false;
@@ -217,6 +283,13 @@ void cpu_aot_yield(Cpu &c) { static_cast<CpuAot &>(c).yield(); }
 void *cpu_aot_fpu(Cpu &c) { return static_cast<CpuAot &>(c).fpu(); }
 bool cpu_aot_take_code_changed(Cpu &c) { return static_cast<CpuAot &>(c).take_code_changed(); }
 bool cpu_aot_slice_over(Cpu &c) { return static_cast<CpuAot &>(c).slice_over(); }
+std::vector<std::string> cpu_aot_lines()
+{
+    std::vector<std::string> out;
+    if (CpuAot::g_self)
+        CpuAot::g_self->lines(out);
+    return out;
+}
 
 #else   // no fibers on this host yet (the 3DS: a context switch of its own, docs/aot.md)
 
@@ -229,6 +302,7 @@ void cpu_aot_yield(Cpu &) {}
 void *cpu_aot_fpu(Cpu &) { return nullptr; }
 bool cpu_aot_take_code_changed(Cpu &) { return false; }
 bool cpu_aot_slice_over(Cpu &) { return false; }
+std::vector<std::string> cpu_aot_lines() { return {}; }
 
 #endif
 

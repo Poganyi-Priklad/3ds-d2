@@ -7,6 +7,9 @@
 
 #include "runtime/cpu.h"
 
+#include <string>
+#include <vector>
+
 namespace d2rt {
 
 // The backend (one a process), or nullptr where fibers aren't available.
@@ -35,6 +38,9 @@ bool cpu_aot_take_code_changed(Cpu &c);
 // After a trap that asked for no yield: whether the running thread's slice is
 // over (its share of trap calls made). True once; cpu_aot_yield then.
 bool cpu_aot_slice_over(Cpu &c);
+// Each live thread's host stack and the most of it used ("cpu_aot: ..."),
+// for the lane's end; empty without CpuAot.
+std::vector<std::string> cpu_aot_lines();
 // The run can't go on: `what` logged, then the process ends.
 [[noreturn]] void cpu_aot_stop(const char *what, uint32_t at);
 
