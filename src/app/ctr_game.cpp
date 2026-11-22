@@ -2465,6 +2465,27 @@ extern "C" __attribute__((noreturn)) void __wrap_abort(void)
 // heap and the linear memory set aside for jump tables allow.
 static const rt::Layout *reserve_arena()
 {
+#ifdef D2RT_CPU_AOT
+    // A build with CpuAot (issue #138): no jump tables, no JIT records and no
+    // alignment the backend asks for, so the arena is the heap less what the
+    // host itself uses, whatever the heap's size (the compiled code is in the
+    // executable, and the heap is the smaller for it: 93 MiB in Azahar).
+    // kAotHostHeap: the host used 8.3 MiB at most outside the arena in
+    // Azahar's town-walk (the cinematics; 7.3 in town), and Box86's builds
+    // run with 4 MiB of room. The map is kCtrGameLayoutN3's with the pool's
+    // end moved.
+    constexpr u32 kAotHostHeap = 12u << 20;
+    static rt::Layout aot = rt::kCtrGameLayoutN3;
+    const u32 span = __ctru_heap_size > kAotHostHeap ? (__ctru_heap_size - kAotHostHeap) & ~0xFFFFFu : 0;
+    if (span >= rt::kCtrGameLayout.span && (g_arena = memalign(0x1000, span))) {
+        aot.name = "ctr-game-aot";
+        aot.span = span;
+        aot.va_size = span - aot.va_base;
+        g_arena_block = g_arena;
+        g_arena_size = span;
+        return &aot;
+    }
+#endif
     const bool full = __ctru_heap_size >= (95u << 20);
     // The larger arena only with 3 MiB of jump tables in linear memory. The
     // console set 1,792 KiB aside, so it has always run ctr-game-n3-heap;

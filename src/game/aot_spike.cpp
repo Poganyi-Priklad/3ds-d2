@@ -18,6 +18,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <malloc.h>
 #include <map>
 #include <set>
 #include <unordered_map>
@@ -1063,9 +1064,14 @@ void install_fns(Cpu &c)
         n += f->keep ? 1 : 0;
     if (!n)
         return;
+    // CpuAot (issue #138) hooks nothing, so it needs no trampoline, no trap
+    // and no return site's entry: 6.8 MiB of host heap and 448 KiB of the
+    // guest's on the lane. It keeps the rows (aot_direct, the natives' kept
+    // registers) and the hand-backs.
+    const bool hooks = !g_cpu_aot;
     const uint32_t bytes = (uint32_t)((32 * n + 0xfff) & ~(size_t)0xfff);
-    const uint32_t at = rt::va_alloc(bytes, 0x0067b850);
-    if (!at) {
+    const uint32_t at = hooks ? rt::va_alloc(bytes, 0x0067b850) : 0;
+    if (hooks && !at) {
         rt::logf("aot check: no memory for %u trampolines", (unsigned)n);
         return;
     }
@@ -1108,6 +1114,8 @@ void install_fns(Cpu &c)
         Fn &F = g_fns.back();
         F.f = f;
         F.fj = fj;
+        if (!hooks)
+            continue;
         F.tramp = at + 32 * (uint32_t)(g_fns.size() - 1);
         uint8_t t[32];
         uint32_t len = f->keep;
@@ -1143,7 +1151,8 @@ void install_fns(Cpu &c)
             in_line++;
         }
     }
-    c.invalidate_code(at, bytes);
+    if (hooks)
+        c.invalidate_code(at, bytes);
     for (uint32_t k = 0; k < g_fns.size(); k++)
         g_fn_at[g_fns[k].f->va] = k;
     // D2_AOT_NODIRECT (the lane): the natives' guest_calls nested, as before.
@@ -1167,7 +1176,7 @@ void install_fns(Cpu &c)
         rt::logf("aot: %u of the natives' hand-backs compiled", (unsigned)g_resume_at.size());
     {
         const char *e = std::getenv("D2_AOT_REENT");
-        if (aot_reents && !(e && !std::strcmp(e, "0"))) {
+        if (hooks && aot_reents && !(e && !std::strcmp(e, "0"))) {
             for (const AotReent *r = aot_reents; r->va; r++)
                 g_reent_at[r->va] = r;
             g_reent_trap = rt::native_entry("aot:reenter", 0, [](Cpu &cc) { return reenter(cc); });
@@ -1279,7 +1288,9 @@ int install_aot(Cpu &c)
         n++;
     }
     c.invalidate_code(at, 0x1000);
+    const size_t host0 = mallinfo().uordblks;
     install_fns(c);
+    rt::logf("aot: the functions' rows took %u KiB of host heap", (unsigned)((mallinfo().uordblks - host0) >> 10));
     // Sig and Check hook every compiled function, which the natives' hooks
     // must go in before (issue #115: on the console they're in before the
     // OPTIONS row turns it on); aot_after_natives() turns them on.
@@ -1844,6 +1855,12 @@ static bool cpuaot_dispatch(d2rt::Cpu &c, uint32_t eip, uint32_t until)
             std::string names;
             stale_funcs(c, changed, names);
             g_stale_slot.clear();
+            // Each one named: the game writes none of its code, so this is
+            // the natives' installs (one check after them) and then a native
+            // turned on or off, nothing else.
+            static uint32_t checks = 0;
+            rt::logf("aot: the compiled functions' bytes checked against the image (check %u): %u differ", (unsigned)++checks,
+                     (unsigned)changed);
         }
         if (aot_mem[eip] == 0xe9) {   // a native's hook at the entry: its shim's trap
             int32_t rel;

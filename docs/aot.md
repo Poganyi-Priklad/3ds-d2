@@ -616,6 +616,7 @@ With compiled code the hook needn't be in the x86 image to take effect. It becom
 - **A compiled caller calls the native in C** where it called the function: one adapter at first (the registers to the CPU, the native's `fn(Cpu &)`, back), then natives that take the registers themselves. A native that hands back returns that, and the caller's code calls the compiled original in C: no exit. This is `natives()`'s two hand-written bindings (RoomFind, CollisionCross) for every row, and it replaces them.
 - **What the recompiler assumes of the call** is the original function's summary (the native computes the same function), with its exits where the row says it hands back.
 - **`aot_call_stale` and the changed list** stay for a group that is compiled but not applied (a native masked off with `D2_NATIVE_MASK`): each hook is a group of its own.
+- **The run-time check becomes the start's.** With every patched site known to the recompiler, nothing differs from what was compiled when the natives are in. A build without Box86 then checks the image once, as it starts, to tell that the Game.exe is the one compiled, and has no list of changed functions to keep and no reason to hash the code again (today: one check after the natives install, 39 differ).
 
 The stubs in `.text`'s slack stay as they are: in a build without Box86 their bytes are only what the recompiler reads.
 
@@ -739,13 +740,31 @@ The AOT app's static size is 28 MiB (24.1 text, 2.3 rodata, 1.6 bss) against the
 | `jit` / `meta` / `jmptbl` in town | 8,192 / 2,112 / 12,032 KiB | 0 / 0 / 0 |
 | `host` in town | 93,047 KiB | 81,300 KiB |
 
-Two things were wrong in the AOT column. Loading several times slower is explained and fixed below. The guest has about 11 MiB less free, though the host uses 12 MiB less: the layout still sets Box86's memory aside, which is next.
+Two things were wrong in the AOT column. Both are explained and fixed below: the load, and the guest's 11 MiB less free.
 
 **The Box86 lanes at this tree** (the check with `D2_AOT_STALE=1 M4_LAYOUT=ctr`): 0 differ (town-walk 10.7M calls, fight 12.7M, Act II 46.6M), 13,921 functions hooked of 14,302 compiled, 201 refused, 39 changed since compiled. Profiled production with `D2_AOT_STRICT=1`: Box86 ran 3,119,820 x86 bytes against 804,972, and compiled code left to it 4,059 times in town-walk (3,164), 5,339 in the fight (3,194), 8,063 in Act II (5,019). The whole of the rise is FloorQueueArm (896, 2,146 and 3,045 times): `476bc0` is compiled now that its two calls are rows, and the native hands back to the floor's draw through Box86 once a frame, after which Box86 runs the frame's callers on (`451bb0`, `44efa0`). `457300` is off the list (the floor's row). On `CpuAot` that hand-back is the dispatcher's.
 
 **The slow load was the dispatcher's own.** `CpuAot` took every `invalidate_code` as a change of code, and the heap's `HeapReAlloc` reports each block it copies; at the next call through the dispatcher that cost a hash of all 14,302 compiled functions' bytes (`stale_funcs`), many times a second while the game loads. Now only a write inside the image (its span from the PE header, `cpu_aot_set_code_span`) is a change. In Azahar, the same script (`3ds-d2-aot-0.5.0-dev-07b9f9f7db14-aot7110b8.cia`, the sampled build below): 7,905 KiB read in the first 10 s, as the x86 CIA, and the town about 15 s after the game's start, against 215 s. The lane's virtual clock had hidden it: its frames at a script's time are the same before and after (2,005, 3,255, 4,071).
 
 **The sampled profile** (`AOT_SAMPLE=1 D2_CIA_CPU=aot scripts/docker.sh package-cia <game-dir>`, a build of its own in `build/cpu/ctr-aot-sample`): each compiled function writes its address to one word at its entry (`AOT_SAMPLE_ON` in `aot_rt.h`), a host thread reads the word every 2 ms, and the heartbeat prints the window's places, the most first (`aot samples:`). A trap's address is a shim or a native, 1 a thread switched away. The dispatcher puts the word back when a trap or a function it ran returns, so the time after is the caller's; a function's own time after a compiled callee returns is still the callee's. It is what found the load: most of the samples were in Storm's decompression dispatcher (`41e720`), its buffer helper (`41e440`) and the hash lookup (`4155d0`), small functions whose next call went through the dispatcher.
+
+**The AOT build's memory.** The x86 CIA of the same tree had 11 MiB more for the game than the first AOT one, for two reasons, both the AOT build's own:
+
+- **The arena fell to the smallest layout.** The app took the 75 or 77 MiB arenas only with a heap of the full 95 MiB. The AOT executable is larger in memory (24.1 MiB of compiled code against Box86's 14 MiB pool and its own code), so the heap it gets is 93 MiB, and `kCtrGameLayout`'s 63 MiB was what was left. A `CpuAot` build now sizes its arena from the heap it has: the heap less 12 MiB for the host (`kAotHostHeap` in `ctr_game.cpp`: 8.3 MiB used at most outside the arena, during the cinematics, and the 4 MiB of room the Box86 builds run with), with no alignment, which only the Box86 backend asked for. The map is `kCtrGameLayoutN3`'s with the pool's end moved (`ctr-game-aot`).
+- **The runtime made Box86's tables.** `install_fns` gave every hookable function a trampoline and a trap (13,960, and 3,068 more to enter in line) and mapped the 53,963 return sites, for hooks a build with no Box86 never places: 6.8 MiB of host heap on the lane and 448 KiB of the guest's. A `CpuAot` build keeps the functions' rows and the natives' hand-backs alone (1.7 MiB on the 3DS, 299 KiB on the lane).
+
+| In Azahar, in town | x86 (Box86) | AOT before | AOT now |
+|---|---|---|---|
+| Heap | 97,280 KiB | 95,232 KiB | 95,232 KiB |
+| Arena | 76,800 KiB (`ctr-game-n3-heap`) | 64,512 KiB (`ctr-game`) | 82,944 KiB (`ctr-game-aot`) |
+| Pool (the game's heap and VirtualAlloc) | 64,448 KiB | 52,160 KiB | 70,592 KiB |
+| `free` of the pool | 21,649 KiB | 10,385 KiB | 29,201 KiB |
+| Host heap used outside the arena | 16,247 KiB | 16,788 KiB | 7,334 KiB |
+| Host heap free | 4,233 KiB | 13,932 KiB | 4,953 KiB |
+
+(`3ds-d2-aot-0.5.0-dev-d51ae29b3c8d-aot7110b8.cia`; the walk reaches its end at 250 frames a window. One run. The console's heap and budget are its own: the arena follows them.) What is left to give: the compiled code is 24.1 MiB for 2.7 MB of x86, and each MiB less of it is one more of heap; not measured at another optimisation level yet.
+
+**The code check, once.** The game writes none of its own code, so the bytes of the compiled functions are compared with the image once, at the first call after the natives install, and the dispatcher's log names each check (`aot: the compiled functions' bytes checked against the image (check 1): 39 differ`, the natives' entry hooks; one line in each of the lane's scripts and in Azahar's run). A later one would be a native turned on or off during play. When the natives' hooks are bound at compile time ([below](#natives-bound-at-compile-time-138-planned-after-the-scheduler)) the compiled code is the patched code, nothing differs, and this is one check at the start that the Game.exe is the one compiled.
 
 **The lane's fault report.** A `CpuAot` build on the lane names a segmentation fault: the host address and the guest's, pc, lr and r0 to r3, the last compiled function the dispatcher entered, the last trap and the last hand-back. (The first use: the floor queue armed while off, its native writing a ring never allocated.)
 
