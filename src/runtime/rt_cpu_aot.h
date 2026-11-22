@@ -32,6 +32,9 @@ void cpu_aot_yield(Cpu &c);
 void *cpu_aot_fpu(Cpu &c);
 // Code changed since this was last asked (a native's hook): true once.
 bool cpu_aot_take_code_changed(Cpu &c);
+// After a trap that asked for no yield: whether the running thread's slice is
+// over (its share of trap calls made). True once; cpu_aot_yield then.
+bool cpu_aot_slice_over(Cpu &c);
 // The run can't go on: `what` logged, then the process ends.
 [[noreturn]] void cpu_aot_stop(const char *what, uint32_t at);
 

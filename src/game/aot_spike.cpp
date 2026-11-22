@@ -1702,6 +1702,8 @@ static bool cpuaot_dispatch(d2rt::Cpu &c, uint32_t eip, uint32_t until)
                 if (eip == rt::bridge().sentinel())
                     return false;        // the thread's, or a nested run's, end
                 d2rt::cpu_aot_yield(c);  // a yield or a wait: here until the scheduler runs the thread again
+            } else if (d2rt::cpu_aot_slice_over(c)) {
+                d2rt::cpu_aot_yield(c);  // preempted: its slice's share of trap calls made
             }
             cpuaot_bind(c);
             eip = c.reg(d2rt::R_EIP);

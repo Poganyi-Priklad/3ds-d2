@@ -3,6 +3,7 @@
 
 #include "runtime/rt_host.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -88,6 +89,26 @@ public:
     }
     void request_stop() override {}
 
+    // Preemption (docs/aot.md): the scheduler gives each slice its length in
+    // guest instructions (300,000; less for a background thread). Compiled
+    // code doesn't count them, so a slice ends after a share of that in trap
+    // calls with no wait between (one for each 1,024 instructions): a thread
+    // that polls the clock in a loop still gives the others their turn.
+    void set_run_limit(uint64_t n) override { limit_ = n; }
+    bool take_limit_hit() override
+    {
+        const bool h = hit_;
+        hit_ = false;
+        return h;
+    }
+    bool slice_over()
+    {
+        if (!limit_ || !cur_ || ++calls_ < std::max<uint64_t>(16, limit_ >> 10))
+            return false;
+        hit_ = true;
+        return true;
+    }
+
     // The scheduler's: the thread whose TIB it set, on its fiber, until it
     // yields or ends. A run from inside a fiber (a shim's guest_call) is the
     // dispatcher, in place.
@@ -120,6 +141,7 @@ public:
         }
         Fiber *f = slot.get();
         cur_ = f;
+        calls_ = 0;
         swapcontext(&sched_, &f->ctx);
         cur_ = nullptr;
         if (f->done) {
@@ -170,6 +192,8 @@ private:
     Fiber *cur_ = nullptr;
     ucontext_t sched_;
     bool code_changed_ = true;
+    uint64_t limit_ = 0, calls_ = 0;
+    bool hit_ = false;
     alignas(8) uint8_t boot_fpu_[416] = {};
 
 public:
@@ -192,6 +216,7 @@ bool cpu_aot_is_trap(Cpu &c, uint32_t va) { return static_cast<CpuAot &>(c).is_t
 void cpu_aot_yield(Cpu &c) { static_cast<CpuAot &>(c).yield(); }
 void *cpu_aot_fpu(Cpu &c) { return static_cast<CpuAot &>(c).fpu(); }
 bool cpu_aot_take_code_changed(Cpu &c) { return static_cast<CpuAot &>(c).take_code_changed(); }
+bool cpu_aot_slice_over(Cpu &c) { return static_cast<CpuAot &>(c).slice_over(); }
 
 #else   // no fibers on this host yet (the 3DS: a context switch of its own, docs/aot.md)
 
@@ -203,6 +228,7 @@ bool cpu_aot_is_trap(Cpu &, uint32_t) { return false; }
 void cpu_aot_yield(Cpu &) {}
 void *cpu_aot_fpu(Cpu &) { return nullptr; }
 bool cpu_aot_take_code_changed(Cpu &) { return false; }
+bool cpu_aot_slice_over(Cpu &) { return false; }
 
 #endif
 
