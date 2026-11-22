@@ -468,6 +468,9 @@ package-cia)   # [<game-dir> | --slim|--full <game-dir>]: the game app (+ the us
     if [ "$cia_cpu" = aot ]; then   # the whole list compiled: all of the game's code is the AOT's
         ctr_out=build/cpu/ctr-aot; ctr_cpu=(CPU=aot)
         [ -z "${AOT_SAMPLE:-}" ] || { ctr_out=build/cpu/ctr-aot-sample; ctr_cpu+=(AOT_SAMPLE=1); }   # its sampled profile (docs/aot.md)
+        if [ -n "${AOT_OPT:-}" ]; then   # the generated C at another optimisation, in a build directory of its own
+            aot_tag="$(printf %s "$AOT_OPT" | tr -cd 'A-Za-z0-9')"; ctr_out="$ctr_out-$aot_tag"; ctr_cpu+=("AOT_TAG=$aot_tag")
+        fi
         [ "$aot_build_asked" = keep ] || D2_AOT_BUILD=1   # keep: the C the last run wrote, if it was the whole list's
         D2_AOT_SET=whole
     fi

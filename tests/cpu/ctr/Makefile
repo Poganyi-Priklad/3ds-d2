@@ -24,6 +24,7 @@ OUT    := $(ROOT)/build/cpu/ctr
 # and its code pool aren't in the app, whose memory is then the game's. Its
 # objects are in a folder of their own.
 CPU ?= box86
+AOT_OPT ?= -O2 -g
 ifeq ($(CPU),aot)
 OUT    := $(ROOT)/build/cpu/ctr-aot
 CPUDEF := -DD2RT_CPU_AOT
@@ -33,6 +34,11 @@ ifneq ($(AOT_SAMPLE),)
 OUT    := $(ROOT)/build/cpu/ctr-aot-sample
 CPUDEF += -DAOT_SAMPLE_ON
 AOTDEF := -DAOT_SAMPLE_ON
+endif
+# AOT_OPT: the generated C's optimisation (its 24 MiB of code are the heap's
+# loss: docs/aot.md), with AOT_TAG naming a build directory of its own.
+ifneq ($(AOT_TAG),)
+OUT    := $(OUT)-$(AOT_TAG)
 endif
 else
 CPUDEF := -DD2RT_CPU_BOX86
@@ -119,7 +125,7 @@ AOTOBJ := $(foreach v,$(if $(filter aot,$(CPU)),d,d n),$(patsubst $(AOT)/%.c,$(O
 GAMEOBJ += $(AOTOBJ)
 endif
 $(OUT)/aot/d/%.o: $(AOT)/%.c $(ROOT)/src/game/aot_rt.h
-	@mkdir -p $(@D); $(CC) -O2 -g $(ARCH) -std=gnu17 -I$(ROOT)/src -w $(AOTDEF) -c $< -o $@
+	@mkdir -p $(@D); $(CC) $(AOT_OPT) $(ARCH) -std=gnu17 -I$(ROOT)/src -w $(AOTDEF) -c $< -o $@
 $(OUT)/aot/n/%.o: $(AOT)/%.c $(ROOT)/src/game/aot_rt.h
 	@mkdir -p $(@D); $(CC) -O2 -g $(ARCH) -std=gnu17 -I$(ROOT)/src -w -DAOT_NOINLINE -c $< -o $@
 $(OUT)/aot.cfg: FORCE

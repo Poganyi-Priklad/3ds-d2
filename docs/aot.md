@@ -762,7 +762,20 @@ Two things were wrong in the AOT column. Both are explained and fixed below: the
 | Host heap used outside the arena | 16,247 KiB | 16,788 KiB | 7,334 KiB |
 | Host heap free | 4,233 KiB | 13,932 KiB | 4,953 KiB |
 
-(`3ds-d2-aot-0.5.0-dev-d51ae29b3c8d-aot7110b8.cia`; the walk reaches its end at 250 frames a window. One run. The console's heap and budget are its own: the arena follows them.) What is left to give: the compiled code is 24.1 MiB for 2.7 MB of x86, and each MiB less of it is one more of heap; not measured at another optimisation level yet.
+(`3ds-d2-aot-0.5.0-dev-d51ae29b3c8d-aot7110b8.cia`; the walk reaches its end at 250 frames a window. One run. The console's heap and budget are its own: the arena follows them.) What is left to give is the compiled code's size, 24.1 MiB for 2.7 MB of x86.
+
+**The generated C at `-Os`** (`AOT_OPT="-Os -g" D2_CIA_CPU=aot scripts/docker.sh package-cia <game-dir>`, a build directory of its own; `-O2 -g` is the default):
+
+| The AOT app | `-O2` | `-Os` |
+|---|---|---|
+| text and rodata (`size`) | 27,773,824 B | 20,903,944 B |
+| Budget after the executable | 97,976 KiB | 104,684 KiB |
+| Heap | 95,232 KiB | 97,280 KiB |
+| Arena | 82,944 KiB | 84,992 KiB |
+| `free` of the pool in town | 29,201 KiB | 29,841 KiB |
+| Linear memory beyond the 2 MiB | 256 KiB | 4,864 KiB |
+
+6.6 MiB less code, of which the game gets 2: the heap is at the console's 95 MiB window, and the other 4.6 MiB can only be linear memory, which nothing in a build without Box86 uses (the x86 build puts jump tables there). The walk in Azahar is the same (250 frames a window), which says nothing of the console's speed. So `-O2` stays the default until a console run compares the two, and the linear memory wants a user (the host's own larger blocks) before `-Os` pays in full.
 
 **The code check, once.** The game writes none of its own code, so the bytes of the compiled functions are compared with the image once, at the first call after the natives install, and the dispatcher's log names each check (`aot: the compiled functions' bytes checked against the image (check 1): 39 differ`, the natives' entry hooks; one line in each of the lane's scripts and in Azahar's run). A later one would be a native turned on or off during play. When the natives' hooks are bound at compile time ([below](#natives-bound-at-compile-time-138-planned-after-the-scheduler)) the compiled code is the patched code, nothing differs, and this is one check at the start that the Game.exe is the one compiled.
 
