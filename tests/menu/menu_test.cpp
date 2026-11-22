@@ -351,6 +351,49 @@ static void test_fixed_windows()
         fixed_windows(1ull << 0x0F, small, false, wp, 1);
         CHECK(wp[0].cells.size() == 7);
     }
+    for (int big_frame = 0; big_frame < 2; big_frame++)
+        for (int acts = 1; acts <= 5; acts++) {
+            // The waypoints, every act count (I to V reached), at 640x480 and
+            // 800x600: nine rows at the same places in every act (a row with
+            // no waypoint is a click on nothing), the close button, and a tab
+            // for each act reached (none with one act). The lane: at 800x600
+            // the first row's middle at 238,137 and the close button at 368,461.
+            const PanelShift sh = panel_shift(big_frame ? 800 : 640, big_frame ? 600 : 480);
+            std::vector<NavWindow> wp;
+            fixed_windows(1ull << 0x14, sh, false, wp, acts);
+            const size_t tabs = acts > 1 ? (size_t)acts : 0;
+            CHECK(wp.size() == 1 && wp[0].cells.size() == 10 + tabs);
+            if (wp.size() != 1 || wp[0].cells.size() != 10 + tabs)
+                continue;
+            for (int i = 0; i < 9; i++)
+                CHECK(wp[0].cells[i].centre_x() == 158 + sh.left_x && wp[0].cells[i].centre_y() == 77 + 36 * i + sh.left_y);
+            CHECK(wp[0].cells[9].centre_x() == 288 + sh.left_x && wp[0].cells[9].centre_y() == 401 + sh.left_y);
+            if (big_frame)
+                CHECK(wp[0].cells[0].centre_x() == 238 && wp[0].cells[0].centre_y() == 137 &&
+                      wp[0].cells[9].centre_x() == 368 && wp[0].cells[9].centre_y() == 461);
+            for (int a = 0; a < (int)tabs; a++) {
+                const NavRect &tab = wp[0].cells[10 + a];
+                CHECK(tab.centre_x() == act_tab(a, sh).centre_x() && tab.centre_y() == 15 + sh.left_y);
+                // Right: the next act's tab. From the last one, the nearest
+                // cell further right: the close button (it is right of tabs
+                // I to IV), round to I from tab V; down: a row.
+                MenuNav nav;
+                MenuNav::Step d = flick_at(nav, wp, tab.centre_x(), tab.centre_y(), NavDirection::kRight);
+                if (a + 1 < acts)
+                    CHECK(d.moved && d.x == act_tab(a + 1, sh).centre_x() && d.y == tab.centre_y());
+                else if (acts < 5)
+                    CHECK(d.moved && d.x == 288 + sh.left_x && d.y == 401 + sh.left_y);
+                else
+                    CHECK(d.moved && d.x == act_tab(0, sh).centre_x() && d.y == tab.centre_y());
+                MenuNav down;
+                d = flick_at(down, wp, tab.centre_x(), tab.centre_y(), NavDirection::kDown);
+                CHECK(d.moved && d.y == 77 + sh.left_y);
+            }
+            // Down from the last row: the close button.
+            MenuNav last;
+            MenuNav::Step d = flick_at(last, wp, 158 + sh.left_x, 77 + 36 * 8 + sh.left_y, NavDirection::kDown);
+            CHECK(d.moved && d.x == 288 + sh.left_x && d.y == 401 + sh.left_y);
+        }
     {
         // Down from the last waypoint: its close button; down again: round to the first.
         MenuNav wp;
