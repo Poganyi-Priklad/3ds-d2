@@ -40,6 +40,9 @@ void cpu_aot_set_code_span(Cpu &c, uint32_t lo, uint32_t hi);
 // After a trap that asked for no yield: whether the running thread's slice is
 // over (its share of trap calls made). True once; cpu_aot_yield then.
 bool cpu_aot_slice_over(Cpu &c);
+// The most any live thread has used of its host stack, and a stack's size,
+// in bytes (INFO's line). It reads each stack's unused part: not every frame.
+void cpu_aot_stack(uint32_t *peak, uint32_t *size);
 // Each live thread's host stack and the most of it used ("cpu_aot: ..."),
 // for the lane's end; empty without CpuAot.
 std::vector<std::string> cpu_aot_lines();

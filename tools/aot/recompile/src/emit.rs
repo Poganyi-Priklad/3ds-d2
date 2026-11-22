@@ -1325,6 +1325,13 @@ ST32(esp - 4u, ecx); ST32(esp - eax, 0x{:08x}u); esp = esp - eax + 4u; eax = 0x{
             return refused(format!("intrinsic {}", name));
         }
         let Tgt::Direct(td) = t else {
+            // An import that doesn't return (ExitProcess in the C runtime's
+            // own exit, 681aa1): an exit to its shim, the thread's last. With
+            // Box86 the thread goes on there; without, the runtime runs the
+            // shim in place (aot_exit).
+            if f.noreturn.contains(&va) {
+                return Ok(format!("{{ uint32_t x = {}; {}{} }}", self.get(i, &i.ops[0], None)?, push, self.exit("x")));
+            }
             return refused(format!("an import or indirect call at {:08x}", va));
         };
         let nat = p.natives.get(&td);

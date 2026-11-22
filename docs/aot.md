@@ -624,6 +624,19 @@ The stubs in `.text`'s slack stay as they are: in a build without Box86 their by
 
 What this leaves of the plan above: the natives are still called through the Bridge's shim with the registers copied to the CPU and back (no `ENTRY` rows, no adapter the recompiler emits), so the call's cost is as it was; and the Box86 build hooks as before, with its 39 functions changed since compiled. Both are for a profile from the console to ask for.
 
+### The first console run of the app without Box86 (#138)
+
+The AOT CIA of `26ec4c8` stopped twice on a New 3DS XL (Sentry `3DS-D2-1G`, two events), each a function a build without Box86 has nothing to run:
+
+| What the player did | The stop | Why it wasn't compiled | The fix |
+|---|---|---|---|
+| Loaded a character from the menu | `00646be0`: no compiled code here | A callback seven sites push as an immediate. It follows a switch's table with no pad, and the rule for pushed and moved immediates took only a target after a pad or a `ret`. | The data pointers' third rule for those immediates too: on 16 bytes after anything, where it decodes as a function that returns. |
+| Chose Exit Diablo II | `00681aa1`: an exit in the compiled code | The C runtime's own exit: its last instruction calls `ExitProcess` through the import, and a call through a pointer that doesn't return was refused. | Such a call is an exit to the import's shim. With Box86 the thread goes on there; `CpuAot` runs the shim in place (`aot_exit`), and its `request_stop`, empty until now, makes the thread yield at that trap for good. |
+
+The lane's save doesn't reach the first, and none of its scripts left through the menu: `tests/m4/scripts/menu-exit.txt` does now (`AOT_RUNS=menu-exit`, by name alone, since its end is an exit). 14,311 functions are compiled against 14,302, 196 refused against 201.
+
+Both stops froze the console, the HOME button dead: `abort()` logs, breaks and loops, in the x86 build as well. Not changed here.
+
 ### Threads that wait in place (#138, planned)
 
 The strict report's largest number is the waits: 435,032 in Act II, nearly all `Sleep`. Today a shim that must wait asks the Bridge to stop; compiled code unwinds (an exit to the return sites' trap), WinVita's `CooperativeScheduler` runs another thread's slice, and when the first runs again the trap re-enters each compiled function at its return site (`reent_<va>`). All of it exists because the guest threads share one host stack.

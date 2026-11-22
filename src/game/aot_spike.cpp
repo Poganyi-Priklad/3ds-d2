@@ -1820,6 +1820,11 @@ void aot_guest_call(uint32_t va, AotRegs *r)
 // native's hook at an entry, its shim. Anything else stops the run.
 static std::map<uint32_t, uint32_t> g_aot_esp_off;        // callouts that came back with another esp, by callee
 
+static game::AotStatus g_aot_status;
+extern "C++" {
+game::AotStatus game::aot_status() { return g_aot_status; }
+}
+
 static void cpuaot_bind(d2rt::Cpu &c)
 {
     game::g_cpu = &c;
@@ -1872,6 +1877,7 @@ static bool cpuaot_dispatch(d2rt::Cpu &c, uint32_t eip, uint32_t until)
             // the natives' installs (one check after them) and then a native
             // turned on or off, nothing else.
             static uint32_t checks = 0;
+            g_aot_status = {(uint32_t)g_all_at.size(), changed, (uint32_t)rt::entry_natives().size()};
             rt::logf("aot: the compiled functions' bytes checked against the image (check %u): %u differ%s%s; %u natives bound "
                      "to their functions' addresses",
                      (unsigned)++checks, (unsigned)changed, changed ? ": " : "", names.substr(0, 400).c_str(),
@@ -2016,6 +2022,17 @@ void aot_exit(uint32_t target, uint32_t eax, uint32_t ecx, uint32_t edx, uint32_
               uint32_t esi, uint32_t edi)
 {
     target = game::aot_site_target(target);
+    if (g_cpu_aot && d2rt::cpu_aot_is_trap(*game::g_cpu, target)) {
+        // A shim that doesn't return (ExitProcess, ExitThread: the only exits
+        // the recompiler writes to an import): run here, the thread's last.
+        // It yields in the dispatcher and the scheduler doesn't run it again.
+        d2rt::Cpu &c = *game::g_cpu;
+        const uint32_t r[8] = {eax, ecx, edx, ebx, esp, ebp, esi, edi};
+        for (int k = 0; k < 8; k++)
+            c.set_reg(k, r[k]);
+        cpuaot_dispatch(c, target, 0);
+        d2rt::cpu_aot_stop("a shim that doesn't return came back:", target);
+    }
     if (g_cpu_aot) {
         rt::logf("cpu_aot: an exit in the compiled code to %08x, its return address %08x", target,
                  aot_ld32(aot_mem, esp));

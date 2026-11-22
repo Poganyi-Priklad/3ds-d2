@@ -249,7 +249,7 @@ test)
         runs=("town-walk 70000" "fight 120000")
         [ -n "${3:-}" ] && runs+=("act2-east 150000")
         if [ -n "${AOT_RUNS:-}" ]; then
-            all=("${runs[@]}"); runs=()
+            all=("${runs[@]}" "menu-exit 45000"); runs=()   # menu-exit: by name alone (its end is an exit)
             for r in "${all[@]}"; do [[ " $AOT_RUNS " == *" ${r% *} "* ]] && runs+=("$r"); done
         fi
         # AOT_OUT=<dir under build/>: this run's folders and logs there (build/m4-aot); AOT_BIN=<dir>: the

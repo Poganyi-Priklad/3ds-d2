@@ -45,6 +45,7 @@
 #include "game/sprite_trace.h"
 #include "game/storm_reads.h"
 #include "runtime/ds_emul.h"
+#include "runtime/rt_cpu_aot.h"
 #include "runtime/rt_host.h"
 
 #include <3ds.h>
@@ -415,12 +416,28 @@ void show_stats(float fps, float draw_ms, float worst_ms)
     const game::SpriteCacheStats sc = g_guest_cpu ? game::sprite_cache_stats(*g_guest_cpu) : game::SpriteCacheStats{};
     std::snprintf(line[7], 48, "sprites %5u/%5u in %4u out %4u", sc.used >> 10, sc.limit >> 10,
                   g_sprite_window.inserted, g_sprite_window.evicted);
+#ifdef D2RT_CPU_AOT
+    // No JIT in this build: the compiled functions and the start's check of
+    // them (differ: 0 unless the image isn't the one compiled), the natives
+    // bound, and the most a guest thread has used of its host stack, read at
+    // the heartbeat's pace (it scans the stacks).
+    const bool jit_full = false;
+    {
+        static uint32_t peak = 0, size = 0, asked = 0;
+        if (asked++ % 10 == 0)
+            d2rt::cpu_aot_stack(&peak, &size);
+        const game::AotStatus a = game::aot_status();
+        std::snprintf(line[8], 48, "aot %5u diff %u nat %u stk %u/%uK", a.functions, a.differ, a.natives, peak >> 10,
+                      size >> 10);
+    }
+#else
     const bool jit_full = dyn86_jit_allocfail != 0;   // translated code no longer fits: the game will stall
     if (jit_full)
         std::snprintf(line[8], 48, "JIT MEMORY FULL code %u jmptbl %u", m.jit_code_kb, m.jmptbl_kb);
     else
         std::snprintf(line[8], 48, "jit %5u/%5u meta %5u jmptbl %5u", m.jit_used_kb, m.jit_code_kb, m.jit_meta_kb,
                       m.jmptbl_kb);   // jit: held by blocks / chunks opened (issue #23)
+#endif
     // The hitch counters (issue #19), the last heartbeat's 10 s.
     const HitchWindow &hw = g_hitch_last;
     std::snprintf(line[9], 48, "files %3u read %4u MiB skip %3u fam %3u", st.files_opened,

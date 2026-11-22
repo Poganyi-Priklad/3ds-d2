@@ -77,6 +77,12 @@ bool aot_resumable(uint32_t va);
 // D2_AOT included before the natives are in): a native that only speeds up
 // Box86 there can leave it be (issue #138: _ftol2's).
 bool aot_compiled(uint32_t va);
+// A build without Box86, at its last code check: the compiled functions, how
+// many of them had other bytes in the image, the natives bound by address.
+struct AotStatus {
+    uint32_t functions = 0, differ = 0, natives = 0;
+};
+AotStatus aot_status();
 
 // A native that does what the game's function at va does, its registers
 // included (the check lane with it: 0 differ): compiled code calls the

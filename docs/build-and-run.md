@@ -135,6 +135,7 @@ Under gdb the frames are slower, so scripted clicks at fixed times miss. Use the
 ## Reading console reports in Sentry
 
 Reports from consoles (crashes, player reports and profiler runs, each with its `game.log`, traces and screenshots attached) go to the Sentry organisation `exsilium`, project `3ds-d2`.
+- **The build's CPU backend is the event's OS:** `aot` or `x86` (`os.name:aot` in a search), the name alone; the firmware and the kernel are the `firmware` and `kernel` tags. Events from before this have no OS.
 - **Read them there, not from old logs:** `dist/` logs from earlier builds have older formats.
 - **The tool:** with access to the project, use the `sentry` CLI (getsentry/cli 0.47 or later, not the older `sentry-cli`), logged in with `sentry auth login`.
 

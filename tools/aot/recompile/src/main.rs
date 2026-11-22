@@ -230,8 +230,18 @@ fn main() {
                             // byte: the C runtime's functions have no pads
                             // (688c2b, its TlsAlloc wrapper, stored by 688fbb).
                             let ret = pad == 0xc3 || img.mem[(t - 3 - img.base) as usize] == 0xc2;
+                            // ... or, moved or pushed, on 16 bytes after
+                            // anything (a switch's table before it: 646be0,
+                            // the callback 644a6e and six more push), where
+                            // it decodes as a function that returns.
+                            let stored = matches!(i.mnemonic.as_str(), "mov" | "push");
+                            let decodes = || {
+                                let g = prog.func(t);
+                                g.refused.is_none() && !g.rets.is_empty()
+                            };
                             if (t % 16 == 0 && (pad == 0xcc || pad == 0x90))
-                                || (ret && matches!(i.mnemonic.as_str(), "mov" | "push"))
+                                || (ret && stored)
+                                || (t % 16 == 0 && stored && decodes())
                             {
                                 found.insert(t);
                             }
@@ -319,8 +329,18 @@ fn main() {
                             if t >= img.text_lo && t < img.text_hi && !have.contains(&t) {
                                 let pad = img.mem[(t - 1 - img.base) as usize];
                                 let ret = pad == 0xc3 || img.mem[(t - 3 - img.base) as usize] == 0xc2;
+                                // ... or, moved or pushed, on 16 bytes after
+                                // anything (a switch's table before it: 646be0,
+                                // the callback 644a6e and six more push), where
+                                // it decodes as a function that returns.
+                                let stored = matches!(i.mnemonic.as_str(), "mov" | "push");
+                                let decodes = || {
+                                    let g = prog.func(t);
+                                    g.refused.is_none() && !g.rets.is_empty()
+                                };
                                 if (t % 16 == 0 && (pad == 0xcc || pad == 0x90))
-                                    || (ret && matches!(i.mnemonic.as_str(), "mov" | "push"))
+                                    || (ret && stored)
+                                    || (t % 16 == 0 && stored && decodes())
                                 {
                                     found.insert(t);
                                 }
