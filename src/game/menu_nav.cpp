@@ -100,12 +100,18 @@ int entry_cell(const std::vector<NavRect> &cells, int across, NavDirection dir)
     int nearest = INT_MAX;
     for (const NavRect &c : cells)
         nearest = edge(c, dir) < nearest ? edge(c, dir) : nearest;
-    // Near that side and near the row (or column): a cell beside the line
+    // A cell on the row (or column) first, the one nearest that side; with
+    // none on it, near that side and near the row: a cell beside the line
     // counts twice its distance, one further in once.
+    bool on_line = false;
+    for (const NavRect &c : cells)
+        on_line |= (vertical(dir) ? beside(c, across, 0, dir) : beside(c, 0, across, dir)) == 0;
     int best = -1, best_score = INT_MAX;
     for (size_t i = 0; i < cells.size(); i++) {
         const NavRect &c = cells[i];
         const int gap = vertical(dir) ? beside(c, across, 0, dir) : beside(c, 0, across, dir);
+        if (on_line && gap)
+            continue;
         const int score = 2 * gap + edge(c, dir) - nearest;
         if (score < best_score) {
             best = (int)i;
@@ -378,8 +384,26 @@ NavRect stash_close_button(const PanelShift &shift)
     return NavRect{273 + shift.left_x, 387 + shift.left_y, 301 + shift.left_x, 415 + shift.left_y};
 }
 
-void fixed_windows(uint64_t ui, const PanelShift &shift, bool stat_points, std::vector<NavWindow> &out)
+NavRect cube_close_button(const PanelShift &shift)
 {
+    return NavRect{277 + shift.left_x, 385 + shift.left_y, 305 + shift.left_x, 413 + shift.left_y};
+}
+
+NavRect mercenary_close_button(const PanelShift &shift)
+{
+    return NavRect{274 + shift.left_x, 387 + shift.left_y, 302 + shift.left_x, 415 + shift.left_y};
+}
+
+NavRect act_tab(int act, const PanelShift &shift)
+{
+    static const int kLeft[5] = {3, 67, 129, 191, 253};
+    const int a = act < 0 ? 0 : act > 4 ? 4 : act;
+    return NavRect{kLeft[a] + 2 + shift.left_x, 3 + shift.left_y, kLeft[a] + 60 + shift.left_x, 28 + shift.left_y};
+}
+
+void fixed_windows(uint64_t ui, const PanelShift &shift, bool stat_points, std::vector<NavWindow> &out, int acts)
+{
+    acts = acts < 1 ? 1 : acts > 5 ? 5 : acts;
     // A 640x480 rectangle or spot moved with the left half, the right half
     // or the centre.
     auto left = [&](NavRect r) {
@@ -441,6 +465,9 @@ void fixed_windows(uint64_t ui, const PanelShift &shift, bool stat_points, std::
             for (int x : {62, 158, 255})
                 w.cells.push_back(left(spot(x, y, 20)));
         w.cells.push_back(left(spot(291, 404, 14)));
+        if (acts > 1)   // one tab alone is the page shown: nothing to switch to
+            for (int a = 0; a < acts; a++)
+                w.cells.push_back(act_tab(a, shift));
         out.push_back(w);
     }
     if (ui & ui_bit(0x14)) {
@@ -452,6 +479,9 @@ void fixed_windows(uint64_t ui, const PanelShift &shift, bool stat_points, std::
         for (int i = 0; i < 9; i++)
             w.cells.push_back(left(NavRect{17, 63 + 36 * i, 300, 91 + 36 * i}));
         w.cells.push_back(left(spot(288, 401, 14)));
+        if (acts > 1)
+            for (int a = 0; a < acts; a++)
+                w.cells.push_back(act_tab(a, shift));
         out.push_back(w);
     }
 }

@@ -47,6 +47,9 @@
 //                +0x20 x, +0x24 the bottom edge, +0x30 width, +0x34
 //                height). All read on the Linux lane in the drop, deposit
 //                and withdraw forms.
+//   0x007C0D43   the client's quest record: [+0] its flags, 16 a quest;
+//                flag 0 of quests 7, 15, 23, 26: acts II to V reached (the
+//                waypoints' and the quest log's tabs, Game.exe 0x49cbaa).
 //   0x007D55BC   out of the game, D2Win's current screen: its first
 //                control, +0x3C the next (menu_nav.h's D2WinControl; read
 //                only out of the game: it is stale in it).

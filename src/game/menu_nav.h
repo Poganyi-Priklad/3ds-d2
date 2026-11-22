@@ -205,6 +205,12 @@ NavRect inventory_gold_button(const PanelShift &shift);
 // are in fixed_windows.
 NavRect inventory_close_button(const PanelShift &shift);
 NavRect stash_close_button(const PanelShift &shift);
+// The Horadric Cube's and the mercenary's close buttons (the left half), where
+// Game.exe draws them (the cube's at 275, the mercenary's at 272 from the
+// panel's left, 65 and 63 above its bottom; a button 32 by 32): not
+// measured on the lane (the test hero has neither).
+NavRect cube_close_button(const PanelShift &shift);
+NavRect mercenary_close_button(const PanelShift &shift);
 
 // Where the open windows are: the game's side (d2_menus.h's
 // game_menu_world), or made-up ones in the tests. ui: GameState::ui.
@@ -269,7 +275,17 @@ PanelShift panel_shift(int width, int height);
 // (d2_state.h): the game menu (0x09), the character screen (0x02: its four
 // "+" buttons while stat_points, and its close button), the skill tree
 // (0x04), the quest log (0x0F), the waypoints (0x14).
-void fixed_windows(uint64_t ui, const PanelShift &shift, bool stat_points, std::vector<NavWindow> &out);
+// The quest log and the waypoints also get their act tabs ("I" to "V" along
+// the top) for the acts reached, `acts` of them (1 to 5): the game draws a
+// tab only for an act the hero has reached.
+void fixed_windows(uint64_t ui, const PanelShift &shift, bool stat_points, std::vector<NavWindow> &out,
+                   int acts = 1);
+
+// The act tabs along the top of the quest log and the waypoints (the left
+// half, 640x480): Game.exe draws them at x 0 (the waypoints' first at 5),
+// 67, 129, 191 and 253 from the panel's left, 62 wide; the first measured
+// at 3..65 by 3..28 on the lane.
+NavRect act_tab(int act, const PanelShift &shift);
 
 // A grid of columns x rows boxes filling `grid` (inventory.txt's grid).
 void add_grid(NavWindow &window, const NavRect &grid, int columns, int rows);

@@ -308,13 +308,40 @@ static void test_fixed_windows()
     out.clear();
     fixed_windows(1ull << 0x04 | 1ull << 0x0F, small, false, out);
     CHECK(out.size() == 2 && out[0].cells.size() == 22 && out[1].cells.size() == 7);
-    // Their close buttons, last.
+    // Their close buttons.
     CHECK(out[0].cells[21].centre_x() == 507 && out[0].cells[21].centre_y() == 401);
     CHECK(out[1].cells[6].centre_x() == 291 && out[1].cells[6].centre_y() == 404);
     out.clear();
     fixed_windows(1ull << 0x14, small, false, out);
     CHECK(out.size() == 1 && out[0].cells.size() == 10 && out[0].cells[0].centre_y() == 77 &&
           out[0].cells[8].centre_y() == 77 + 36 * 8 && !out[0].up_down_only);
+    {
+        // With three acts reached: the tabs I to III along the top; right
+        // from I goes to II, left from I round to III.
+        std::vector<NavWindow> wp;
+        fixed_windows(1ull << 0x14, small, false, wp, 3);
+        CHECK(wp.size() == 1 && wp[0].cells.size() == 13);
+        CHECK(act_tab(0, small).centre_x() == 34 && act_tab(0, small).centre_y() == 15);
+        CHECK(act_tab(1, small).centre_x() == 98 && act_tab(4, small).centre_x() == 284);
+        CHECK(act_tab(1, panel_shift(800, 600)).centre_x() == 178 && act_tab(1, panel_shift(800, 600)).centre_y() == 75);
+        MenuNav tabs;
+        MenuNav::Step d = flick_at(tabs, wp, 34, 15, NavDirection::kRight);
+        CHECK(d.moved && d.x == 98 && d.y == 15);
+        d = flick_at(tabs, wp, 34, 15, NavDirection::kLeft);
+        CHECK(d.moved && d.x == act_tab(2, small).centre_x() && d.y == 15);
+        // Down from a tab: the first place; up from the first place: a tab.
+        d = flick_at(tabs, wp, 34, 15, NavDirection::kDown);
+        CHECK(d.moved && d.y == 77);
+        d = flick_at(tabs, wp, 158, 77, NavDirection::kUp);
+        CHECK(d.moved && d.y == 15);
+        // The quest log too; one act: no tabs.
+        wp.clear();
+        fixed_windows(1ull << 0x0F, small, false, wp, 5);
+        CHECK(wp[0].cells.size() == 12);
+        wp.clear();
+        fixed_windows(1ull << 0x0F, small, false, wp, 1);
+        CHECK(wp[0].cells.size() == 7);
+    }
     {
         // Down from the last waypoint: its close button; down again: round to the first.
         MenuNav wp;
@@ -1394,6 +1421,9 @@ static void test_gold_buttons()
     CHECK(inventory_close_button(none).centre_x() == 354 && inventory_close_button(none).centre_y() == 402);
     CHECK(stash_close_button(none).centre_x() == 287 && stash_close_button(none).centre_y() == 401);
     CHECK(inventory_close_button(big).contains(434, 462) && stash_close_button(big).contains(367, 461));
+    CHECK(cube_close_button(none).centre_x() == 291 && cube_close_button(none).centre_y() == 399);
+    CHECK(mercenary_close_button(none).centre_x() == 288 && mercenary_close_button(none).centre_y() == 401);
+    CHECK(cube_close_button(big).centre_x() == 371 && mercenary_close_button(big).centre_y() == 461);
 }
 
 static void test_controls_gold_dialog()

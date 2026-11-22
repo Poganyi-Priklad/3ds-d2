@@ -365,6 +365,29 @@ bool read_game_menu(int width, int height, GameMenu &out)
     return true;
 }
 
+// ---- the acts reached (the quest log's and the waypoints' tabs) ----
+
+// How many acts the hero has reached (1 to 5), as the waypoints panel asks
+// before it draws a tab (Game.exe 0x49cbaa): the client's quest record
+// ([0x7C0D43], its flags at [+0]) has flag 0 of quest 7, 15, 23 and 26 set
+// once acts II, III, IV and V are reached (a bit a flag, 16 a quest).
+constexpr uint32_t kQuestRecordVa = 0x007C0D43;
+int acts_reached()
+{
+    const uint32_t record = rd32(kQuestRecordVa);
+    const uint32_t flags = record ? rd32(record) : 0;
+    if (!flags)
+        return 1;
+    int acts = 1;
+    for (int quest : {7, 15, 23, 26}) {
+        uint8_t b = 0;
+        if (!rt::guest_read(flags + (uint32_t)(quest * 16 / 8), &b, 1) || !(b & 1))
+            break;
+        acts++;
+    }
+    return acts;
+}
+
 // ---- the gold dialog ----
 
 // One of the gold dialog's buttons (OK, Cancel): its box, y its bottom edge.
@@ -480,17 +503,19 @@ public:
             out.back().cells.push_back(stash_gold_button(shift));
             out.back().cells.push_back(stash_close_button(shift));
         }
-        if (ui & ui_bit(0x1A))
-            add_window("cube", kCubeRow, width, true, false, out);
+        if ((ui & ui_bit(0x1A)) && add_window("cube", kCubeRow, width, true, false, out))
+            out.back().cells.push_back(cube_close_button(shift));
         if (ui & ui_bit(0x17)) {
             add_window("their trade", kTheirTradeRow, width, true, false, out);
             add_window("my trade", kMyTradeRow, width, true, false, out);
         }
         if (ui & ui_bit(0x24))
-            add_window("mercenary", kMercenaryRow, width, false, true, out);
+            if (add_window("mercenary", kMercenaryRow, width, false, true, out))
+                out.back().cells.push_back(mercenary_close_button(shift));
         if (inventory)   // the belt under it, to move potions
             add_belt(width, out);
-        fixed_windows(ui, shift, ui & ui_bit(0x02) ? player_stat(kStatPoints) > 0 : false, out);
+        fixed_windows(ui, shift, ui & ui_bit(0x02) ? player_stat(kStatPoints) > 0 : false, out,
+                      ui & (ui_bit(0x0F) | ui_bit(0x14)) ? acts_reached() : 1);
         NavWindow menu;
         NavRect box;
         int options = 0;
