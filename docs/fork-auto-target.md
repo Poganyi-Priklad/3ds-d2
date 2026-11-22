@@ -34,14 +34,17 @@ this page is the short version and a map of the code.
    waypoints and portals, doors, levers and level warps such as cave
    entrances, stairs and passages to the next area, barrels), then NPCs, then
    the nearest item on the ground. In town, A and B go to the NPCs first.
-6. Hold **ZR + D-pad** to pick up the items around you one after another:
+6. With the items shown (Alt: Y held, or Items latched on KEYS), A on an
+   item clicks its name, and the cursor keeps off the other names, so enemies
+   and chests are hit as without Alt.
+7. Hold **ZR + D-pad** to pick up the items around you one after another:
    **up** unique, set items and runes; **right** gold; **down** everything.
-7. When the right-hand skill works on corpses (Raise Skeleton, Corpse
+8. When the right-hand skill works on corpses (Raise Skeleton, Corpse
    Explosion, Revive, Find Item...), B aims at corpses by itself. The
    cursor goes just below the corpse's feet, where the game shows a corpse
    under the cursor; once the skill has been cast on it, that corpse is
    skipped for 10 minutes and B goes on to the next one.
-8. Tilt the circle pad with no panel open to walk. The cursor orbits the
+9. Tilt the circle pad with no panel open to walk. The cursor orbits the
    hero in the stick's direction and the left button is held; the point
    keeps off NPCs, monsters, objects, items and level warps (cave
    entrances, stairs, passages: the walk never takes the hero to another
