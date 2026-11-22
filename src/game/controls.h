@@ -249,6 +249,14 @@ private:
     bool menu_was_open_ = false;
     bool flick_held_ = false;     // a flick moved the cursor a cell; the stick isn't back in the centre yet
     uint64_t menu_now_ms_ = 0;
+    // The gold dialog (menu_nav.h's GoldDialog): the D-pad types its amount.
+    void gold_step(uint32_t held, bool layer, uint64_t now_ms);
+    void gold_type(int amount);
+    GoldDialog gold_;
+    bool gold_on_ = false;        // open, read this poll
+    GoldRepeat gold_repeat_;
+    int gold_typed_ = -1;         // the amount last typed in this dialog (-1: none yet)
+    int gold_typed_over_ = -1;    // what the field showed when it was typed
     uint8_t keys_[256] = {};      // which virtual keys this layer holds down
     uint8_t pad_keys_[4] = {};    // Pad::keys at the previous poll
 };

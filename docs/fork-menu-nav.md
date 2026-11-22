@@ -26,6 +26,15 @@ down, left or right:
   In the inventory, the weapon swap tabs drawn as "I" and "II" over each
   weapon are one button per weapon (either swaps the weapons, as W does): a
   flick up from a weapon reaches the tab over it.
+  The gold coins are cells too: the stash's (withdraw) over its grid, the
+  inventory's (drop, or deposit with the stash open) under it. A on a coin
+  opens the game's gold dialog.
+- **In the gold dialog** (drop, deposit, withdraw, trade): a flick goes
+  between OK and Cancel. The D-pad sets the amount instead of using the
+  belt: up and down +1 and -1, right and left +100 and -100. Held, it
+  repeats faster and faster, and the step grows tenfold every 2 s (up to
+  ×1000). The amount stays between 0 and the most the game allows. A on OK
+  or R + Start (Enter) moves the gold; B (Escape) closes the dialog.
 - **In an NPC's menu**: up and down move between its options.
 - **In the game menu** (Start) and its submenus: a push of the circle pad up
   or down (half way out, back to the centre between two) is the game's own
@@ -53,6 +62,7 @@ down, left or right:
 | B, panel or NPC menu open | Right mouse button | **Escape**: closes the panel or the NPC menu, goes one menu back |
 | B, game submenu | Right mouse button | **Previous** (one menu back); in the top menu, Escape |
 | B, before the game (character select, class screen, difficulty, multiplayer screens) | Right mouse button | **Escape**: back to the screen before; on the main menu B does nothing |
+| D-pad, gold dialog open | Belt potions 1–4 | The amount: up/down +1/-1, right/left +100/-100, faster while held |
 | A, the game's interface (bottom bar, globes, mini-panel) | Left button, possibly aimed | A plain click where the cursor is |
 | R + B, ZR + B | As before | As before |
 
@@ -73,7 +83,7 @@ It reads the game's memory to know where things are and never writes it.
 | --- | --- |
 | `src/game/menu_nav.h`, `.cpp` | The rules, as pure geometry: which cell a flick goes to, between windows, round the edges, the scroll column; tested with made-up windows |
 | `src/game/d2_menus.h`, `.cpp` | Reads where the open windows and their cells are: `inventory.txt` and `belts.txt` rows, the NPC menu, the game menu's rows and lit row, D2Win's control list before the game (with the frame's pixels as a fallback for the NPC menu box) |
-| `src/game/controls.cpp` | Runs it: flicks to cells, B as Escape or Previous, the arrow keys in the game menu, one-panel walk dispatch (hold delay and free-half clip, then the auto-target's walk), plain clicks on the interface |
+| `src/game/controls.cpp` | Runs it: flicks to cells, B as Escape or Previous, the arrow keys in the game menu, the gold dialog's D-pad (it types the amount over the field: Backspaces, then the digits, as the on-screen keyboard does), one-panel walk dispatch (hold delay and free-half clip, then the auto-target's walk), plain clicks on the interface |
 
 `game.log` gets `menu:` lines saying where each flick went.
 

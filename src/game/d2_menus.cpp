@@ -32,6 +32,10 @@ constexpr uint32_t kNpcMenuVa = 0x007C0E54;
 constexpr uint32_t kUiTableVa = 0x007A27C0;
 constexpr int kUiNpcMenu = 0x08;
 constexpr int kStatPoints = 4;          // itemstatcost.txt: the stat points left
+constexpr uint32_t kGoldModeVa = 0x007A279C;
+constexpr uint32_t kGoldPartsVa = 0x007A27A0;   // five pointers
+constexpr uint32_t kGoldOpenVa = 0x007A27B4;
+constexpr uint32_t kGoldFieldVtable = 0x006DA7CC, kGoldButtonVtable = 0x006DA72C;
 
 // One 32-bit word of guest memory (0 when it can't be read).
 uint32_t rd32(uint32_t va)
@@ -189,13 +193,13 @@ constexpr int kRightArmSlot = 0, kLeftArmSlot = 2;
 // One open panel as a NavWindow, from its inventory.txt row: its grid's
 // cells (grid), its equipment slots in use (slots), or both; the hero's
 // own inventory also its two weapon swap tabs (tabs). A panel with no
-// cells is left out.
-void add_window(const char *name, int row, int width, bool grid, bool slots, std::vector<NavWindow> &out,
+// cells is left out (false; true: it is out.back()).
+bool add_window(const char *name, int row, int width, bool grid, bool slots, std::vector<NavWindow> &out,
                 bool tabs = false)
 {
     InventoryRow r;
     if (!read_row(row, width, r))
-        return;
+        return false;
     NavWindow w;
     w.name = name;
     w.area = r.panel;
@@ -209,8 +213,10 @@ void add_window(const char *name, int row, int width, bool grid, bool slots, std
         for (int i : {kRightArmSlot, kLeftArmSlot})
             if (r.slot_used[i])
                 w.cells.push_back(weapon_tab(r.slots[i]));
-    if (!w.cells.empty())
-        out.push_back(w);
+    if (w.cells.empty())
+        return false;
+    out.push_back(w);
+    return true;
 }
 
 // ---- the NPC menu's box in the frame ----
@@ -359,6 +365,49 @@ bool read_game_menu(int width, int height, GameMenu &out)
     return true;
 }
 
+// ---- the gold dialog ----
+
+// One of the gold dialog's buttons (OK, Cancel): its box, y its bottom edge.
+bool read_gold_button(uint32_t part, NavRect &out)
+{
+    int32_t f[14] = {};
+    if (!part || !rt::guest_read(part, f, sizeof f) || (uint32_t)f[0] != kGoldButtonVtable)
+        return false;
+    const int x = f[0x20 / 4], bottom = f[0x24 / 4], w = f[0x30 / 4], h = f[0x34 / 4];
+    if (x < 0 || bottom <= 0 || w <= 0 || w > 64 || h <= 0 || h > 64 || x + w > 2048 || bottom > 2048)
+        return false;
+    out = NavRect{x, bottom - h, x + w, bottom};
+    return true;
+}
+
+// The open gold dialog: its form, amount and buttons (d2_menus.h); false
+// when none is open or its parts don't look right.
+bool read_gold_dialog(GoldDialog &out)
+{
+    out = GoldDialog();
+    if (rd32(kGoldOpenVa) != 1)
+        return false;
+    uint32_t parts[5] = {};
+    if (!rt::guest_read(kGoldPartsVa, parts, sizeof parts) || rd32(parts[2]) != kGoldFieldVtable)
+        return false;
+    out.mode = (int)rd32(kGoldModeVa);
+    if (out.mode < GoldDialog::kDrop || out.mode > GoldDialog::kWithdraw)
+        return false;
+    // The field: +0x40 its characters, +0x48 the most the game lets it
+    // hold, +0x50 its length (high half) and its longest (low half).
+    const uint32_t text = rd32(parts[2] + 0x40), length = rd32(parts[2] + 0x50) >> 16;
+    uint16_t chars[16] = {};
+    if (length > 16 || (length && !rt::guest_read(text, chars, length * 2)))
+        return false;
+    out.amount = gold_field_amount(chars, (int)length);
+    out.max = (int)rd32(parts[2] + 0x48);
+    if (out.max < 0)
+        return false;
+    if (!read_gold_button(parts[3], out.ok) || !read_gold_button(parts[4], out.cancel))
+        return false;
+    return true;
+}
+
 // The MenuWorld the console and the Linux lane use (tests/menu has its own).
 class GameMenuWorld : public MenuWorld {
 public:
@@ -387,6 +436,12 @@ public:
         return d2win_main_menu(controls);
     }
 
+    bool gold_dialog(uint64_t ui, int width, int height, GoldDialog &out) override
+    {
+        (void)ui, (void)width, (void)height;
+        return player_class() >= 0 && read_gold_dialog(out);
+    }
+
     bool game_menu(uint64_t ui, int width, int height, GameMenu &out) override
     {
         if (!(ui & ui_bit(0x09)) || player_class() < 0)
@@ -407,15 +462,20 @@ public:
             fixed_windows(ui, shift, false, out);
             return;
         }
+        GoldDialog gold;
+        if (read_gold_dialog(gold)) {   // over the panels, and the only thing to click
+            out.push_back(gold_dialog_window(gold));
+            return;
+        }
         // The right half: the inventory, also beside a shop, the stash, the
         // cube and a trade.
         const bool inventory = ui & (ui_bit(0x01) | ui_bit(0x0C) | ui_bit(0x17) | ui_bit(0x19) | ui_bit(0x1A));
-        if (inventory)
-            add_window("inventory", inventory_row(cls), width, true, true, out, true);
+        if (inventory && add_window("inventory", inventory_row(cls), width, true, true, out, true))
+            out.back().cells.push_back(inventory_gold_button(shift));
         if (ui & ui_bit(0x0C))
             add_window("shop", kShopRow, width, true, false, out);
-        if (ui & ui_bit(0x19))
-            add_window("stash", kStashRow, width, true, false, out);
+        if ((ui & ui_bit(0x19)) && add_window("stash", kStashRow, width, true, false, out))
+            out.back().cells.push_back(stash_gold_button(shift));
         if (ui & ui_bit(0x1A))
             add_window("cube", kCubeRow, width, true, false, out);
         if (ui & ui_bit(0x17)) {

@@ -4,6 +4,7 @@
 #include "runtime/rt_host.h"
 
 #include <cmath>
+#include <cstdio>
 
 namespace game {
 namespace {
@@ -656,6 +657,15 @@ void Controls::update(const Pad &pad, uint64_t now_ms)
     if (!game_menu_on_)
         menu_snap_ = false;
 
+    // ---- the gold dialog, while it is open (menu_nav.h) ----
+    const bool gold_was = gold_on_;
+    gold_on_ = menu_world_ && in_game_ && menu_world_->gold_dialog(ui_, w_, h_, gold_);
+    if (gold_on_ && !gold_was) {
+        gold_typed_ = -1;
+        gold_repeat_ = GoldRepeat();
+        rt::logf("menu: gold dialog (form %d): %d of at most %d", gold_.mode, gold_.amount, gold_.max);
+    }
+
     // ---- Select / Start: zoom, keyboard, Escape, Enter ----
     if (pressed & kSelect) {
         select_used_ = r_layer;
@@ -693,6 +703,9 @@ void Controls::update(const Pad &pad, uint64_t now_ms)
         const Binding &b = kBindings[i];
         if ((pressed & b.button) && select_layer && (b.button & (kUp | kDown | kLeft | kRight))) {
             bound_[i] = 0;   // taken by the Select layer above
+        } else if ((pressed & b.button) && gold_on_ && !r_layer && !zr_layer &&
+                   (b.button & (kUp | kDown | kLeft | kRight))) {
+            bound_[i] = 0;   // the gold dialog: the D-pad types its amount (gold_step), no belt key
         } else if ((pressed & b.button) && b.button == kY && !r_layer && !zr_layer && in_game_ && !item_step_ &&
                    ((ui_ & kUiShop) || ((ui_ & kUiInventory) && !(ui_ & kUiLeftPanels)))) {
             bound_[i] = 0;   // Y with the inventory open: sell or drop, not Alt (issue #99)
@@ -731,6 +744,9 @@ void Controls::update(const Pad &pad, uint64_t now_ms)
             bound_[i] = 0;
         }
     }
+
+    if (gold_on_)
+        gold_step(held, r_layer || zr_layer || select_layer, now_ms);
 
     // ---- keys held by the bottom screen's buttons ----
     for (uint8_t old : pad_keys_) {
@@ -947,6 +963,49 @@ void Controls::update(const Pad &pad, uint64_t now_ms)
     button(false, a_left || walk_left_ || tap_left || pad.point_left || item_left || menu_left);
     button(true, b_right || pad.point_right);
     prev_ = held;
+}
+
+// ---- the gold dialog: the D-pad types the amount ----
+//
+// Up and Down are +1 and -1, Right and Left +100 and -100, repeating faster
+// while held (GoldRepeat), from the amount the field shows (or the one last
+// typed, while the field still shows what it did before), clamped to 0 and
+// the dialog's most. The game's own up and down arrows don't step the amount by one, so
+// the field is typed over instead: Backspace to empty it, then the digits
+// (as the on-screen keyboard types), which the game takes as it takes typing.
+constexpr int kGoldFieldLength = 10;   // the field's most characters
+
+void Controls::gold_step(uint32_t held, bool layer, uint64_t now_ms)
+{
+    int step = 0;
+    if (!layer)
+        step = (held & kUp) ? 1 : (held & kDown) ? -1 : (held & kRight) ? 100 : (held & kLeft) ? -100 : 0;
+    const int change = gold_repeat_.update(step, now_ms);
+    if (!change)
+        return;
+    const int from = gold_typed_ >= 0 && gold_.amount == gold_typed_over_ ? gold_typed_ : gold_.amount;
+    long long to = (long long)from + change;
+    to = to < 0 ? 0 : to > gold_.max ? gold_.max : to;
+    if (to == from)
+        return;
+    gold_type((int)to);
+    gold_typed_ = (int)to;
+    gold_typed_over_ = gold_.amount;
+    rt::logf("menu: gold dialog (form %d): %d -> %lld of at most %d", gold_.mode, from, to, gold_.max);
+}
+
+void Controls::gold_type(int amount)
+{
+    for (int i = 0; i < kGoldFieldLength; i++) {
+        rt::input_key(0x08, true);   // VK_BACK (with its WM_CHAR)
+        rt::input_key(0x08, false);
+    }
+    if (amount <= 0)
+        return;   // empty: nothing to move
+    char digits[16];
+    const int n = std::snprintf(digits, sizeof digits, "%d", amount);
+    for (int i = 0; i < n; i++)
+        rt::input_char((uint32_t)digits[i]);
 }
 
 void Controls::button(bool right, bool want)

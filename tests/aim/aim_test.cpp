@@ -38,6 +38,7 @@ static bool g_left = false, g_right = false;
 namespace rt {
 void input_button(bool right, bool down) { (right ? g_right : g_left) = down; }
 void input_key(uint8_t, bool) {}
+void input_char(uint32_t) {}
 void input_mouse_move(int x, int y)
 {
     g_cursor_x = x;

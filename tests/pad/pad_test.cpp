@@ -180,6 +180,7 @@ void input_button(bool right, bool down)
     }
 }
 void input_key(uint8_t, bool) {}
+void input_char(uint32_t) {}
 void input_mouse_move(int, int) {}
 void logf(const char *, ...) {}
 }  // namespace rt

@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 #include <vector>
 
 using namespace game;
@@ -33,9 +34,19 @@ static int g_fail = 0;
 static int g_cursor_x = 0, g_cursor_y = 0;
 static bool g_left = false, g_right = false;
 static bool g_keys[256] = {};
+static std::string g_typed;          // the text typed: digits, and '<' for a Backspace
+static bool g_ever[256] = {};        // keys that went down since the last clear
 namespace rt {
 void input_button(bool right, bool down) { (right ? g_right : g_left) = down; }
-void input_key(uint8_t vk, bool down) { g_keys[vk] = down; }
+void input_key(uint8_t vk, bool down)
+{
+    g_keys[vk] = down;
+    if (down)
+        g_ever[vk] = true;
+    if (down && vk == 0x08)
+        g_typed += '<';
+}
+void input_char(uint32_t ch) { g_typed += (char)ch; }
 void input_mouse_move(int x, int y)
 {
     g_cursor_x = x;
@@ -302,6 +313,14 @@ struct FakeMenus : MenuWorld {
     GameMenu menu;
     bool on_main_menu = false;   // main_menu() says
     bool main_menu() override { return on_main_menu; }
+    bool gold_on = false;   // gold_dialog() reads
+    GoldDialog gold;
+    bool gold_dialog(uint64_t, int, int, GoldDialog &out) override
+    {
+        if (gold_on)
+            out = gold;
+        return gold_on;
+    }
     void windows(uint64_t, int, int, std::vector<NavWindow> &out) override
     {
         asked++;
@@ -1157,6 +1176,169 @@ static void test_weapon_tabs()
     CHECK(at(s, left_arm.centre_x(), left_arm.centre_y()));
 }
 
+// ---- the gold dialog: its most, its window, the D-pad typing its amount ----
+static void test_gold_field_amount()
+{
+    const uint16_t full[] = {'1', '0', '0', '0', '0'}, empty[] = {0}, odd[] = {'9', '7', 'x', '5'};
+    const uint16_t huge[] = {'9', '9', '9', '9', '9', '9', '9', '9', '9', '9'};
+    CHECK(gold_field_amount(full, 5) == 10000);
+    CHECK(gold_field_amount(full, 3) == 100);
+    CHECK(gold_field_amount(empty, 0) == 0);
+    CHECK(gold_field_amount(odd, 4) == 97);
+    CHECK(gold_field_amount(huge, 10) == 0x7FFFFFFF);
+}
+
+static void test_gold_repeat()
+{
+    GoldRepeat r;
+    uint64_t t = 1000;
+    CHECK(r.update(0, t) == 0);
+    CHECK(r.update(1, t) == 1);   // pressed: one step at once
+    int sum = 0;
+    for (uint64_t ms = 16; ms < (uint64_t)GoldRepeat::kDelayMs; ms += 16)
+        sum += r.update(1, t + ms);
+    CHECK(sum == 0);              // nothing more until kDelayMs
+    CHECK(r.update(1, t + GoldRepeat::kDelayMs) == 1);
+    // Then sooner each time: the gaps shrink to kFastestMs.
+    uint64_t last = t + GoldRepeat::kDelayMs, now = last;
+    int prev_gap = 1 << 30, repeats = 0;
+    bool shrank = true;
+    while (now < t + GoldRepeat::kTenfoldMs - 1) {
+        now += 1;
+        if (r.update(1, now)) {
+            const int gap = (int)(now - last);
+            shrank = shrank && gap <= prev_gap && gap >= GoldRepeat::kFastestMs;
+            prev_gap = gap;
+            last = now;
+            repeats++;
+        }
+    }
+    CHECK(shrank && repeats >= 10 && prev_gap == GoldRepeat::kFastestMs);
+    // Held past kTenfoldMs: tenfold steps; past three: a thousandfold at most.
+    GoldRepeat r2;
+    r2.update(-100, 0);
+    int seen = 0;
+    for (uint64_t ms = 1; ms < 10000; ms++) {
+        const int c = r2.update(-100, ms);
+        if (c && ms >= (uint64_t)GoldRepeat::kTenfoldMs * 3 + 100)
+            seen = c;
+        if (c && ms < (uint64_t)GoldRepeat::kTenfoldMs)
+            CHECK(c == -100);
+        if (c && ms >= (uint64_t)GoldRepeat::kTenfoldMs + 50 && ms < (uint64_t)GoldRepeat::kTenfoldMs * 2)
+            CHECK(c == -1000);
+    }
+    CHECK(seen == -100000);
+    // Let go: nothing; another press: one step at once again.
+    CHECK(r2.update(0, 10000) == 0);
+    CHECK(r2.update(0, 20000) == 0);
+    CHECK(r2.update(100, 20001) == 100);
+    // Another direction while held counts as a new press.
+    CHECK(r2.update(-1, 20017) == -1);
+}
+
+static GoldDialog deposit_dialog(int amount, int max)
+{
+    GoldDialog d;
+    d.mode = GoldDialog::kDeposit;
+    d.amount = amount;
+    d.max = max;
+    d.ok = NavRect{250, 255, 282, 287};       // as the lane read them at 640x480
+    d.cancel = NavRect{355, 255, 387, 287};
+    return d;
+}
+
+static void test_gold_dialog_window()
+{
+    const NavWindow w = gold_dialog_window(deposit_dialog(0, 10));
+    CHECK(w.cells.size() == 2 && w.cells[0].centre_x() == 266 && w.cells[0].centre_y() == 271 &&
+          w.cells[1].centre_x() == 371 && w.cells[1].centre_y() == 271);
+    MenuNav nav;
+    const std::vector<NavWindow> ws = {w};
+    MenuNav::Step s = nav.step(ws, 266, 271, NavDirection::kRight, false, 640, 480);
+    CHECK(s.moved && s.x == 371 && s.y == 271);
+    s = nav.step(ws, 371, 271, NavDirection::kLeft, false, 640, 480);
+    CHECK(s.moved && s.x == 266 && s.y == 271);
+}
+
+// The gold buttons at 640x480 (the lane's pixels) and moved with the halves.
+static void test_gold_buttons()
+{
+    const PanelShift none = panel_shift(640, 480), big = panel_shift(800, 600);
+    const NavRect stash640 = stash_gold_button(none), inv640 = inventory_gold_button(none);
+    CHECK(stash640.contains(84, 32) && inv640.contains(414, 401));
+    const NavRect stash800 = stash_gold_button(big), inv800 = inventory_gold_button(big);
+    CHECK(stash800.contains(164, 92) && inv800.contains(494, 461));
+}
+
+static void test_controls_gold_dialog()
+{
+    FakeMenus menus;
+    menus.open = {gold_dialog_window(deposit_dialog(50000, 50000))};
+    menus.gold = deposit_dialog(50000, 50000);
+    menus.gold_on = true;
+    Controls c;
+    c.set_frame(640, 480);
+    c.set_menu_nav(&menus);
+    c.set_context(true, true, 1ull << 0x19 | 1ull << 0x01, false);
+    c.warp_cursor(266, 271);
+    uint64_t t = 5000;
+    std::memset(g_ever, 0, sizeof g_ever);
+    g_typed.clear();
+    c.update(pad_with(0), t);
+    // Up at the most: nothing typed, no belt key.
+    c.update(pad_with(kUp), t += 16);
+    c.update(pad_with(0), t += 16);
+    CHECK(g_typed.empty() && !g_ever['1']);
+    // Down: 49999, typed over the field (Backspaces, then the digits).
+    c.update(pad_with(kDown), t += 16);
+    c.update(pad_with(0), t += 16);
+    CHECK(g_typed == std::string(10, '<') + "49999" && !g_ever['3']);
+    // Left (-100) while the field still shows 50000: from the typed 49999.
+    g_typed.clear();
+    c.update(pad_with(kLeft), t += 16);
+    c.update(pad_with(0), t += 16);
+    CHECK(g_typed == std::string(10, '<') + "49899" && !g_ever['4']);
+    // Right (+100) once the field shows something else (1200): from it.
+    menus.gold.amount = 1200;
+    g_typed.clear();
+    c.update(pad_with(kRight), t += 16);
+    c.update(pad_with(0), t += 16);
+    CHECK(g_typed == std::string(10, '<') + "1300" && !g_ever['2']);
+    // Down held: one at once, then repeats after the delay.
+    menus.gold.amount = 10;
+    t += 1000;
+    g_typed.clear();
+    c.update(pad_with(kDown), t += 16);
+    const size_t first = g_typed.size();
+    for (int ms = 16; ms < GoldRepeat::kDelayMs - 16; ms += 16)
+        c.update(pad_with(kDown), t += 16);
+    CHECK(first == 11 && g_typed.size() == first);   // "<<<<<<<<<<9"
+    for (int ms = 0; ms < 1000; ms += 16)
+        c.update(pad_with(kDown), t += 16);
+    c.update(pad_with(0), t += 16);
+    // Down to 0: the field emptied, never below.
+    CHECK(g_typed.size() > first && g_typed.substr(g_typed.size() - 10) == std::string(10, '<'));
+    CHECK(!g_ever['1'] && !g_ever['2'] && !g_ever['3'] && !g_ever['4']);
+    // R + Up: still F1 (a skill), not the amount.
+    g_typed.clear();
+    c.update(pad_with(kR), t += 16);
+    c.update(pad_with(kR | kUp), t += 16);
+    CHECK(g_keys[0x70] && g_typed.empty());
+    c.update(pad_with(0), t += 16);
+    // A flick goes between OK and Cancel.
+    c.update(pad_with(0, 156, 0), t += 16);
+    c.update(pad_with(0), t += 16);
+    CHECK(c.cursor_x() == 371 && c.cursor_y() == 271);
+    // Closed: the D-pad is the belt again.
+    menus.gold_on = false;
+    menus.open = {inventory()};
+    c.update(pad_with(0), t += 16);
+    c.update(pad_with(kUp), t += 16);
+    CHECK(g_keys['1']);
+    c.update(pad_with(0), t += 16);
+    CHECK(!g_keys['1']);
+}
+
 int main()
 {
     test_direction();
@@ -1180,6 +1362,11 @@ int main()
     test_control_panel_plain_click();
     test_panel_hold_walks();
     test_panel_side_hero_place();
+    test_gold_field_amount();
+    test_gold_repeat();
+    test_gold_dialog_window();
+    test_gold_buttons();
+    test_controls_gold_dialog();
     if (g_fail) {
         std::printf("%d checks FAILED\n", g_fail);
         return 1;

@@ -36,6 +36,17 @@
 //                ("Previous", "SPrevious"... go one menu back). Stale once
 //                the menu is closed. Configure Controls is the UI table's
 //                0x0B, with 0x09 off.
+//   0x007A279C   the gold dialog's form, kept once it closes: 1 drop, 2 a
+//                trade, 3 deposit, 4 withdraw (menu_nav.h's GoldDialog);
+//                0x007A27A0..0x007A27B0 its five parts while it is open,
+//                0x007A27B4 1 while it is open. Its third part is the
+//                amount field (vtable 0x006DA7CC): +0x40 its characters
+//                (UTF-16), +0x48 the most it takes (the game clamps typing
+//                to it), +0x50 its length << 16 | its longest (10). Its
+//                fourth and fifth are OK and Cancel (vtable 0x006DA72C,
+//                +0x20 x, +0x24 the bottom edge, +0x30 width, +0x34
+//                height). All read on the Linux lane in the drop, deposit
+//                and withdraw forms.
 //   0x007D55BC   out of the game, D2Win's current screen: its first
 //                control, +0x3C the next (menu_nav.h's D2WinControl; read
 //                only out of the game: it is stale in it).

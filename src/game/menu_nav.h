@@ -145,6 +145,59 @@ bool d2win_main_menu(const std::vector<D2WinControl> &controls);
 // walk), never for the auto-target.
 bool control_panel_at(int x, int y, int width, int height);
 
+// How far a resolution moves the 640x480 layouts, in game pixels: the
+// left half's panels, the right half's, and what is centred on the screen
+// (the game menu, the gold dialog).
+struct PanelShift {
+    int left_x = 0, left_y = 0, right_x = 0, right_y = 0, centre_x = 0, centre_y = 0;
+};
+
+// The gold dialog ("How much gold do you want to drop?", and its deposit,
+// withdraw and trade forms): opened by the inventory's and the stash's gold
+// buttons. The game's side (d2_menus.h) reads it; the amount is changed by
+// typing into its field (the D-pad, controls.cpp), OK and Cancel are cells.
+struct GoldDialog {
+    enum Mode : int { kDrop = 1, kTrade = 2, kDeposit = 3, kWithdraw = 4 };
+    int mode = 0;     // a Mode
+    int amount = 0;   // what its field holds now
+    int max = 0;      // the most it can take (the game's own, which it clamps typing to)
+    NavRect ok, cancel;
+};
+
+// The amount a gold dialog's field shows, from its characters (UTF-16, as
+// the game keeps them): the digits up to the first other character, 0 when
+// it is empty. Saturates rather than overflows.
+int gold_field_amount(const uint16_t *text, int length);
+
+// The gold dialog as a window: its OK and Cancel buttons.
+NavWindow gold_dialog_window(const GoldDialog &dialog);
+
+// The D-pad in the gold dialog: Up and Down +1 and -1, Right and Left +100
+// and -100 a press; held, the step repeats after kDelayMs, faster each time
+// (kFirstMs, shrinking by a sixth a repeat down to kFastestMs), and grows
+// tenfold after each kTenfoldMs of holding (x10, x100, x1000), so the
+// largest amounts are a few seconds away.
+class GoldRepeat {
+public:
+    static constexpr int kDelayMs = 400, kFirstMs = 150, kFastestMs = 40, kTenfoldMs = 2000, kMaxTenfolds = 3;
+    // step: the held direction's step (0: none held); returns the change to
+    // apply now (0: none).
+    int update(int step, uint64_t now_ms);
+
+private:
+    int step_ = 0;
+    uint64_t pressed_ms_ = 0, next_ms_ = 0;
+    int interval_ms_ = kFirstMs;
+};
+
+// The gold buttons the frame draws at fixed spots of the panels, measured
+// at 640x480 on the Linux lane and moved with the panel's half (shift): the
+// stash's (left half, withdraw) and the inventory's (right half: deposit
+// with the stash open, else drop or offer in a trade), which open the gold
+// dialog.
+NavRect stash_gold_button(const PanelShift &shift);
+NavRect inventory_gold_button(const PanelShift &shift);
+
 // Where the open windows are: the game's side (d2_menus.h's
 // game_menu_world), or made-up ones in the tests. ui: GameState::ui.
 // Out of the game (D2Win's screens: the main menu, the character and class
@@ -170,6 +223,12 @@ public:
     }
     // Out of the game: the screen shown is the main menu (d2win_main_menu).
     virtual bool main_menu() { return false; }
+    // The gold dialog while it is open (false: not open, or it doesn't read).
+    virtual bool gold_dialog(uint64_t ui, int width, int height, GoldDialog &out)
+    {
+        (void)ui, (void)width, (void)height, (void)out;
+        return false;
+    }
 };
 
 class MenuNav {
@@ -191,14 +250,9 @@ private:
     NavRect left_from_;
 };
 
-// How far a resolution moves the 640x480 layouts, in game pixels: the
-// left half's panels, the right half's, and what is centred on the screen
-// (the game menu). panel_shift gives the centred guess for all three
-// ((width - 640) / 2, (height - 480) / 2); the game's side (d2_menus.h)
-// reads the halves' from inventory.txt's rows.
-struct PanelShift {
-    int left_x = 0, left_y = 0, right_x = 0, right_y = 0, centre_x = 0, centre_y = 0;
-};
+// The centred guess of PanelShift for all three ((width - 640) / 2,
+// (height - 480) / 2); the game's side (d2_menus.h) reads the halves' from
+// inventory.txt's rows.
 PanelShift panel_shift(int width, int height);
 
 // The windows whose places Diablo II 1.14d draws at fixed spots, measured

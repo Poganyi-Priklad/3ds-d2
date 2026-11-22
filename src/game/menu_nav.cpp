@@ -349,6 +349,60 @@ PanelShift panel_shift(int width, int height)
     return s;
 }
 
+int gold_field_amount(const uint16_t *text, int length)
+{
+    long long amount = 0;
+    for (int i = 0; i < length && text[i] >= '0' && text[i] <= '9'; i++) {
+        amount = amount * 10 + (text[i] - '0');
+        if (amount > 0x7FFFFFFF)
+            return 0x7FFFFFFF;
+    }
+    return (int)amount;
+}
+
+NavWindow gold_dialog_window(const GoldDialog &dialog)
+{
+    NavWindow w;
+    w.name = "gold dialog";
+    w.area = NavRect{dialog.ok.left - 40, dialog.ok.top - 120, dialog.cancel.right + 40, dialog.cancel.bottom + 12};
+    for (const NavRect &r : {dialog.ok, dialog.cancel})
+        if (!r.empty())
+            w.cells.push_back(r);
+    return w;
+}
+
+int GoldRepeat::update(int step, uint64_t now_ms)
+{
+    if (step != step_) {   // pressed (or another direction): one step now
+        step_ = step;
+        pressed_ms_ = now_ms;
+        next_ms_ = now_ms + kDelayMs;
+        interval_ms_ = kFirstMs;
+        return step;
+    }
+    if (!step || now_ms < next_ms_)
+        return 0;
+    // Held: again, a little sooner each time, and tenfold every kTenfoldMs.
+    next_ms_ = now_ms + (uint64_t)interval_ms_;
+    interval_ms_ = interval_ms_ - interval_ms_ / 6 > kFastestMs ? interval_ms_ - interval_ms_ / 6 : kFastestMs;
+    int tenfolds = (int)((now_ms - pressed_ms_) / kTenfoldMs);
+    tenfolds = tenfolds < kMaxTenfolds ? tenfolds : kMaxTenfolds;
+    int change = step;
+    for (int i = 0; i < tenfolds; i++)
+        change *= 10;
+    return change;
+}
+
+NavRect stash_gold_button(const PanelShift &shift)
+{
+    return NavRect{72 + shift.left_x, 23 + shift.left_y, 97 + shift.left_x, 43 + shift.left_y};
+}
+
+NavRect inventory_gold_button(const PanelShift &shift)
+{
+    return NavRect{402 + shift.right_x, 392 + shift.right_y, 427 + shift.right_x, 412 + shift.right_y};
+}
+
 void fixed_windows(uint64_t ui, const PanelShift &shift, bool stat_points, std::vector<NavWindow> &out)
 {
     // A 640x480 rectangle or spot moved with the left half, the right half
