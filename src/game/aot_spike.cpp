@@ -154,6 +154,7 @@ static void cpuaot_fault(int sig, siginfo_t *si, void *uc)
 }
 #endif
 static std::unordered_map<uint32_t, uint32_t> g_all_at;   // every compiled function: va -> its row
+static std::vector<uint32_t> g_native_slot;               // by row: the trap of the native bound to it, else 0
 extern "C" {   // defined among aot_rt.h's functions
 static bool cpuaot_dispatch(d2rt::Cpu &c, uint32_t eip, uint32_t until);
 static void cpuaot_call(uint32_t x, AotRegs *t);
@@ -1855,12 +1856,26 @@ static bool cpuaot_dispatch(d2rt::Cpu &c, uint32_t eip, uint32_t until)
             std::string names;
             stale_funcs(c, changed, names);
             g_stale_slot.clear();
+            // The natives bound to a function's address (rt::entry_natives):
+            // each one's trap by the function's row, and the row marked so
+            // that compiled callers go to it (aot_call_stale) instead of the
+            // compiled original, which is the hand-backs' alone.
+            g_native_slot.assign(g_all_at.size(), 0);
+            for (const auto &e : rt::entry_natives()) {
+                const auto f = g_all_at.find(e.first);
+                if (f == g_all_at.end())
+                    continue;   // not compiled: the dispatcher asks rt::entry_native
+                g_native_slot[f->second] = e.second;
+                aot_stale[f->second] = 1;
+            }
             // Each one named: the game writes none of its code, so this is
             // the natives' installs (one check after them) and then a native
             // turned on or off, nothing else.
             static uint32_t checks = 0;
-            rt::logf("aot: the compiled functions' bytes checked against the image (check %u): %u differ", (unsigned)++checks,
-                     (unsigned)changed);
+            rt::logf("aot: the compiled functions' bytes checked against the image (check %u): %u differ%s%s; %u natives bound "
+                     "to their functions' addresses",
+                     (unsigned)++checks, (unsigned)changed, changed ? ": " : "", names.substr(0, 400).c_str(),
+                     (unsigned)rt::entry_natives().size());
         }
         if (aot_mem[eip] == 0xe9) {   // a native's hook at the entry: its shim's trap
             int32_t rel;
@@ -1872,6 +1887,11 @@ static bool cpuaot_dispatch(d2rt::Cpu &c, uint32_t eip, uint32_t until)
             }
         }
         const auto it = g_all_at.find(eip);
+        if (const uint32_t slot = it != g_all_at.end() ? (it->second < g_native_slot.size() ? g_native_slot[it->second] : 0)
+                                                       : rt::entry_native(eip)) {
+            eip = slot;   // a native bound to this function: its trap
+            continue;
+        }
         if (it == g_all_at.end())
             d2rt::cpu_aot_stop("no compiled code here", eip);
         const AotFunc &f = aot_funcs[it->second];

@@ -620,6 +620,18 @@ uint32_t native_entry(const char *name, uint32_t stack_args, std::function<uint3
     return g_br->shim_trap("3DSD2NATIVE", name);
 }
 
+namespace {
+std::vector<std::pair<uint32_t, uint32_t>> g_entry_natives;   // CpuAot: (function, its native's trap)
+}
+const std::vector<std::pair<uint32_t, uint32_t>> &entry_natives() { return g_entry_natives; }
+uint32_t entry_native(uint32_t va)
+{
+    for (const auto &e : g_entry_natives)
+        if (e.first == va)
+            return e.second;
+    return 0;
+}
+
 bool hook_function(Cpu &c, uint32_t va, const uint8_t *expect, uint32_t n, uint32_t stack_args,
                    std::function<uint32_t(Cpu &)> fn, const char *name, bool in_line)
 {
@@ -633,6 +645,17 @@ bool hook_function(Cpu &c, uint32_t va, const uint8_t *expect, uint32_t n, uint3
     const uint32_t trap = native_entry(name, stack_args, std::move(fn));
     if (!trap)
         return false;
+    if (d2rt::cpu_is_aot(c)) {   // bound by address, the image as it was (rt_host.h)
+        bool known = false;
+        for (auto &e : g_entry_natives)
+            if (e.first == va)
+                e.second = trap, known = true;
+        if (!known)
+            g_entry_natives.emplace_back(va, trap);
+        c.invalidate_code(va, 5);   // the dispatcher takes the new binding at its next call
+        logf("native %s at %08x (bound, the image unchanged)", name, va);
+        return true;
+    }
     uint8_t jmp[5] = {0xE9};
     const uint32_t rel = trap - (va + 5);
     std::memcpy(jmp + 1, &rel, 4);

@@ -620,6 +620,10 @@ With compiled code the hook needn't be in the x86 image to take effect. It becom
 
 The stubs in `.text`'s slack stay as they are: in a build without Box86 their bytes are only what the recompiler reads.
 
+**Done for a build without Box86, by address rather than by row.** `rt::hook_function` on `CpuAot` writes nothing into the image: it registers the native's trap and binds it to the function's address (`rt::entry_natives`). The dispatcher sends a call that reaches that address to the trap; compiled callers get there through the flag every compiled call already tests (`AOT_STALE`, set for the bound functions' rows); the function's compiled code stays the game's, for the hand-backs. So the image is the Game.exe that was compiled, with the table's sites applied, and the check after the natives install finds nothing: `aot: the compiled functions' bytes checked against the image (check 1): 0 differ; 39 natives bound to their functions' addresses` (39 differed before). It is the one check of a run, and what it would name now is a Game.exe other than the one compiled, or a patch that isn't in the table.
+
+What this leaves of the plan above: the natives are still called through the Bridge's shim with the registers copied to the CPU and back (no `ENTRY` rows, no adapter the recompiler emits), so the call's cost is as it was; and the Box86 build hooks as before, with its 39 functions changed since compiled. Both are for a profile from the console to ask for.
+
 ### Threads that wait in place (#138, planned)
 
 The strict report's largest number is the waits: 435,032 in Act II, nearly all `Sleep`. Today a shim that must wait asks the Bridge to stop; compiled code unwinds (an exit to the return sites' trap), WinVita's `CooperativeScheduler` runs another thread's slice, and when the first runs again the trap re-enters each compiled function at its return site (`reent_<va>`). All of it exists because the guest threads share one host stack.
