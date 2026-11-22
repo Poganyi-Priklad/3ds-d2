@@ -257,7 +257,14 @@ fn main() {
                 // have no pads. Not inside an instruction of a listed function.
                 let ret = pad == 0xc3 || img.mem[(t - 3 - img.base) as usize] == 0xc2;
                 let within = insn_at.range(..t).next_back().is_some_and(|(a, n)| a.wrapping_add(*n) > t);
-                if (t % 16 == 0 && (pad == 0xcc || pad == 0x90)) || (ret && !within) {
+                // ... or on 16 bytes after anything (a switch's table before
+                // it: 676280, 6768c0, 58ea50), where it decodes as a function
+                // that returns.
+                let decodes = || {
+                    let f = prog.func(t);
+                    f.refused.is_none() && !f.rets.is_empty()
+                };
+                if (t % 16 == 0 && (pad == 0xcc || pad == 0x90)) || (ret && !within) || (t % 16 == 0 && !within && decodes()) {
                     found.insert(t);
                 }
             }
@@ -283,6 +290,62 @@ fn main() {
             have.insert(t);
             extra.push(t);
         }
+        // And the code pointers in the immediates of the functions found
+        // since, with their direct callees, until none is new (44bbb0, pushed
+        // by 44bc30, which the data's pointers found).
+        let mut scanned: HashSet<u32> = HashSet::new();
+        let mut more = 0usize;
+        loop {
+            let mut found: BTreeSet<u32> = BTreeSet::new();
+            for &va in &extra {
+                if !scanned.insert(va) {
+                    continue;
+                }
+                let f = prog.func(va);
+                inside.extend(f.insns.keys().filter(|&&a| a != va).copied());
+                insn_at.extend(f.insns.iter().map(|(a, i)| (*a, i.size)));
+                for i in f.insns.values() {
+                    if i.mnemonic.starts_with("call") || i.mnemonic.starts_with('j') {
+                        continue;
+                    }
+                    for op in &i.ops {
+                        if let cs::OpKind::Imm(v) = op.kind {
+                            let t = v as u32;
+                            if t >= img.text_lo && t < img.text_hi && !have.contains(&t) {
+                                let pad = img.mem[(t - 1 - img.base) as usize];
+                                let ret = pad == 0xc3 || img.mem[(t - 3 - img.base) as usize] == 0xc2;
+                                if (t % 16 == 0 && (pad == 0xcc || pad == 0x90))
+                                    || (ret && matches!(i.mnemonic.as_str(), "mov" | "push"))
+                                {
+                                    found.insert(t);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            found.retain(|t| {
+                !inside.contains(t) && !insn_at.range(..*t).next_back().is_some_and(|(a, n)| a.wrapping_add(*n) > *t)
+            });
+            let mut add: Vec<u32> = found.into_iter().collect();
+            let reach: Vec<u32> = prog
+                .closure(&add, 1 << 20)
+                .into_iter()
+                .filter(|t| !have.contains(t) && *t >= img.text_lo && *t < img.text_hi)
+                .collect();
+            add.extend(reach);
+            add.sort();
+            add.dedup();
+            if add.is_empty() {
+                break;
+            }
+            more += add.len();
+            for t in add {
+                have.insert(t);
+                extra.push(t);
+            }
+        }
+        println!("aot: {} more from the immediates of those found", more);
     }
     let intr = intrinsics();
     let nat = natives();

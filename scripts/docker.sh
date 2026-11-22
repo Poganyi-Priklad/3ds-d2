@@ -135,9 +135,15 @@ aot_recompile() {
         run_in "$HOSTTEST_IMAGE" "$@"
     fi
 }
+# AOT_VARIANTS, AOT_OPT (tests/m4/Makefile): which builds of the generated C, and how optimised. With
+# AOT_OUT of its own, a fast build for a run that only needs the code there: AOT_VARIANTS=d AOT_OPT=-O1.
+aot_make_opts() {
+    [ -z "${AOT_VARIANTS:-}" ] || AOT_MAKE+=("AOT_VARIANTS=$AOT_VARIANTS")
+    [ -z "${AOT_OPT:-}" ] || AOT_MAKE+=("AOT_OPT=$AOT_OPT")
+}
 aot_prepare() {
     case "${D2_AOT_BUILD:-}" in
-    keep) AOT_MAKE=(AOT=/work/build/aot/spike); return 0 ;;   # what the last D2_AOT_BUILD=1 wrote (lanes side by side)
+    keep) AOT_MAKE=(AOT=/work/build/aot/spike); aot_make_opts; return 0 ;;   # what the last D2_AOT_BUILD=1 wrote (lanes side by side)
     1) ;;
     *) return 0 ;;
     esac
@@ -150,6 +156,7 @@ aot_prepare() {
     aot_recompile "$AOT_RECOMPILER" /aot/Game.exe --out build/aot/spike $(aot_args)
     RUN_EXTRA=(${saved[@]+"${saved[@]}"})
     AOT_MAKE=(AOT=/work/build/aot/spike)
+    aot_make_opts
 }
 
 do_build() { # <flavor>

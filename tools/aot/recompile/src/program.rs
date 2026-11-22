@@ -384,6 +384,41 @@ impl<'a> Program<'a> {
         out
     }
 
+    fn renderer_slot_pops(&self, f: &Func) -> Option<i64> {
+        const RENDERER: i64 = 0x007c8cc0;
+        const GDI_TABLE: u32 = 0x0074c4a8;
+        let mut order: Vec<u32> = f.insns.keys().copied().collect();
+        order.sort();
+        let mut table_reg: Option<u16> = None;
+        for a in order {
+            let i = &f.insns[&a];
+            for (k, op) in i.ops.iter().enumerate() {
+                if !op.is_mem() {
+                    continue;
+                }
+                let m = op.mem();
+                if m.base == 0 && m.index == 0 && m.disp == RENDERER && i.mnemonic == "mov" && k == 1 && i.ops[0].is_reg() {
+                    table_reg = Some(i.ops[0].reg());
+                } else if table_reg.is_some_and(|r| m.base == r) && m.index == 0 && (0..0x400).contains(&m.disp) && m.disp % 4 == 0 {
+                    let mut b = [0u8; 4];
+                    for (j, x) in b.iter_mut().enumerate() {
+                        *x = self.img.u8(GDI_TABLE + m.disp as u32 + j as u32);
+                    }
+                    let t = u32::from_le_bytes(b);
+                    if !self.img.in_text(t) {
+                        return None;
+                    }
+                    let g = self.func(t);
+                    if g.refused.is_some() || g.ret_pops.len() != 1 {
+                        return None;
+                    }
+                    return g.ret_pops.iter().next().copied();
+                }
+            }
+        }
+        None
+    }
+
     /// What each thunk through a pointer pops (issue #138).
     pub fn compute_thunk_pops(&self) -> HashMap<u32, i64> {
         let img = self.img;
@@ -404,6 +439,15 @@ impl<'a> Program<'a> {
                 };
                 if !imp.contains(&v) {
                     imp.push(v);
+                }
+            }
+            // A jump through the renderer's table (issue #138: 4f5d60's mov
+            // eax, [7c8cc0]; mov eax, [eax + 0x34]; jmp eax): what the GDI
+            // renderer's function in that slot pops (its table at 0x74c4a8;
+            // every renderer's has the slot's signature).
+            if imp == vec![Some(-1)] {
+                if let Some(p) = self.renderer_slot_pops(&f) {
+                    imp = vec![Some(p)];
                 }
             }
             thunks.insert(va, if imp == vec![Some(-1)] { Vec::new() } else { imp });

@@ -40,14 +40,22 @@ LIB   := $(W)/build-arm/libwinx86$(LIBTAG).a
 # (the #ifdef at each call the recompiler writes), in objects and a binary of
 # their own.
 AOT   ?=
+# AOT_VARIANTS: the generated C's builds to make and link (d: as it is; n: no
+# function inlined into another, the spike's SigCalls modes; j: journaled, the
+# check's). AOT_OPT: their optimisation. A run that needs only compiled code
+# to be there (CpuAot's, issue #138) builds in a sixth of the time with
+# AOT_VARIANTS=d AOT_OPT=-O1, in an OUT of its own: the runtime's lookups of
+# the other two are weak.
+AOT_VARIANTS ?= d n j
+AOT_OPT ?= -O2 -g
 AOT_SPLIT ?=
 AOTDIR := $(BIN_OUT)/aot$(if $(AOT_SPLIT),-split)
 ifneq ($(AOT),)
 HOST   := $(HOST)_aot$(if $(AOT_SPLIT),_split)
 AOTSRC := $(sort $(wildcard $(AOT)/aot_spike*.c))   # the tables and the functions' parts (issue #135)
-AOTOBJ := $(foreach v,d n j,$(patsubst $(AOT)/%.c,$(AOTDIR)/$(v)/%.o,$(AOTSRC)))
+AOTOBJ := $(foreach v,$(AOT_VARIANTS),$(patsubst $(AOT)/%.c,$(AOTDIR)/$(v)/%.o,$(AOTSRC)))
 endif
-AOTCC := arm-linux-gnueabi-gcc -std=gnu17 -O2 -g $(ARCH) -I$(ROOT)/src -w $(if $(AOT_SPLIT),-DAOT_SPLIT)
+AOTCC := arm-linux-gnueabi-gcc -std=gnu17 $(AOT_OPT) $(ARCH) -I$(ROOT)/src -w $(if $(AOT_SPLIT),-DAOT_SPLIT)
 GAME  ?= /game
 MS    ?= 20000
 # TIMEOUT: seconds before a run is cut (exit status 124); scripts/docker.sh

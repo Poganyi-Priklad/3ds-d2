@@ -698,6 +698,23 @@ impl<'p, 'a> Emitter<'p, 'a> {
         if m == "popfd" {
             return Ok("{ aot_eflags = (LD32(esp) & 0x00244dd5u) | 2u; esp += 4u; }".to_string());
         }
+        if (m == "shld" || m == "shrd") && ops.len() == 3 && ops[0].size == 4 {
+            // Bits shifted in from a second register (issue #138: the C
+            // runtime's 6939ac and 68dff5). A count of 0 changes nothing; the
+            // flags aren't modelled.
+            let a = self.get(i, &ops[0], None)?;
+            let b = self.get(i, &ops[1], None)?;
+            let n = self.get(i, &ops[2], None)?;
+            let r = if m == "shld" { "(a << n) | (b >> (32u - n))" } else { "(a >> n) | (b << (32u - n))" };
+            return Ok(format!(
+                "{{ uint32_t a = {}, b = {}, n = ({}) & 31u; if (n) {{ uint32_t r = {}; {} }} }}",
+                a,
+                b,
+                n,
+                r,
+                self.put(i, &ops[0], "r")?
+            ));
+        }
         if m == "rdtsc" {
             return Ok("{ uint64_t t = aot_rdtsc(); eax = (uint32_t)t; edx = (uint32_t)(t >> 32); }".to_string());
         }

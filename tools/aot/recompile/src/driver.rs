@@ -263,10 +263,15 @@ fn solve_pops(prog: &mut Program, va: u32, full_outs: Regs) -> bool {
     let n = guessed.len();
     let mut combos: Vec<Vec<i64>> = vec![vec![]];
     for _ in 0..n {
-        combos = combos.iter().flat_map(|c| (0..4).map(move |d| { let mut c = c.clone(); c.push(d); c })).collect();
+        combos = combos.iter().flat_map(|c| (-3..=3).map(move |d| { let mut c = c.clone(); c.push(d); c })).collect();
     }
-    combos.sort_by_key(|c| c.iter().sum::<i64>());
+    // Less as well as more: a count takes for arguments what the caller drops
+    // later (6b0330's read callback, add esp after), by up to 12 either way.
+    combos.sort_by_key(|c| c.iter().map(|d| d.abs()).sum::<i64>());
     for c in combos.iter().skip(1) {
+        if guessed.iter().zip(c).any(|(&(_, p), &d)| p + 4 * d < 0) {
+            continue;
+        }
         let fix: Vec<(u32, i64)> = guessed.iter().zip(c).map(|(&(site, p), &d)| (site, p + 4 * d)).collect();
         prog.with_pops(va, fix);
         if Analysis::new(prog, prog.func(va), Some(full_outs), true).is_ok_and(|a| a.esp_ok) {
@@ -601,7 +606,7 @@ pub fn compile_set<'a>(
                     // what balances every ret (issue #138: 688fbb's call eax
                     // of a decoded pointer, with one argument pushed before
                     // the call that decodes it): each up to 12 more, the
-                    // least in all first, where there are at most four.
+                    // least change in all first, where there are at most four.
                     if attempt == 0 && e.0.starts_with("esp at a ret") && solve_pops(&mut prog, va, full_outs) {
                         continue;
                     }

@@ -674,6 +674,32 @@ How `CpuAot` runs code (from reading `cpu.h`, `sched_cooperative.cpp` and `aot_c
 
 `CpuAot` then runs town-walk through the game's start, its archives read, to an exit to 415210 in 6b0330 (a function with plain exits). On the Box86 lanes, profiled production with `D2_AOT_STRICT=1`: left to Box86 2,474 times in town-walk against 2,701, 4,160 in the fight against 4,850, 6,101 in Act II against 6,311; Box86 ran 1,931,240 x86 bytes against 2,441,893.
 
+**The lane's three scripts run on `CpuAot`, with no Box86** (`D2_CPU=aot`, `M4_LAYOUT=ctr`, 14,296 compiled functions, 208 refused):
+
+| Script | Its end | Frames | Files | Read |
+| --- | --- | --- | --- | --- |
+| town-walk | `ingame`, 70 s | 1,760 | 22 | 26,084 KiB |
+| fight | `ingame`, 120 s | 3,010 | 22 | 24,683 KiB |
+| Act II | `npcmenu`, `menuclosed`, `act2`, 150 s | 4,076 | 33 | 18,882 KiB |
+
+The frames at each script's end are the Box86 lane's (1,760, 3,010 and 4,076 against 1,760, 3,010 and 4,075). Each run's last frame, as the lane saved it (`shots/last.png`, 800x600, here as JPEG; looked at, not compared with Box86's: the threads' switch points aren't its):
+
+| town-walk: the Rogue Encampment | fight: outside the camp | Act II: Lut Gholein, after the journey |
+| --- | --- | --- |
+| ![town-walk's last frame on CpuAot](evidence/cpuaot-town-walk.jpg) | ![the fight's last frame on CpuAot](evidence/cpuaot-fight.jpg) | ![Act II's last frame on CpuAot](evidence/cpuaot-act2-east.jpg) |
+
+The palisade, the torches and the rain, the character, a cow by the river, Lut Gholein's caravan and well with its townspeople, the mercenary and her portrait, and the interface's globes, belt and buttons are all drawn as the game draws them. Seven callouts a script come back with another esp than their site counted, named once each (674230, 6741a0, 548520, 688c2b, TlsGetValue, TlsSetValue, GetCurrentThread). Town-walk reads 1,094 KiB more than on Box86 and holds about 3 MiB more `va`: not explained yet. Not there yet: preemption (a thread runs until it waits or yields), the 3DS's own context switch (the fibers are `ucontext`'s), the check (it compares against Box86), and the game beyond these scripts.
+
+What the last stops took, on the way from the game's start to the town:
+
+- **6b0330, a count too high:** the solver tries less as well as more for a guessed callout, 12 either way, the least change first. 7 functions with plain exits, against 10.
+- **4f5d60, a jump through the renderer's table** (`mov eax, [7c8cc0]; mov eax, [eax + 0x34]; jmp eax`): such a thunk pops what the GDI renderer's function in that slot does (its table at 0x74c4a8). Three thunks; 55 of the game's stay refused, forwards to a C++ object's virtual function (`mov ecx, [ecx + 8]; mov eax, [ecx]; jmp [eax + N]`).
+- **From the strict report's rare places:** `shld` and `shrd` (6939ac, 68dff5); the code pointers in the data on 16 bytes after anything, where they decode as a function that returns (676280 and 58ea50 follow a switch's table: 928 against 917); the code pointers in the immediates of the functions found since, with their direct callees, until none is new (63).
+
+On the Box86 lanes at this build (the check with `D2_AOT_STALE=1 M4_LAYOUT=ctr`: 0 differ, town-walk 9.7M calls, fight 9.6M, Act II 46.5M; 13,952 functions hooked of 14,296 compiled), profiled production with `D2_AOT_STRICT=1`: Box86 ran 804,972 x86 bytes against 1,931,240. Left to Box86: 3,164 times in town-walk against 2,474, 3,194 in the fight against 4,160, 5,019 in Act II against 6,101. Town-walk has no exit in the compiled code left (988 before) and no callout to code that isn't compiled (6 before); what rose is 674230's return at 66f4cc, 2,974 times against 1,294, the one whose pushes are before a join (`CpuAot` goes on from it).
+
+**The fast build.** A run on `CpuAot` needs the compiled code there, not fast, and not the check's or the spike's other builds of it. `tests/m4/Makefile` takes `AOT_VARIANTS` (d, n, j: all three by default, each generated file compiled once for each) and `AOT_OPT` (`-O2 -g`), and `scripts/docker.sh` passes them: `AOT_VARIANTS=d AOT_OPT=-O1 AOT_JOBS=6` with an `AOT_OUT` of its own builds and runs a script in 4 minutes (6 with the recompiler), against half an hour and more.
+
 Recommendations on the open points: fibers rather than host threads (one runs at a time anyway, and a switch costs nothing in the kernel); 256 KiB of host stack a thread at first, measured on the lane with a guard page and then cut (four threads in play); the placeholder-result contract kept, so no shim changes; a lane run compared with another run of the same build, since switch points move.
 
 ### The natives' site table (#138)
