@@ -216,6 +216,17 @@ MenuNav::Step MenuNav::step(const std::vector<NavWindow> &windows, int x, int y,
         }
         if (best_w >= 0)
             return go(windows[best_w].cells[best_c], "onto");
+        // Nothing that way either: round, as from a cell, onto the far side;
+        // but not from the free half (an item in hand goes no further there).
+        if (left_cell_)
+            return out;
+        std::vector<NavRect> all;
+        for (const NavWindow &other : windows)
+            if (!other.up_down_only || vertical(dir))
+                all.insert(all.end(), other.cells.begin(), other.cells.end());
+        const int e = entry_cell(all, vertical(dir) ? x : y, dir);
+        if (e >= 0)
+            return go(all[e], "round");
         return out;
     }
 

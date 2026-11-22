@@ -255,6 +255,10 @@ static void test_free_half()
     int ex, ey;
     inv_cell(0, 1, ex, ey);
     CHECK(s.moved && s.x == ex && s.y == ey && std::strcmp(s.why, "onto") == 0);
+    // Nothing that way off every window: round onto the far side's row.
+    nav.forget();
+    s = flick_at(nav, w, 620, 300, NavDirection::kRight);
+    CHECK(s.moved && std::strcmp(s.why, "round") == 0 && s.x < 620);
 }
 
 static void test_npc_menu()
@@ -283,6 +287,11 @@ static void test_npc_menu()
     // The cursor off the menu (where the click on the NPC left it): onto it.
     s = flick_at(nav, w, 256, 200, NavDirection::kUp);
     CHECK(s.moved && s.y == 77);
+    // ...and down from under it: round onto its top option, as from a cell.
+    s = flick_at(nav, w, 256, 200, NavDirection::kDown);
+    CHECK(s.moved && s.y == 62 && std::strcmp(s.why, "round") == 0);
+    s = flick_at(nav, w, 256, 200, NavDirection::kLeft);   // still up and down only
+    CHECK(!s.moved);
     // The same menus as the game keeps them (0x007C0E54): box 173,48 102x66
     // with two options, Talk 78 and Cancel 93; the Talk menu 173,43 102x81
     // with three, 73 88 103 (the lane at 640x480); at 800x600 253,108: 138.
