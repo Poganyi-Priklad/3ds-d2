@@ -35,6 +35,8 @@ void cpu_aot_yield(Cpu &c);
 void *cpu_aot_fpu(Cpu &c);
 // Code changed since this was last asked (a native's hook): true once.
 bool cpu_aot_take_code_changed(Cpu &c);
+// The image's span: invalidate_code outside it changes no code (the heap reports its copies).
+void cpu_aot_set_code_span(Cpu &c, uint32_t lo, uint32_t hi);
 // After a trap that asked for no yield: whether the running thread's slice is
 // over (its share of trap calls made). True once; cpu_aot_yield then.
 bool cpu_aot_slice_over(Cpu &c);

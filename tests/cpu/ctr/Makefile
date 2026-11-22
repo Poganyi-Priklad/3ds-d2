@@ -27,6 +27,13 @@ CPU ?= box86
 ifeq ($(CPU),aot)
 OUT    := $(ROOT)/build/cpu/ctr-aot
 CPUDEF := -DD2RT_CPU_AOT
+# AOT_SAMPLE=1: a profile of where compiled code is (src/game/aot_rt.h's
+# AOT_SAMPLE_ON), in a build directory of its own.
+ifneq ($(AOT_SAMPLE),)
+OUT    := $(ROOT)/build/cpu/ctr-aot-sample
+CPUDEF += -DAOT_SAMPLE_ON
+AOTDEF := -DAOT_SAMPLE_ON
+endif
 else
 CPUDEF := -DD2RT_CPU_BOX86
 endif
@@ -112,7 +119,7 @@ AOTOBJ := $(foreach v,$(if $(filter aot,$(CPU)),d,d n),$(patsubst $(AOT)/%.c,$(O
 GAMEOBJ += $(AOTOBJ)
 endif
 $(OUT)/aot/d/%.o: $(AOT)/%.c $(ROOT)/src/game/aot_rt.h
-	@mkdir -p $(@D); $(CC) -O2 -g $(ARCH) -std=gnu17 -I$(ROOT)/src -w -c $< -o $@
+	@mkdir -p $(@D); $(CC) -O2 -g $(ARCH) -std=gnu17 -I$(ROOT)/src -w $(AOTDEF) -c $< -o $@
 $(OUT)/aot/n/%.o: $(AOT)/%.c $(ROOT)/src/game/aot_rt.h
 	@mkdir -p $(@D); $(CC) -O2 -g $(ARCH) -std=gnu17 -I$(ROOT)/src -w -DAOT_NOINLINE -c $< -o $@
 $(OUT)/aot.cfg: FORCE

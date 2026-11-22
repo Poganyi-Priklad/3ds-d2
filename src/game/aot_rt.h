@@ -182,7 +182,13 @@ uint64_t aot_native_64d4e0(uint32_t esi, uint32_t room, uint32_t x, uint32_t y);
 
 /* AOT_TRACE_ON (debugging the recompiler): each compiled function's entry
  * and registers, to compare with the game's run under Unicorn. */
-#ifdef AOT_TRACE_ON
+#if defined(AOT_SAMPLE_ON)
+/* AOT_SAMPLE_ON (a profile of a build with no Box86, docs/aot.md): each
+ * compiled function writes its address at its entry, and a host thread reads
+ * the word every 2 ms (aot_sample). */
+extern volatile uint32_t aot_at;
+#define AOT_TRACE(va, ...) (aot_at = (va))
+#elif defined(AOT_TRACE_ON)
 void aot_trace(uint32_t va, uint32_t eax, uint32_t ecx, uint32_t edx, uint32_t ebx, uint32_t esp, uint32_t ebp,
                uint32_t esi, uint32_t edi);
 #define AOT_TRACE(...) aot_trace(__VA_ARGS__)

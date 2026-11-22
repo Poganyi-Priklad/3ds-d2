@@ -111,7 +111,15 @@ public:
     }
     void *hostptr(uint32_t va, uint32_t n) override { return in(va, n) ? base_ + va : nullptr; }
     bool mapped(uint32_t va) override { return va < span_; }
-    void invalidate_code(uint32_t, uint32_t) override { code_changed_ = true; }
+    // Only a write into the image is a change of code (set_code_span): the
+    // heap's HeapReAlloc reports every block it copies, and each report cost
+    // the dispatcher a hash of all the compiled functions' bytes.
+    void invalidate_code(uint32_t va, uint32_t n) override
+    {
+        if (va < code_hi_ && va + n > code_lo_)
+            code_changed_ = true;
+    }
+    void set_code_span(uint32_t lo, uint32_t hi) { code_lo_ = lo, code_hi_ = hi; }
 
     uint32_t reg(int r) override { return regs_[r]; }
     void set_reg(int r, uint32_t v) override { regs_[r] = v; }
@@ -262,6 +270,7 @@ private:
     Fiber *cur_ = nullptr;
     void *sched_sp_ = nullptr;
     bool code_changed_ = true;
+    uint32_t code_lo_ = 0, code_hi_ = UINT32_MAX;   // set_code_span
     uint64_t limit_ = 0, calls_ = 0;
     bool hit_ = false;
     alignas(8) uint8_t boot_fpu_[416] = {};
@@ -286,6 +295,7 @@ bool cpu_aot_is_trap(Cpu &c, uint32_t va) { return static_cast<CpuAot &>(c).is_t
 void cpu_aot_yield(Cpu &c) { static_cast<CpuAot &>(c).yield(); }
 void *cpu_aot_fpu(Cpu &c) { return static_cast<CpuAot &>(c).fpu(); }
 bool cpu_aot_take_code_changed(Cpu &c) { return static_cast<CpuAot &>(c).take_code_changed(); }
+void cpu_aot_set_code_span(Cpu &c, uint32_t lo, uint32_t hi) { static_cast<CpuAot &>(c).set_code_span(lo, hi); }
 bool cpu_aot_slice_over(Cpu &c) { return static_cast<CpuAot &>(c).slice_over(); }
 std::vector<std::string> cpu_aot_lines()
 {
@@ -305,6 +315,7 @@ bool cpu_aot_is_trap(Cpu &, uint32_t) { return false; }
 void cpu_aot_yield(Cpu &) {}
 void *cpu_aot_fpu(Cpu &) { return nullptr; }
 bool cpu_aot_take_code_changed(Cpu &) { return false; }
+void cpu_aot_set_code_span(Cpu &, uint32_t, uint32_t) {}
 bool cpu_aot_slice_over(Cpu &) { return false; }
 std::vector<std::string> cpu_aot_lines() { return {}; }
 

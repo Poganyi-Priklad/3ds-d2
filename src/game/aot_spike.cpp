@@ -54,6 +54,70 @@ using d2rt::Cpu;
 // CpuAot (issue #138, rt_cpu_aot.h): the run has no Box86; the dispatcher and
 // a call from compiled code are below, by aot_call_out.
 static bool g_cpu_aot = false;
+#ifdef AOT_SAMPLE_ON
+// The sampled profile (aot_rt.h): the last compiled function entered, or a
+// trap's address inside a shim, or 1 while the thread is switched away. The
+// dispatcher puts back what was there when a trap, a switch or a function it
+// ran returns, so a sample after it is the caller's again (the last function
+// entered before, which is the caller unless a callee of its own returned).
+extern "C" {
+volatile uint32_t aot_at = 0;
+}
+#define AOT_AT_SAVE const uint32_t at_was = aot_at
+#define AOT_AT_SET(v) (aot_at = (v))
+#define AOT_AT_BACK (aot_at = at_was)
+namespace {
+constexpr uint32_t kSampleSlots = 4096;   // open addressing; the sampler thread alone writes
+struct SampleSlot {
+    uint32_t va, n;
+};
+SampleSlot g_samples[kSampleSlots];
+volatile uint32_t g_sample_n = 0, g_sample_lost = 0;
+}
+namespace game {
+void aot_sample()
+{
+    const uint32_t va = aot_at;
+    uint32_t h = (va * 2654435761u) >> 20;
+    for (uint32_t k = 0; k < 64; k++, h = (h + 1) % kSampleSlots) {
+        SampleSlot &s = g_samples[h];
+        if (s.n && s.va != va)
+            continue;
+        s.va = va;
+        s.n++;
+        g_sample_n = g_sample_n + 1;
+        return;
+    }
+    g_sample_lost = g_sample_lost + 1;
+}
+// The window's samples, the most first, and the table cleared.
+static void aot_sample_lines(std::vector<std::string> &out)
+{
+    static SampleSlot top[kSampleSlots];
+    uint32_t n = 0, all = 0;
+    for (SampleSlot &s : g_samples) {
+        if (s.n)
+            top[n++] = s, all += s.n;
+        s.n = 0;
+    }
+    if (!all)
+        return;
+    std::sort(top, top + n, [](const SampleSlot &a, const SampleSlot &b) { return a.n > b.n; });
+    std::string line = "aot samples: " + std::to_string(all) + " (" + std::to_string(n) + " places, " +
+                       std::to_string((unsigned)g_sample_lost) + " lost; 1: switched away, 003xxxxx: a shim):";
+    char w[40];
+    for (uint32_t k = 0; k < n && k < 16; k++) {
+        std::snprintf(w, sizeof w, " %08x %.1f%%", (unsigned)top[k].va, 100.0 * top[k].n / all);
+        line += w;
+    }
+    out.push_back(line);
+}
+}
+#else
+#define AOT_AT_SAVE (void)0
+#define AOT_AT_SET(v) (void)0
+#define AOT_AT_BACK (void)0
+#endif
 // The lane's fault report: the last compiled function the dispatcher entered,
 // the last trap, the last hand-back (aot_resume), each a word written as it
 // happens.
@@ -1144,6 +1208,13 @@ int install_aot(Cpu &c)
         for (uint32_t k = 0; aot_funcs && aot_funcs[k].va; k++)
             g_all_at[aot_funcs[k].va] = k;
         d2rt::cpu_aot_set_dispatch(cpuaot_dispatch);
+        {   // the image, from its PE header: what a write can change the code of
+            const uint32_t base = 0x00400000u;
+            if (aot_mem[base] == 'M' && aot_mem[base + 1] == 'Z') {
+                const uint32_t pe = base + aot_ld32(aot_mem, base + 0x3c);
+                d2rt::cpu_aot_set_code_span(c, base, base + aot_ld32(aot_mem, pe + 0x50));   // SizeOfImage
+            }
+        }
 #ifndef __3DS__
         struct sigaction sa = {};
         sa.sa_sigaction = cpuaot_fault;
@@ -1479,6 +1550,9 @@ std::vector<std::string> aot_strict_lines()
 std::vector<std::string> aot_lines()
 {
     std::vector<std::string> out;
+#ifdef AOT_SAMPLE_ON
+    aot_sample_lines(out);
+#endif
     const double empty_us = g_empty_n ? (double)g_empty_ticks / g_empty_n / kTicksPerUs : 0;
     for (int k = 0; k < g_root_count; k++) {
         Root &R = g_roots[k];
@@ -1749,13 +1823,18 @@ static bool cpuaot_dispatch(d2rt::Cpu &c, uint32_t eip, uint32_t until)
         if (d2rt::cpu_aot_is_trap(c, eip)) {
             c.set_reg(d2rt::R_EIP, eip);
             g_at_trap = eip;
+            AOT_AT_SAVE;
+            AOT_AT_SET(eip);
             if (!d2rt::cpu_aot_trap(c, eip)) {
                 if (eip == rt::bridge().sentinel())
                     return false;        // the thread's, or a nested run's, end
+                AOT_AT_SET(1);
                 d2rt::cpu_aot_yield(c);  // a yield or a wait: here until the scheduler runs the thread again
             } else if (d2rt::cpu_aot_slice_over(c)) {
+                AOT_AT_SET(1);
                 d2rt::cpu_aot_yield(c);  // preempted: its slice's share of trap calls made
             }
+            AOT_AT_BACK;
             cpuaot_bind(c);
             eip = c.reg(d2rt::R_EIP);
             continue;
@@ -1786,7 +1865,9 @@ static bool cpuaot_dispatch(d2rt::Cpu &c, uint32_t eip, uint32_t until)
         const uint32_t esp0 = r[4], ra = aot_ld32(aot_mem, esp0);
         cpuaot_bind(c);
         g_at_fn = eip;
+        AOT_AT_SAVE;
         f.sig(r);
+        AOT_AT_BACK;
         r[4] = esp0 + 4u + f.pops;
         for (int k = 0; k < 8; k++)
             c.set_reg(k, r[k]);

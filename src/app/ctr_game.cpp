@@ -1232,6 +1232,25 @@ void sampler_main(void *)
     }
 }
 
+#ifdef AOT_SAMPLE_ON
+// The AOT build's own profile (game/aot_spike.cpp, aot_sample): the compiled
+// function the game is in, every 2 ms, from the render core.
+void aot_sampler_main(void *)
+{
+    for (;;) {
+        svcSleepThread(2000000);
+        game::aot_sample();
+    }
+}
+void start_aot_sampler()
+{
+    s32 prio = 0x30;
+    svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
+    const Thread t = threadCreate(aot_sampler_main, nullptr, 4 * 1024, prio - 3, g_render_core >= 0 ? g_render_core : 2, false);
+    status("aot sampler: %s", t ? "every 2 ms" : "not started");
+}
+#endif
+
 void start_sampler()
 {
     if (g_sampler)
@@ -2786,6 +2805,9 @@ int main()
     game::sprite_trace_set_wrap([](FILE *f, char *buf, size_t n) { return app::writer_wrap(f, buf, n, "sprites.trc"); });
     aptHook(&g_apt_cookie, apt_hook, nullptr);
     start_input_sampler();
+#ifdef AOT_SAMPLE_ON
+    start_aot_sampler();
+#endif
     rt::RunResult r = rt::run_exe(std::move(exe), opt);
     stop_input_sampler();
     join_io_thread();
