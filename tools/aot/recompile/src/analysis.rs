@@ -355,7 +355,7 @@ impl<'p, 'a> Analysis<'p, 'a> {
                 regs[ECX as usize] = Some(Val::Clob);
                 regs[EDX as usize] = Some(Val::Clob);
             }
-            if matches!(intr, Some("fsin") | Some("fcos")) {
+            if intr.is_some_and(|n| crate::program::FMATH.contains(&n)) {
                 regs[EAX as usize] = Some(Val::Clob);
                 regs[ECX as usize] = Some(Val::Clob);
                 regs[EDX as usize] = Some(Val::Clob);

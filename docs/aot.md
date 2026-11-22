@@ -710,6 +710,41 @@ The dynarec isn't linked into such a build. It is in WinVita's library with the 
 
 Recommendations on the open points: fibers rather than host threads (one runs at a time anyway, and a switch costs nothing in the kernel); 128 KiB of host stack a thread on the 3DS (the lane's scripts use 10 KiB at most; four threads in play); the placeholder-result contract kept, so no shim changes; a lane run compared with another run of the same build, since switch points move.
 
+**The app without Box86.** The 3DS app builds either way (`tests/cpu/ctr/Makefile`'s `CPU=aot`, into `build/cpu/ctr-aot`): `-DD2RT_CPU_AOT`, the generated C once, `rt_cpu_aot_only.cpp` in place of the backend, and of WinVita's library its memory shim and its x87 helpers alone. The executable-memory pool Box86 took for its code (14 MiB) is one page in such a build. `scripts/docker.sh package-cia <game-dir>` makes a CIA for each backend, the backend in its name (`3ds-d2-x86-<version>-<id>.cia`, `3ds-d2-aot-...`); `D2_CIA_CPU=x86` or `aot` makes that one alone, and with no game directory the x86 one alone (the recompiler reads Game.exe). They are the same title, one installed in place of the other.
+
+The AOT app's static size is 28 MiB (24.1 text, 2.3 rodata, 1.6 bss) against the Box86 build's 33 MiB (18.7 of it bss).
+
+**In Azahar** (`3ds-d2-aot-0.5.0-dev-f13a6f22e21a-aot7110b8.cia`, the tree of this commit, the lane's town-walk with its times moved 45 s later): the menus, a new game, "ingame reached" and the script's seven moves in the Rogue Encampment, with no stop. The state line has `jit=0 meta=0 jmptbl=0KiB`; the last three windows are 250 frames each (25 a second); the floor queue is on with its worker (`differed 0`). No screenshot: the shell that ran it has no screen-recording right. Azahar on a Mac says nothing of the console's speed, and the frame counter stood still about 50 s as the world loaded, not looked at yet. What it took, in the order the runs stopped:
+
+- **What a native changes at run time is a row, or the compiled code is another function's.** With no Box86 a function whose bytes differ from what was compiled has nothing to run it, and the dispatcher stops there ("the code here isn't what was compiled"). Three more groups in the table (39 sites, 691 bytes):
+  - `cinematics`: `6c7cc0`'s loop calls VideoOpen and VideoStep; with video off the natives answer "no video" on the same bytes.
+  - `sprite_cache_floor`: the floor is a data dword at `6cb644` a stub at `6cb620` reads; 0 keeps the game's `0x01800000`.
+  - `floor_queue`: the two calls in `476bc0`; with the queue off the natives go on to the calls' own targets and arm nothing.
+- **A function start inside an applied site** is dropped: the old stubs' addresses in `6c7cc0` were starts, and compiled as functions of the bytes no longer there.
+- **The C runtime's x87 helpers** are intrinsics as `fsin` and `fcos` were: `fsqrt` (`6879c0`), `flog` (`687ac0`), `flog10` (`687ea0`), `fpow` (`687c10`).
+- **A switch with no bound check before it** (the compiler proved the index in range) takes its table's size from the entries: those that point into the function, up to the table's own address. The byte-table form is the same.
+- **The renderer's video slots** (`+0x34`, `+0x3c`: no arguments, `+0x38`: one) have their pops.
+- **A native's hand-back** (`aot_resume`, `aot_direct`) and `aot_compiled` take a `CpuAot` build as compiled code on, whatever `D2_AOT` says: the app's AOT mode is off by default, and the hand-back then went to an address with no function (`5ff2a7`).
+- **`cpu_aot_stop` on the 3DS** ends through `abort()`, the app's own fatal exit with its report; `_Exit` there was an undefined instruction to Azahar.
+
+**Against the x86 CIA of the same tree** (`3ds-d2-x86-0.5.0-dev-f13a6f22e21a.cia`, the same script in Azahar: the cinematics play, the floor queue is on, the walk reaches its end):
+
+| | x86 (Box86) | AOT |
+|---|---|---|
+| Frames in town, a 10 s window | 250 | 250 |
+| From the game's start to the town | about 15 s | about 215 s |
+| Read from the archives in the first 10 s | 7,905 KiB | 3,123 KiB |
+| `free` at 80 s (the menus) | 48,344 KiB | 36,996 KiB |
+| `free` in town | 21,649 KiB | 10,385 KiB |
+| `jit` / `meta` / `jmptbl` in town | 8,192 / 2,112 / 12,032 KiB | 0 / 0 / 0 |
+| `host` in town | 93,047 KiB | 81,300 KiB |
+
+Two things are wrong in the AOT column and not explained yet: loading is several times slower (the town itself holds its 25 frames), and the guest has about 11 MiB less free, though the host uses 12 MiB less: the layout still sets Box86's memory aside. Both are next.
+
+**The Box86 lanes at this tree** (the check with `D2_AOT_STALE=1 M4_LAYOUT=ctr`): 0 differ (town-walk 10.7M calls, fight 12.7M, Act II 46.6M), 13,921 functions hooked of 14,302 compiled, 201 refused, 39 changed since compiled. Profiled production with `D2_AOT_STRICT=1`: Box86 ran 3,119,820 x86 bytes against 804,972, and compiled code left to it 4,059 times in town-walk (3,164), 5,339 in the fight (3,194), 8,063 in Act II (5,019). The whole of the rise is FloorQueueArm (896, 2,146 and 3,045 times): `476bc0` is compiled now that its two calls are rows, and the native hands back to the floor's draw through Box86 once a frame, after which Box86 runs the frame's callers on (`451bb0`, `44efa0`). `457300` is off the list (the floor's row). On `CpuAot` that hand-back is the dispatcher's.
+
+**The lane's fault report.** A `CpuAot` build on the lane names a segmentation fault: the host address and the guest's, pc, lr and r0 to r3, the last compiled function the dispatcher entered, the last trap and the last hand-back. (The first use: the floor queue armed while off, its native writing a ring never allocated.)
+
 ### The natives' site table (#138)
 
 The natives change the game's code at install time. They do it in their own `install_*` code: about 80 writes across `d2_native`, `d2_memory`, `storm_reads`, `sprite_trace`, `dcc_native`, `frame_reads`, `automap` and `cinematics`. The recompiler can't see those writes. So a function a native changed runs under Box86 at run time (47 functions in production, `60bff0`'s DccDecode loop among them), and compiled callers reach it through `aot_call_stale`. After the steps above, that is most of what Box86 still runs.
@@ -743,7 +778,7 @@ Done so far, in `src/game/native_sites_table.h`:
 - **Stubs in slack:** the recompiler takes an applied site's bytes as code even past `.text`'s virtual size, where the stubs are. Otherwise a function that jumps to one is refused ("code outside .text"), as `409ab0` and `40a080` were in the first run of these rows.
 - **What the run chooses** (the frames' granules, the pools' block size) goes in data dwords the stubs read, so the bytes written are the same on every run. The pool-release stub saves `eax`, `ecx` and `edx` itself, since the recompiler doesn't compile `pushad`.
 - **A call into a site:** the decode timer's stub calls its own tail, which runs `5ff6e0`'s first bytes and jumps to the rest. The recompiler compiles each such call's target (a direct call in an applied site to another applied site) as a function of its own (`6cb774`), so the call is compiled code to compiled code.
-- **Not yet a row:** the sprite cache's floor (it needs a new stub, and its slack is taken). `sprite_trace` (its natives keep 6001f0 and 5ff4a0 compiled another way), `cinematics`, the storm read thread's rate (an immediate the run chooses) and `d2_native`'s entry hooks.
+- **Not yet a row:** `sprite_trace` (its natives keep 6001f0 and 5ff4a0 compiled another way), the storm read thread's rate (an immediate the run chooses) and `d2_native`'s entry hooks. (The sprite cache's floor, `cinematics` and the floor queue's calls are rows since the app ran without Box86.)
 - **Storm's flag:** the read thread's flag is in scratch memory the run allocates, since a write to a page of code throws its translations away. Its stubs had the flag's address in their bytes. They now read it from the data dword at `6cb7dc`, in the slack (`mov ebx, [P]; mov byte [ebx], 1`, and with `eax` saved around it in the stub that clears it), so the bytes are the same on every run.
 - **`automap`, `storm_priority`, `storm_direct` and `frame_reads`, with `M4_LAYOUT=ctr`:** 34 sites, 617 bytes. The check: 0 differ (town-walk 13.1M calls, fight 111.8M, Act II 47.7M). `41a550`, `41aad0`, `456ee0` and `45a860` are off the changed list (40 functions, against 44). Profiled production: Box86 ran 13,378,639 x86 bytes against 19,771,009 (0.06% of its own lane's), with the state lines the same on the three scripts. The two lanes ran side by side (`AOT_OUT`, `AOT_BIN` in `scripts/docker.sh`: a run's folders of its own, with the binary another built), about 250 MiB an emulator.
 - **At run time:** `apply_sites` (`native_sites.cpp`) checks every row's game bytes, then writes them with the native's real entry. The code hash reads each site as compiled, so a function changed only by applied rows still matches its compiled code.

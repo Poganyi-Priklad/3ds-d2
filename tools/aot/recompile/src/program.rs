@@ -53,6 +53,10 @@ pub fn natives() -> HashMap<u32, Native> {
     m
 }
 
+/// The C runtime's x87 math entries compiled as libm's (st0 in, st0 out; fpow
+/// takes st1 and st0).
+pub const FMATH: [&str; 6] = ["fsin", "fcos", "fsqrt", "flog", "flog10", "fpow"];
+
 pub fn intrinsics() -> HashMap<u32, &'static str> {
     let mut m = HashMap::new();
     m.insert(0x00681ef0, "memset");
@@ -64,6 +68,13 @@ pub fn intrinsics() -> HashMap<u32, &'static str> {
     m.insert(0x00682990, "strrchr");   // repne scasb twice, the second with the direction flag set
     m.insert(0x00688590, "fsin");
     m.insert(0x006886c0, "fcos");
+    // ... and its square root, logarithms and power, the same way (6879dd,
+    // 687b18, 687ef8, 687c6d refused). A build that reports no SSE2 (the
+    // 3DS's) takes these x87 paths; the lane's takes the SSE2 ones.
+    m.insert(0x006879c0, "fsqrt");
+    m.insert(0x00687ac0, "flog");
+    m.insert(0x00687ea0, "flog10");
+    m.insert(0x00687c10, "fpow");   // st1 to the power st0, popped
     m.insert(0x006831b0, "alloca_probe");
     // The same with the block's address on 16 bytes: eax rounded up by what
     // the caller's esp less eax leaves over, then alloca_probe (a tail call).
@@ -400,6 +411,14 @@ impl<'a> Program<'a> {
                 if m.base == 0 && m.index == 0 && m.disp == RENDERER && i.mnemonic == "mov" && k == 1 && i.ops[0].is_reg() {
                     table_reg = Some(i.ops[0].reg());
                 } else if table_reg.is_some_and(|r| m.base == r) && m.index == 0 && (0..0x400).contains(&m.disp) && m.disp % 4 == 0 {
+                    // The three video slots hold cinematics.cpp's play loop
+                    // and two natives when it is installed, with the game's
+                    // own pops ("return 0", "ret 4", "return 0").
+                    match m.disp {
+                        0x34 | 0x3c => return Some(0),
+                        0x38 => return Some(4),
+                        _ => {}
+                    }
                     let mut b = [0u8; 4];
                     for (j, x) in b.iter_mut().enumerate() {
                         *x = self.img.u8(GDI_TABLE + m.disp as u32 + j as u32);

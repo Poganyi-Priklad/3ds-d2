@@ -15,7 +15,7 @@
 #   scripts/docker.sh test aot <game-dir> [<save-dir>]   every AOT-compiled function checked against Box86 on the lane's
 #                                        town walk and fight, and with an Act I save (dist/save/BeforeCh1End/save) Act II
 #   scripts/docker.sh package           release build -> dist/<build-id>/ with manifest
-#   scripts/docker.sh package-cia [<game-dir>]   the hardware build: dist/cia/3ds-d2-<version>-<build-id>.cia (~2 MB),
+#   scripts/docker.sh package-cia [<game-dir>]   the hardware builds, one a CPU backend (D2_CIA_CPU=x86|aot for one): dist/cia/3ds-d2-x86-<version>-<build-id>.cia (~2 MB) and 3ds-d2-aot-...,
 #                                             reading the game files from sdmc:/3ds/3ds-d2/game/; with
 #                                             <game-dir> (or D2_GAME_DIR) its icon, banner and tune are the game's
 #   scripts/docker.sh package-cia --slim <game-dir>   ... with your 1.14d files inside (no video/music/speech)
@@ -449,6 +449,27 @@ package-cia)   # [<game-dir> | --slim|--full <game-dir>]: the game app (+ the us
     ensure_image ctrtools "$CTRTOOLS_IMAGE"
     saved_extra=("${RUN_EXTRA[@]}"); RUN_EXTRA=()
     run_in "$HOSTTEST_IMAGE" make -C tests/cpu VARIANT=armv6 lib >/dev/null     # the patched backend tree
+    # One CIA a CPU backend, the backend in its name (issue #138): 3ds-d2-x86-... with Box86, 3ds-d2-aot-...
+    # with CpuAot, the AOT code alone and no Box86 in it (it needs <game-dir>: the recompiler reads its
+    # Game.exe). D2_CIA_CPU=x86 or aot builds that one alone; both is the default. They install as the
+    # same title, one in place of the other.
+    cia_cpus="${D2_CIA_CPU:-both}"
+    case "$cia_cpus" in both) cia_cpus="x86 aot" ;; x86|aot) ;; *) die "D2_CIA_CPU is x86, aot or both" ;; esac
+    if [ -z "$art" ] && [ "$cia_cpus" != x86 ]; then
+        [ "${D2_CIA_CPU:-both}" = aot ] && die "D2_CIA_CPU=aot package-cia <game-dir>: the recompiler reads its Game.exe"
+        echo "docker.sh: no <game-dir>, so no 3ds-d2-aot CIA (the recompiler reads its Game.exe); the x86 one alone"
+        cia_cpus=x86
+    fi
+    aot_build_asked="${D2_AOT_BUILD:-}"; aot_set_asked="${D2_AOT_SET:-}"
+    for cia_cpu in $cia_cpus; do
+    RUN_EXTRA=(); AOT_MAKE=()
+    ctr_out=build/cpu/ctr; ctr_cpu=()
+    D2_AOT_BUILD="$aot_build_asked"; D2_AOT_SET="$aot_set_asked"
+    if [ "$cia_cpu" = aot ]; then   # the whole list compiled: all of the game's code is the AOT's
+        ctr_out=build/cpu/ctr-aot; ctr_cpu=(CPU=aot)
+        [ "$aot_build_asked" = keep ] || D2_AOT_BUILD=1   # keep: the C the last run wrote, if it was the whole list's
+        D2_AOT_SET=whole
+    fi
     if [ "${D2_AOT_BUILD:-}" = 1 ] || [ "${D2_AOT_BUILD:-}" = keep ]; then   # the AOT spike (issue #113): needs the user's Game.exe (keep: the C the last run wrote)
         [ -n "$art" ] || die "D2_AOT_BUILD=$D2_AOT_BUILD package-cia <game-dir>: the recompiler reads its Game.exe"
         aot_prepare "$art"
@@ -463,18 +484,19 @@ package-cia)   # [<game-dir> | --slim|--full <game-dir>]: the game app (+ the us
     # The build ID covers the AOT step: the recompiler's and its arguments'
     # hash, never Game.exe's.
     [ ${#AOT_MAKE[@]} -gt 0 ] && bid="$bid-aot$(cat "$ROOT"/tools/aot/recompile/Cargo.lock "$ROOT"/tools/aot/recompile/src/*.rs "$ROOT"/src/game/native_sites_table.h "$(aot_args_file)" | sha256sum | cut -c1-6)"
-    report_vars=(BUILD_ID="$bid" D2_VERSION="$version" ${AOT_MAKE[@]+"${AOT_MAKE[@]}"})
+    report_vars=(BUILD_ID="$bid" D2_VERSION="$version" ${AOT_MAKE[@]+"${AOT_MAKE[@]}"} ${ctr_cpu[@]+"${ctr_cpu[@]}"})
     [ -n "${D2_REPORT_DSN+x}" ] && report_vars+=(D2_REPORT_DSN="$D2_REPORT_DSN")
     # The AOT parts first, AOT_JOBS at a time (2; issue #135: at -j8 cc1 ran out of Docker's 8 GB).
     [ ${#AOT_MAKE[@]} -gt 0 ] && run_in "$TOOLCHAIN_IMAGE" make -s -j"${AOT_JOBS:-2}" -C tests/cpu/ctr "${report_vars[@]}" aot-objs
-    run_in "$TOOLCHAIN_IMAGE" make -s -j8 -C tests/cpu/ctr "${report_vars[@]}" ../../../build/cpu/ctr/3ds-d2-game-cia.elf ../../../build/cpu/ctr/tls.bin
-    RUN_EXTRA=("${saved_extra[@]}" -e "D2_VERSION=$version" -e "D2_BUILD_ID=$bid")   # the CIA's name
-    if [ -n "$art" ]; then   # the icon, banner model and tune (packaging/cia/game_art.py)
+    run_in "$TOOLCHAIN_IMAGE" make -s -j8 -C tests/cpu/ctr "${report_vars[@]}" "../../../$ctr_out/3ds-d2-game-cia.elf" "../../../$ctr_out/tls.bin"
+    RUN_EXTRA=("${saved_extra[@]}" -e "D2_VERSION=$version" -e "D2_BUILD_ID=$bid" -e "D2_CIA_CPU=$cia_cpu" -e "D2_CIA_ELF_DIR=$ctr_out")   # the CIA's name and code
+    if [ -n "$art" ] && [ ! -d "$ROOT/build/cia/game-art" ]; then   # the icon, banner model and tune (packaging/cia/game_art.py), once
         ensure_image banner "$BANNER_IMAGE"
         mkdir -p "$ROOT/build/cia/game-art"
         run_in "$BANNER_IMAGE" python3 -I packaging/cia/game_art.py build/cia/art-src build/cia/game-art /opt/pycgfx
     fi
     run_in "$CTRTOOLS_IMAGE" sh scripts/package-cia.sh
+    done
     ;;
 game-3dsx)   # the game app as a .3dsx for Azahar (scripts/run-game-azahar.sh): build/cpu/ctr/3ds-d2-game.3dsx
     ensure_image hosttest "$HOSTTEST_IMAGE"

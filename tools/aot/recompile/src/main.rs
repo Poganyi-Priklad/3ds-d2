@@ -172,6 +172,11 @@ fn main() {
     let mut starts = driver::load_starts(&a.functions);
     let site_calls = img.site_call_targets();
     starts.extend(site_calls.iter().copied());
+    // An address inside an applied site is no function's entry any more
+    // (issue #138: cinematics' play loop goes over the GDI renderer's three
+    // video stubs; 6c7cd0 and 6c7ce0, still listed, cut it at its second call).
+    let within_site = |v: u32| img.sites.iter().any(|&(_, s, n)| s < v && v < s + n as u32) && !site_calls.contains(&v);
+    starts.retain(|v| !within_site(*v));
     if a.census {
         census::census(&img, &starts, &a.functions, &a.out, &a.hot, &modes(&a.modes), callouts);
         return;
@@ -346,6 +351,7 @@ fn main() {
             }
         }
         println!("aot: {} more from the immediates of those found", more);
+        extra.retain(|v| !within_site(*v));
     }
     let intr = intrinsics();
     let nat = natives();

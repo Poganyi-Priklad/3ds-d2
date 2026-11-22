@@ -766,8 +766,42 @@ impl Func {
             }
             k -= 1;
         }
-        let (Some(bound), Some(default)) = (bound, default) else {
-            return Err(Refused(format!("a switch at {:08x} the guard rule doesn't bound", va)));
+        // No guard at all (issue #138: 6bd780's sub ebx, 1; jmp [ebx*4 + table],
+        // its index from the game's data): the table's length is its entries
+        // that point into this function's code before it, and an index past
+        // them, which the game's own code would jump into the bytes after
+        // the table with, goes to the first.
+        let (bound, default) = match (bound, default) {
+            (Some(b), Some(d)) => (b, d),
+            _ if table > self.entry => {
+                let mut n = 0u32;
+                while n < 512 {
+                    let t = img.u32(table.wrapping_add(4 * n));
+                    if t < self.entry || t >= table {
+                        break;
+                    }
+                    n += 1;
+                }
+                if n < 2 {
+                    return Err(Refused(format!("a switch at {:08x} the guard rule doesn't bound", va)));
+                }
+                match bytes_table {
+                    None => (n as i64 - 1, img.u32(table) as i64),
+                    // Through a byte table too (6bdbdd): its bytes while they
+                    // are entries of the table found.
+                    Some(bt) => {
+                        let mut b = 0u32;
+                        while b < 256 && (img.u8(bt.wrapping_add(b)) as u32) < n {
+                            b += 1;
+                        }
+                        if b < 2 {
+                            return Err(Refused(format!("a switch at {:08x} the guard rule doesn't bound", va)));
+                        }
+                        (b as i64 - 1, img.u32(table) as i64)
+                    }
+                }
+            }
+            _ => return Err(Refused(format!("a switch at {:08x} the guard rule doesn't bound", va))),
         };
         if bound > 512 {
             return Err(Refused(format!("a switch at {:08x} the guard rule doesn't bound", va)));

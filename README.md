@@ -69,7 +69,7 @@ If you set up your console with the 3ds.hacks.guide, you may have done this alre
 
 ### 3. Install the app
 
-Build the CIA as described under [Building the CIA](#building-the-cia), then install `3ds-d2-<version>-<build-id>.cia` with FBI. Either copy it to the SD card and pick it in FBI under *SD*, or use FBI's *Remote Install*. The HOME menu then shows a **3ds-d2** icon (title ID `000400000D2D3D00`).
+Build the CIA as described under [Building the CIA](#building-the-cia), then install `3ds-d2-x86-<version>-<build-id>.cia` with FBI. Either copy it to the SD card and pick it in FBI under *SD*, or use FBI's *Remote Install*. The HOME menu then shows a **3ds-d2** icon (title ID `000400000D2D3D00`).
 
 The CIA holds only the app, about 2 MB. A new version is a quick reinstall over the old one, and the game files on the SD card stay where they are.
 
@@ -183,15 +183,15 @@ Everything builds inside Docker containers with a pinned toolchain (devkitARM, l
    On the first run this also builds the CIA tools image. It then compiles the CPU backend with this project's patches and the 3DS app, and packs the CIA. The last lines show the result:
 
    ```
-   cia: 3ds-d2-<version>-<build-id>.cia
+   cia: 3ds-d2-x86-<version>-<build-id>.cia
    version: 0.5.0
    sha256: ...
    ```
 
 The output goes to `dist/cia/`:
-- `3ds-d2-<version>-<build-id>.cia`: the app to install (step 3 above).
-- `3ds-d2-<version>-<build-id>.elf`: the same code with debug symbols, for reading crash dumps (`tools/luma_dump.py`).
-- `3ds-d2-<version>-<build-id>.cia.txt`: version, size and SHA-256. To check that a copy on the SD card is intact, compare its SHA-256 with this file.
+- `3ds-d2-x86-<version>-<build-id>.cia`: the app to install (step 3 above). With a game directory a second one, `3ds-d2-aot-...`, is built too: the game's code compiled ahead of time and no Box86 in it ([docs/aot.md](docs/aot.md), experimental); `D2_CIA_CPU=x86` or `aot` builds one alone.
+- `3ds-d2-x86-<version>-<build-id>.elf`: the same code with debug symbols, for reading crash dumps (`tools/luma_dump.py`).
+- `3ds-d2-x86-<version>-<build-id>.cia.txt`: version, size and SHA-256. To check that a copy on the SD card is intact, compare its SHA-256 with this file.
 
 The build ID is a hash of everything that goes into the CIA, so the same sources always produce the same name, and any change gives a new one. Builds run without network access, and the game files never enter an image.
 

@@ -328,7 +328,7 @@ impl<'p, 'a> Emitter<'p, 'a> {
             Some(v) => format!("uint8_t *const M = aot_mem; const uint32_t esp0 = esp + 0x{:x}u, ra0 = LD32(esp0);", (v[0].1 as i32).wrapping_neg() as u32),
             None => "uint8_t *const M = aot_mem; const uint32_t esp0 = esp, ra0 = LD32(esp);".to_string(),
         });
-        let fmath = f.calls.values().any(|t| t.direct().is_some_and(|d| matches!(self.p.intrinsics.get(&d), Some(&"fsin") | Some(&"fcos"))));
+        let fmath = f.calls.values().any(|t| t.direct().is_some_and(|d| self.p.intrinsics.get(&d).is_some_and(|n| crate::program::FMATH.contains(n))));
         if fmath || f.insns.values().any(|i| x87_op(i).is_some()) {
             decl.push("AotFpu *const F = aot_fpu;".to_string());
         }
@@ -1295,8 +1295,13 @@ esp = f + 4u; }}",
                     + "{ uint32_t s = LD32(esp + 4u), n = 0; uint8_t ch = (uint8_t)LD32(esp + 8u); while (M[s + n]) n++; \
 eax = 0; for (uint32_t k = n + 1u; k-- > 0u;) if (M[s + k] == ch) { eax = s + k; break; } esp += 4u; }");
             }
-            if name == "fsin" || name == "fcos" {
-                // st0's sine or cosine, in st0; eax, ecx and edx are the callee's scratch.
+            if name == "fpow" {
+                // st1 to the power st0, the two for one; eax, ecx and edx are the callee's scratch.
+                return Ok(push
+                    + "{ double y = aot_fget(F, 0), x = aot_fget(F, 1); aot_fpop(F); aot_fset(F, 0, __builtin_pow(x, y)); esp += 4u; }");
+            }
+            if crate::program::FMATH.contains(&name) {
+                // st0's sine, cosine, square root or logarithm, in st0; eax, ecx and edx are the callee's scratch.
                 return Ok(push + &format!("{{ aot_fset(F, 0, __builtin_{}(aot_fget(F, 0))); esp += 4u; }}", &name[1..]));
             }
             if name == "alloca_probe_16" {

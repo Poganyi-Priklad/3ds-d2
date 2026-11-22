@@ -94,8 +94,16 @@ u32 __ctru_linear_heap_size = 2u << 20;
 // pool refuses new chunks without trying the heap (issue #90), and the JIT
 // evicts old code (#23: exact at 6 MiB of the fight's 7.2 on the lane).
 // Box86 takes it in 2 MiB chunks, so its size is a multiple of 2 MiB.
+#ifdef D2RT_CPU_AOT
+// A build with CpuAot (issue #138) has no translated code to keep: a page
+// stands for the pool, which the memory services (mman_ctr.c) name, and its
+// 14 MiB are the game's.
+alignas(0x1000) uint8_t dyn86_ctr_jitpool[0x1000];
+extern const uint32_t dyn86_ctr_jitpool_size = 0x1000;
+#else
 alignas(0x1000) uint8_t dyn86_ctr_jitpool[14u << 20];
 extern const uint32_t dyn86_ctr_jitpool_size = 14u << 20;
+#endif
 extern uint32_t dyn86_ctr_jitpool_refused;   // mman_ctr.c: chunks refused, the pool full
 // The tile prefetch's store (issue #89, rt::set_prefetch_arena), here for
 // the same reason: out of the heap, whose last MiB the JIT's records and

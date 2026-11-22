@@ -20,6 +20,8 @@ constexpr uint32_t kCtrSpriteCacheFloor = 16u << 20;
 // Sets the sprite cache's floor to `bytes` (the game's own is 24 MiB). With
 // the 64 MiB of RAM the 3DS app reports, the game sizes its cache at that
 // floor. Returns false, changing nothing, on a different Game.exe.
+// bytes 0: the game's own floor (the code is changed all the same: the AOT
+// code is compiled with it, native_sites_table.h).
 bool set_sprite_cache_floor(d2rt::Cpu &c, uint32_t bytes);
 
 // The sprite cache as the game set it up (all 0 before that).

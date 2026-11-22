@@ -315,7 +315,11 @@ void cpu_aot_stop(const char *what, uint32_t at)
     rt::logf("cpu_aot: STOP at %08x: %s", at, what);
     std::fprintf(stderr, "[rt] RESULT exited=0 timed_out=0 code=86 cpu_aot stopped at %08x: %s\n", at, what);
     std::fflush(stderr);
+#ifdef __3DS__
+    std::abort();   // the app's own end for a fatal error: its report and its screen
+#else
     std::_Exit(86);
+#endif
 }
 
 }  // namespace d2rt

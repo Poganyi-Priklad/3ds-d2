@@ -22,6 +22,7 @@ size_t d2rt_box86_dynarec_kb(void) { return 0; }
 size_t d2rt_box86_dynarec_used_kb(void) { return 0; }
 size_t d2rt_box86_jmptbl_kb(void) { return 0; }
 uint32_t dyn86_jit_allocfail = 0;
+unsigned d2rt_meta_reserve_refusals = 0;   // its blocks' records refused for the reserve (the app's count)
 
 // No translated block to name at a fault, no block profile.
 int dyn86_block_of_native(uintptr_t, uint32_t *, uint32_t *) { return 0; }

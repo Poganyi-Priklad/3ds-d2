@@ -44,6 +44,7 @@ void dyn86_mi_set_span(uint32_t span);
 // And its translation-time intrinsics: a direct native call where a block
 // starts at a registered address, no trap, no bridge.
 #include "dyn86_intrin.h"
+#include "game/native_sites.h"
 
 namespace game {
 namespace {
@@ -2287,7 +2288,7 @@ constexpr uint32_t kAfterFloorCall = 0x00476ce1, kAfterFloorFn = 0x00473c00;
 
 uint32_t floor_queue_arm(Cpu &c)
 {
-    g_floor_armed = g_floor_on;
+    g_floor_armed = g_floor_on && g_floor_mode;   // off: the rows' calls alone, no queue
     g_floor_t0 = wx86_now_us();
     resume_original(c, kFloorFn, c.reg(R_ESP), 0);
     return c.reg(R_EAX);
@@ -2296,6 +2297,10 @@ uint32_t floor_queue_arm(Cpu &c)
 uint32_t floor_queue_end(Cpu &c)
 {
     g_floor_armed = false;
+    if (!g_floor_mode) {   // the queue is off: the call's own target alone
+        resume_original(c, kAfterFloorFn, c.reg(R_ESP), 0);
+        return c.reg(R_EAX);
+    }
     const uint64_t t1 = wx86_now_us();
     floor_queue_flush();
     const uint64_t t2 = wx86_now_us();
@@ -2340,31 +2345,19 @@ uint32_t guard_entry(Cpu &c, uint32_t k)
 }
 
 // A call at `at` (e8 rel32) to `to`, sent to `native` instead.
-bool redirect_call(Cpu &c, uint32_t at, uint32_t to, uint32_t native)
-{
-    uint8_t ins[5];
-    if (!native || !c.read(at, ins, 5) || ins[0] != 0xe8)
-        return false;
-    int32_t rel;
-    std::memcpy(&rel, ins + 1, 4);
-    if (at + 5 + (uint32_t)rel != to)
-        return false;
-    rel = (int32_t)(native - (at + 5));
-    std::memcpy(ins + 1, &rel, 4);
-    c.write(at, ins, 5);
-    c.invalidate_code(at, 5);
-    return true;
-}
-
 bool install_floor_queue(Cpu &c, int mode)
 {
-    if (!mode)
-        return false;
-    if (!redirect_call(c, kFloorCall, kFloorFn, rt::native_entry("FloorQueueArm", 0, floor_queue_arm)) ||
-        !redirect_call(c, kAfterFloorCall, kAfterFloorFn, rt::native_entry("FloorQueueEnd", 0, floor_queue_end))) {
+    // The two calls are native_sites_table.h's floor_queue rows, applied
+    // whatever the mode (issue #138: the AOT code is compiled with them); off,
+    // the natives go on to the calls' own targets and do nothing else.
+    const uint32_t arm = rt::native_entry("FloorQueueArm", 0, floor_queue_arm);
+    const uint32_t end = rt::native_entry("FloorQueueEnd", 0, floor_queue_end);
+    if (!arm || !end || !apply_sites(c, "floor_queue", {{"FloorQueueArm", arm}, {"FloorQueueEnd", end}})) {
         rt::logf("floor queue: the world's draw differs, not installed");
         return false;
     }
+    if (!mode)
+        return false;
     g_floor_mode = mode;
     g_floor_ring = new FloorJob[kFloorJobs];
     g_floor_worker = (mode == 1 || mode == 3) && g_floor_host.start && g_floor_host.start(floor_worker_main);
