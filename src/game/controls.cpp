@@ -752,11 +752,11 @@ void Controls::update(const Pad &pad, uint64_t now_ms)
             bound_[i] = 0;   // a game menu's submenu: B is its "Previous", one menu back
             game_menu_click(game_menu_.previous, now_ms);
         } else if ((pressed & b.button) && b.button == kB && !r_layer && !zr_layer && menu_world_ && in_game_ &&
-                   ((ui_ & (kUiGameMenu | kUiConfigure)) || gold_on_)) {
-            // The game menu's top (Start) and Configure Controls, and the
-            // gold dialog: B is Escape, one menu back or the dialog closed.
-            // With any other panel open B stays the right button (to use or
-            // equip an item); Start closes panels.
+                   (ui_ & (kUiGameMenu | kUiConfigure))) {
+            // The game menu's top (Start) and Configure Controls: B is
+            // Escape, one menu back. Everywhere else in the game B stays the
+            // right button (to use or equip an item), also in the gold
+            // dialog (its Cancel is a cell); Start closes panels.
             bound_[i] = VK_ESCAPE;
             key(bound_[i], true);
         } else if ((pressed & b.button) && b.button == kB && !r_layer && !zr_layer && menu_world_ && !in_game_) {

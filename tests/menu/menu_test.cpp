@@ -3,8 +3,8 @@
 // free half with an item on the cursor and back, an NPC's menu up and down
 // only; the 640x480 windows and the NPC menu's options; the gold dialog;
 // and the controls around it (src/game/controls.cpp): a slow tilt still
-// moves the cursor freely, B the right button with a panel open (Escape in
-// the game menu and the gold dialog), the D-pad a step in menus, the other
+// moves the cursor freely, B the right button in the game (Escape in the
+// game menu), the D-pad a step in menus, the other
 // buttons as before, and with one side panel open a held stick walks (the
 // auto-target's walk, on the free half). Made-up windows with the game's own
 // numbers (inventory.txt's rows as the lane read them) stand in for the game. Run through
@@ -1455,11 +1455,11 @@ static void test_controls_gold_dialog()
     c.update(pad_with(0, 156, 0), t += 16);
     c.update(pad_with(0), t += 16);
     CHECK(c.cursor_x() == 371 && c.cursor_y() == 271);
-    // B: Escape, the dialog closed (not the right button).
+    // B: the right button, not Escape (Cancel is a cell).
     c.update(pad_with(kB), t += 16);
-    CHECK(g_keys[0x1B] && !g_right);
+    CHECK(g_right && !g_keys[0x1B]);
     c.update(pad_with(0), t += 16);
-    CHECK(!g_keys[0x1B]);
+    CHECK(!g_right);
     // Closed: the D-pad is the belt again, and B the right button.
     menus.gold_on = false;
     menus.open = {inventory()};
