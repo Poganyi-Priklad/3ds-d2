@@ -61,7 +61,8 @@ down, left or right:
 | Circle pad slow tilt, panel or menu open | Moves the free cursor | Unchanged |
 | Circle pad held, one side panel open | Moves the free cursor | Held for `aim_panel_walk_ms` (280 ms): starts the auto-target's walk on the free half of the screen; a flick still moves between cells |
 | A or B with the cursor on the free half, one side panel open | Plain button | Aims as with no panel, only at targets on the free half, from the hero's real place on the screen |
-| B, panel or NPC menu open | Right mouse button | **Escape**: closes the panel or the NPC menu, goes one menu back |
+| B, panel or NPC menu open | Right mouse button | Unchanged: the right mouse button (Start closes panels) |
+| B, gold dialog open | Right mouse button | **Escape**: closes the dialog |
 | B, game submenu | Right mouse button | **Previous** (one menu back); in the top menu, Escape |
 | B, before the game (character select, class screen, difficulty, multiplayer screens) | Right mouse button | **Escape**: back to the screen before; on the main menu B does nothing |
 | D-pad, gold dialog open | Belt potions 1–4 | The amount: up/down +1/-1, right/left +100/-100, faster while held |
@@ -85,7 +86,7 @@ It reads the game's memory to know where things are and never writes it.
 | --- | --- |
 | `src/game/menu_nav.h`, `.cpp` | The rules, as pure geometry: which cell a flick goes to, between windows, round the edges, the scroll column; tested with made-up windows |
 | `src/game/d2_menus.h`, `.cpp` | Reads where the open windows and their cells are: `inventory.txt` and `belts.txt` rows, the NPC menu, the game menu's rows and lit row, D2Win's control list before the game (with the frame's pixels as a fallback for the NPC menu box) |
-| `src/game/controls.cpp` | Runs it: flicks to cells, B as Escape or Previous, the arrow keys in the game menu, the gold dialog's D-pad (it types the amount over the field: Backspaces, then the digits, as the on-screen keyboard does), one-panel walk dispatch (hold delay and free-half clip, then the auto-target's walk), plain clicks on the interface |
+| `src/game/controls.cpp` | Runs it: flicks to cells, B as Escape (the game menu, the gold dialog, before the game) or Previous, the arrow keys in the game menu, the gold dialog's D-pad (it types the amount over the field: Backspaces, then the digits, as the on-screen keyboard does), one-panel walk dispatch (hold delay and free-half clip, then the auto-target's walk), plain clicks on the interface |
 
 `game.log` gets `menu:` lines saying where each flick went.
 

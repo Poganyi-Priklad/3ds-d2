@@ -1,9 +1,9 @@
-# Menu navigation lane: src/game/menu_nav.cpp (a flick moves the cursor one
-# cell, round the edges, into the next window, the free half with an item)
-# and the controls around it (src/game/controls.cpp: flicks and slow tilts
-# in an open panel, B as Escape, the other buttons as before), against
-# made-up windows, under qemu's ARM11 MPCore model. Run through
-# `scripts/docker.sh test menu`.
+# Menu navigation lane: src/game/menu_nav.cpp (a flick moves the cursor to
+# the nearest cell that way, round to the far side, the free half with an
+# item) and the controls around it (src/game/controls.cpp: flicks and slow
+# tilts in an open panel, B as Escape in the game menu and the gold dialog,
+# the other buttons as before), against made-up windows, under qemu's ARM11
+# MPCore model. Run through `scripts/docker.sh test menu`.
 CXX     := arm-linux-gnueabi-g++
 QEMU    := qemu-arm -cpu arm11mpcore
 ROOT    := ../..

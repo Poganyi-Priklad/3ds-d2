@@ -719,8 +719,12 @@ void Controls::update(const Pad &pad, uint64_t now_ms)
             bound_[i] = 0;   // a game menu's submenu: B is its "Previous", one menu back
             game_menu_click(game_menu_.previous, now_ms);
         } else if ((pressed & b.button) && b.button == kB && !r_layer && !zr_layer && menu_world_ && in_game_ &&
-                   panel_open_) {
-            bound_[i] = VK_ESCAPE;   // menu navigation: B is the panel's back or close
+                   ((ui_ & (kUiGameMenu | kUiConfigure)) || gold_on_)) {
+            // The game menu's top (Start) and Configure Controls, and the
+            // gold dialog: B is Escape, one menu back or the dialog closed.
+            // With any other panel open B stays the right button (to use or
+            // equip an item); Start closes panels.
+            bound_[i] = VK_ESCAPE;
             key(bound_[i], true);
         } else if ((pressed & b.button) && b.button == kB && !r_layer && !zr_layer && menu_world_ && !in_game_) {
             // Out of the game (character select, the class screen, a

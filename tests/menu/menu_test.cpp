@@ -1,10 +1,10 @@
-// Menu navigation (src/game/menu_nav.h): a flick moves the cursor one cell,
-// round a window's edge in the same row or column, into the window next to
-// it, to the free half with an item on the cursor and back, an NPC's menu
-// up and down only; the 640x480 windows and the NPC menu's options; and the
-// controls around it (src/game/controls.cpp): a slow tilt still moves the
-// cursor freely, B is Escape with a panel open, the other buttons as
-// before, and with one side panel open a held stick walks (the auto-target's
+// Menu navigation (src/game/menu_nav.h): a flick moves the cursor to the
+// nearest cell that way in any open window, round to the far side, to the
+// free half with an item on the cursor and back, an NPC's menu up and down
+// only; the 640x480 windows and the NPC menu's options; the gold dialog;
+// and the controls around it (src/game/controls.cpp): a slow tilt still
+// moves the cursor freely, B the right button with a panel open (Escape in
+// the game menu and the gold dialog), the other buttons as before, and with one side panel open a held stick walks (the auto-target's
 // walk, on the free half). Made-up windows with the game's own numbers (inventory.txt's
 // rows as the lane read them) stand in for the game. Run through
 // `scripts/docker.sh test menu`.
@@ -1013,11 +1013,11 @@ static void test_controls()
         c.update(pad_with(0, 156 * (i < 60 ? i : 60) / 60, 0), t += 16);
     c.update(pad_with(0), t += 16);
     CHECK(menus.asked == asked && c.cursor_x() > x + 40 && c.cursor_y() == y && !g_left);
-    // B: Escape, not the right button.
+    // B: the right button (to use or equip an item), not Escape.
     c.update(pad_with(kB), t += 16);
-    CHECK(g_keys[VK_ESCAPE] && !g_right);
+    CHECK(g_right && !g_keys[VK_ESCAPE]);
     c.update(pad_with(0), t += 16);
-    CHECK(!g_keys[VK_ESCAPE]);
+    CHECK(!g_right && !g_keys[VK_ESCAPE]);
     // A: the left button, where the cursor is.
     const int cx = c.cursor_x();
     c.update(pad_with(kA), t += 16);
@@ -1387,7 +1387,12 @@ static void test_controls_gold_dialog()
     c.update(pad_with(0, 156, 0), t += 16);
     c.update(pad_with(0), t += 16);
     CHECK(c.cursor_x() == 371 && c.cursor_y() == 271);
-    // Closed: the D-pad is the belt again.
+    // B: Escape, the dialog closed (not the right button).
+    c.update(pad_with(kB), t += 16);
+    CHECK(g_keys[0x1B] && !g_right);
+    c.update(pad_with(0), t += 16);
+    CHECK(!g_keys[0x1B]);
+    // Closed: the D-pad is the belt again, and B the right button.
     menus.gold_on = false;
     menus.open = {inventory()};
     c.update(pad_with(0), t += 16);
@@ -1395,6 +1400,9 @@ static void test_controls_gold_dialog()
     CHECK(g_keys['1']);
     c.update(pad_with(0), t += 16);
     CHECK(!g_keys['1']);
+    c.update(pad_with(kB), t += 16);
+    CHECK(g_right && !g_keys[0x1B]);
+    c.update(pad_with(0), t += 16);
 }
 
 int main()
