@@ -27,7 +27,7 @@ struct Fiber {
     void *stack = nullptr;
     uint32_t entry = 0;
     bool started = false, done = false, stopped = false;
-    uint8_t fpu[416] = {};
+    alignas(8) uint8_t fpu[416] = {};   // AotFpu holds doubles
 };
 
 CpuAotDispatch g_dispatch = nullptr;
@@ -170,7 +170,7 @@ private:
     Fiber *cur_ = nullptr;
     ucontext_t sched_;
     bool code_changed_ = true;
-    uint8_t boot_fpu_[416] = {};
+    alignas(8) uint8_t boot_fpu_[416] = {};
 
 public:
     static CpuAot *g_self;

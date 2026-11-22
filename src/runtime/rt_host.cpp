@@ -663,6 +663,12 @@ Bridge &bridge() { return *g_br; }
 void set_bridge_for_tests(Bridge *b) { g_br = b; }
 uint32_t exe_base() { return g_exe_base; }
 
+// cpuid leaf 1's edx as the backend reports it (its default: FPU CMOV MMX FXSR
+// SSE SSE2; RunOptions::cpuid_edx sets both).
+constexpr uint32_t kCpuid1EdxDefault = (1u << 0) | (1u << 15) | (1u << 23) | (1u << 24) | (1u << 25) | (1u << 26);
+static uint32_t g_cpuid1_edx = kCpuid1EdxDefault;
+uint32_t cpuid1_edx() { return g_cpuid1_edx; }
+
 uint32_t current_teb()
 {
     if (ThreadScheduler *s = wx86_sched())
@@ -1586,6 +1592,7 @@ RunResult run_exe(std::vector<uint8_t> exe, const RunOptions &opt)
 
     if (g_opt.cpuid_edx)
         wx86_set_cpuid1_edx(g_opt.cpuid_edx);
+    g_cpuid1_edx = g_opt.cpuid_edx ? g_opt.cpuid_edx : kCpuid1EdxDefault;
     // D2_CPU=aot (the lane, issue #138): no Box86, the AOT recompiler's C on
     // a host stack a guest thread (rt_cpu_aot.h); what it can't run stops the
     // run with a report.

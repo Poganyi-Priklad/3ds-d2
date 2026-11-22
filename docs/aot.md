@@ -652,6 +652,17 @@ How `CpuAot` runs code (from reading `cpu.h`, `sched_cooperative.cpp` and `aot_c
 
 `CpuAot` then runs town-walk through the C runtime's thread-storage setup to 6869d0 (the aligned `_alloca`, refused: a tail call to the `alloca_probe` intrinsic). On the Box86 lanes, profiled production with `D2_AOT_STRICT=1`: left to Box86 3,248 times in town-walk against 4,978, 5,459 in the fight against 5,205, 6,959 in Act II against 7,014; Box86 ran 2,442,565 x86 bytes against 2,139,724. The fight's rise is 686b60 (564 nested runs: refused, `rcr`), which code compiled only now calls. The state lines' frames, files and heap are the same; reads and `va` move, as at `4c2f9fe`.
 
+**Through the C runtime's start** (the check on the Box86 lanes: 0 differ, town-walk 10.3M calls, fight 10.3M, Act II 47.2M; 14,106 functions compiled, 275 refused), stop by stop:
+
+- **6869d0, the aligned `_alloca`:** an intrinsic, `alloca_probe_16`: eax rounded up by what the caller's esp less eax leaves over 16, then `alloca_probe`. Its size isn't known to the analysis; the frame's own register finds the stack again.
+- **6837b9, an initializer in the C runtime's table at 0x6cc728:** the code pointers in the game's data are also taken right after a `ret` on any byte, outside every listed function's instructions. 917 functions from the data, against 799.
+- **69a860, which tells `cpuid` is there by flipping the flags' ID bit:** `pushfd` and `popfd` on a word of their own (`aot_eflags`), not the arithmetic flags, which nothing reads back from it; `cpuid` through `aot_cpuid`, which reports what the backend's `my_cpuid` does (a Pentium III, the runtime's feature bits: `rt::cpuid1_edx`).
+- **A bus error:** `CpuAot`'s x87 state a thread was a byte array, not aligned for its doubles; the first x87 code found it.
+- **686b60 (and 686c00, 684240), the 64-bit shifts and divide:** `rcr` by one through the carry of the `shr` before it (its own flags aren't modelled). On the Box86 lanes 686b60 was 564 nested runs in the fight.
+- **Also on the way:** `stmxcsr` (the value a thread starts with: no SSE state is kept); the C runtime's `strrchr` (682990: `repne scasb` twice, the second with the direction flag set) as an intrinsic; `repe` and `repne cmpsb` with a byte compare's flags (14 functions refused for reading them; with ecx 0 the flags read as an equal pair's, where the instruction leaves them as they were).
+
+`CpuAot` then stops at 40e850 (refused: `rdtsc`). On the Box86 lanes, profiled production with `D2_AOT_STRICT=1`: left to Box86 2,701 times in town-walk against 3,248, 4,850 in the fight against 5,459, 6,311 in Act II against 6,959; Box86 ran 2,441,893 x86 bytes against 2,442,565.
+
 Recommendations on the open points: fibers rather than host threads (one runs at a time anyway, and a switch costs nothing in the kernel); 256 KiB of host stack a thread at first, measured on the lane with a guard page and then cut (four threads in play); the placeholder-result contract kept, so no shim changes; a lane run compared with another run of the same build, since switch points move.
 
 ### The natives' site table (#138)

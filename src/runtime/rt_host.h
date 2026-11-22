@@ -378,6 +378,8 @@ void set_last_error(d2rt::Cpu &c, uint32_t err);
 // Calls guest code from inside a shim (window procedures, callbacks): builds the
 // frame below the caller's ESP, runs to the bridge sentinel, restores registers.
 uint32_t guest_call(d2rt::Cpu &c, uint32_t va, std::initializer_list<uint32_t> args);
+// cpuid leaf 1's edx, as the CPU backend reports it to the game.
+uint32_t cpuid1_edx();
 // AOT (issue #115): guest_call's callee as compiled code, in C, instead of a
 // nested run (8-10 us each on the lane): true when it ran, regs (eax..edi,
 // esp at the return address) in and out. Off: nullptr.

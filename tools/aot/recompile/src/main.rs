@@ -249,12 +249,15 @@ fn main() {
         // which a compiled caller reached only as an exit).
         let mut found: BTreeSet<u32> = BTreeSet::new();
         for &(_, t) in &img.data_pointers {
-            if t >= img.text_lo && t < img.text_hi && t % 16 == 0 && !have.contains(&t) && !inside.contains(&t) {
+            if t >= img.text_lo && t < img.text_hi && !have.contains(&t) && !inside.contains(&t) {
                 let pad = img.mem[(t - 1 - img.base) as usize];
                 // ... or right after a ret (6c9270, in the table at 0x74c56c,
-                // follows 6c9260's ret 4 with no pad).
+                // follows 6c9260's ret 4 with no pad), on any byte: the C
+                // runtime's initializers in its table at 0x6cc728 (6837b9)
+                // have no pads. Not inside an instruction of a listed function.
                 let ret = pad == 0xc3 || img.mem[(t - 3 - img.base) as usize] == 0xc2;
-                if pad == 0xcc || pad == 0x90 || ret {
+                let within = insn_at.range(..t).next_back().is_some_and(|(a, n)| a.wrapping_add(*n) > t);
+                if (t % 16 == 0 && (pad == 0xcc || pad == 0x90)) || (ret && !within) {
                     found.insert(t);
                 }
             }

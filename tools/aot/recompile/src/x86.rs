@@ -103,7 +103,7 @@ pub fn cc_of<'a>(mnemonic: &'a str, prefix: &str) -> &'a str {
 pub fn kind(m: &str) -> Option<u8> {
     Some(match m {
         "add" => 0,
-        "sub" | "cmp" => 1,
+        "sub" | "cmp" | "repe cmpsb" | "repne cmpsb" => 1,
         "and" | "or" | "xor" | "test" | "bsf" | "bsr" => 2,
         "inc" => 3,
         "dec" => 4,
@@ -227,6 +227,9 @@ pub fn flags_rw(i: &Insn) -> (u8, u8) {
         "inc" | "dec" => FALL & !FC,
         _ => 0,
     };
+    if m == "rcr" || m == "rcl" {
+        u |= FC;   // through the carry (Capstone gives it as modified only)
+    }
     if m.starts_with('j') && m != "jmp" && m != "jecxz" && m != "jcxz" {
         u = cc_flags(cc_of(m, "j"));
     } else if m.starts_with("set") {

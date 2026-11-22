@@ -32,11 +32,14 @@ pub fn kind_of(f: &Func, va: u32) -> Option<(u8, u8)> {
     if m.ends_with("cmpxchg8b") {
         return Some((k, 4));
     }
+    if m.ends_with(" cmpsb") {
+        return Some((k, 1));
+    }
     Some((k, i.ops[0].size))
 }
 
 fn need_reader(m: &str, va: u32) -> Result<(), Refused> {
-    if m.starts_with('j') || m.starts_with("set") || m.starts_with("cmov") || m == "adc" || m == "sbb" {
+    if m.starts_with('j') || m.starts_with("set") || m.starts_with("cmov") || m == "adc" || m == "sbb" || m == "rcr" {
         return Ok(());
     }
     Err(Refused(format!("{} reads flags at {:08x}", m, va)))

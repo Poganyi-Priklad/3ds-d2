@@ -676,6 +676,36 @@ impl<'p, 'a> Emitter<'p, 'a> {
         if m == "imul" {
             return self.imul(i);
         }
+        if m == "rcr" && ops.len() == 2 && ops[0].size == 4 && ops[1].is_imm() && ops[1].imm() == 1 {
+            // Through the carry, by one (issue #138: the C runtime's 64-bit
+            // shifts, 686c00 and 684240, shr the high half and rcr the low).
+            // The flags it leaves aren't modelled: a reader refuses the function.
+            let c = self.carry(va);
+            let a = self.get(i, &ops[0], None)?;
+            return Ok(format!(
+                "{{ uint32_t c = {}; uint32_t a = {}; uint32_t r = (a >> 1) | (c << 31); {} }}",
+                c,
+                a,
+                self.put(i, &ops[0], "r")?
+            ));
+        }
+        // The flags register as a whole (issue #138: 69a860 tells cpuid is
+        // there by flipping the ID bit): the word popfd last stored, not the
+        // arithmetic flags, which nothing here reads back from it.
+        if m == "pushfd" {
+            return Ok("{ esp -= 4u; ST32(esp, aot_eflags); }".to_string());
+        }
+        if m == "popfd" {
+            return Ok("{ aot_eflags = (LD32(esp) & 0x00244dd5u) | 2u; esp += 4u; }".to_string());
+        }
+        if m == "cpuid" {
+            return Ok("aot_cpuid(&eax, &ebx, &ecx, &edx);".to_string());
+        }
+        if m == "stmxcsr" {
+            // No SSE state is kept: the value a thread starts with (all
+            // exceptions masked, round to nearest).
+            return Ok(format!("{{ uint32_t r = 0x1f80u; {} }}", self.put(i, &ops[0], "r")?));
+        }
         if m.ends_with("cmpxchg8b") {
             // edx:eax against the 8 bytes: equal, ecx:ebx stored and ZF set;
             // else they are loaded and ZF cleared. The lock prefix is nothing
@@ -1056,6 +1086,24 @@ if (!r) {{ ST32(a, ebx); ST32(a + 4u, ecx); }} else {{ eax = lo; edx = hi; }} {}
             _ => None,
         };
         let Some(size) = size else { return refused(format!("{} at {:08x}", m, va)) };
+        if op == "cmpsb" && (m.starts_with("repe ") || m.starts_with("repne ")) {
+            // Bytes at esi against those at edi, while they are equal (repe) or
+            // differ (repne) and ecx lasts; the flags are the last pair's, a
+            // byte cmp's. With ecx 0 none is compared and the flags are left:
+            // here they read as an equal pair's, which is what the code before
+            // leaves where it compares counted strings (issue #138: 40e250's
+            // mov ecx, 13; xor eax, eax; repe cmpsb; jnz).
+            let stop = if m.starts_with("repe ") { "a != b" } else { "a == b" };
+            let step = (if d != 0 { -1i64 } else { 1 }) as u32;
+            return Ok(format!(
+                "{{ uint32_t a = 0, b = 0; while (ecx) {{ a = M[esi]; b = M[edi]; esi += {}u; edi += {}u; ecx--; if ({}) break; }} \
+uint32_t r = (a - b) & 0xffu; {} }}",
+                step,
+                step,
+                stop,
+                self.flag_store(va, "a", "b", "r", "0")
+            ));
+        }
         if !(op.starts_with("movs") || op.starts_with("stos")) || m.starts_with("repe ") || m.starts_with("repne ") {
             return refused(format!("{} at {:08x}", m, va));
         }
@@ -1220,9 +1268,24 @@ esp = f + 4u; }}",
                 return Ok(push
                     + "{ uint32_t d = LD32(esp + 4u); aot_memmove(d, LD32(esp + 8u), LD32(esp + 12u)); eax = d; esp += 4u; }");
             }
+            if name == "strrchr" {
+                // The last of a character in a string, its end included; ecx
+                // and edx are the callee's scratch.
+                return Ok(push
+                    + "{ uint32_t s = LD32(esp + 4u), n = 0; uint8_t ch = (uint8_t)LD32(esp + 8u); while (M[s + n]) n++; \
+eax = 0; for (uint32_t k = n + 1u; k-- > 0u;) if (M[s + k] == ch) { eax = s + k; break; } esp += 4u; }");
+            }
             if name == "fsin" || name == "fcos" {
                 // st0's sine or cosine, in st0; eax, ecx and edx are the callee's scratch.
                 return Ok(push + &format!("{{ aot_fset(F, 0, __builtin_{}(aot_fget(F, 0))); esp += 4u; }}", &name[1..]));
+            }
+            if name == "alloca_probe_16" {
+                return Ok(push
+                    + &format!(
+                        "{{ uint32_t c = ((esp + 4u) - eax) & 0xfu, n = eax + c; eax = n < c ? 0xffffffffu : n; }} \
+ST32(esp - 4u, ecx); ST32(esp - eax, 0x{:08x}u); esp = esp - eax + 4u; eax = 0x{:08x}u;",
+                        ra, ra
+                    ));
             }
             if name == "alloca_probe" {
                 return Ok(push

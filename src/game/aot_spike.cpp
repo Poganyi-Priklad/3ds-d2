@@ -30,6 +30,7 @@ extern "C" {
 
 extern "C" {
 uint8_t *aot_mem = nullptr;
+uint32_t aot_eflags = 0x202;   // aot_rt.h: pushfd's word (IF set, as a thread starts)
 AotFpu *aot_fpu = nullptr;   // aot_rt.h: the running emu's x87 state (Cpu::x87_state)
 // Box86's 80-bit conversions (x87emu_private.c), for fld/fstp m80.
 void LD2D(void *ld, void *d);
@@ -2026,6 +2027,26 @@ void aot_call_out(uint32_t x, AotRegs *t, uint32_t pops)
         return;
     }
     aot_exit(x, r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7]);
+}
+
+// As the backend's my_cpuid (shim_impl.c): compiled code and Box86 see one CPU.
+void aot_cpuid(uint32_t *eax, uint32_t *ebx, uint32_t *ecx, uint32_t *edx)
+{
+    const uint32_t leaf = *eax;
+    *eax = 0;
+    if (leaf == 0) {
+        *eax = 1;
+        *ebx = 0x756e6547;   // GenuineIntel
+        *edx = 0x49656e69;
+        *ecx = 0x6c65746e;
+    } else if (leaf == 1) {
+        *eax = 0x00000681;   // family 6, model 8, stepping 1
+        *ebx = 0;
+        *ecx = 0;
+        *edx = rt::cpuid1_edx();
+    } else {
+        *ebx = *ecx = *edx = 0;
+    }
 }
 
 void aot_bad_ret(uint32_t fn, uint32_t esp0, uint32_t esp)

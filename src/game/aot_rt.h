@@ -145,6 +145,11 @@ __attribute__((noreturn)) void aot_exit(uint32_t target, uint32_t eax, uint32_t 
  * or to run guest code, an exit: Box86 goes on at x, or at the return. */
 void aot_call_out(uint32_t x, AotRegs *r, uint32_t pops);
 __attribute__((noreturn)) void aot_fault(uint32_t va);
+/* cpuid, the leaf in eax: what the Box86 backend reports (a Pentium III, the
+ * runtime's feature bits). */
+void aot_cpuid(uint32_t *eax, uint32_t *ebx, uint32_t *ecx, uint32_t *edx);
+/* The flags register's word for pushfd and popfd (not the arithmetic flags). */
+extern uint32_t aot_eflags;
 void aot_journal(uint32_t va, uint32_t n);        /* AOT_JOURNAL: before a store */
 /* d2_native.cpp: our natives, called in C. The high word: 1 if the native
  * covered the call (the low word is its eax), 0 if it hands back. */

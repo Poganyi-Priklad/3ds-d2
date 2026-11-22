@@ -61,9 +61,13 @@ pub fn intrinsics() -> HashMap<u32, &'static str> {
     // The C runtime's sine and cosine of st0, in st0 (issue #138): hand-written
     // code that passes flags and the stack between its pieces (688590 into
     // 6885e8, 6987d8, 6987fb), refused. 61bb80 calls them.
+    m.insert(0x00682990, "strrchr");   // repne scasb twice, the second with the direction flag set
     m.insert(0x00688590, "fsin");
     m.insert(0x006886c0, "fcos");
     m.insert(0x006831b0, "alloca_probe");
+    // The same with the block's address on 16 bytes: eax rounded up by what
+    // the caller's esp less eax leaves over, then alloca_probe (a tail call).
+    m.insert(0x006869d0, "alloca_probe_16");
     m
 }
 
@@ -324,7 +328,7 @@ impl<'a> Program<'a> {
         }
         if let Some(&name) = self.intrinsics.get(&t) {
             return match name {
-                "alloca_probe" => Summary {
+                "alloca_probe" | "alloca_probe_16" => Summary {
                     reads: set_of(&[EAX, ECX, ESP]),
                     preserved: set_of(&[ECX, EDX, EBX, EBP, ESI, EDI]),
                     pops: Some(0),
