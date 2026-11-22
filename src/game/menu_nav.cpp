@@ -4,10 +4,10 @@
 // into "move the cursor to the next cell": an inventory square, a button, a
 // list row, a character slot. Everything in this file is pure geometry on
 // NavWindow and NavRect lists, so tests/menu drives it with made-up windows:
-//   - next_cell, entry_cell, neighbour: the cell a flick goes to inside one
-//     window, and the window it crosses into at an edge;
-//   - MenuNav::step: one flick, with the rules for edges, held items and
-//     scroll columns;
+//   - next_cell, entry_cell: the nearest cell a flick's way, and the cell it
+//     comes round to on the far side when there is none;
+//   - MenuNav::step: one flick over all the open windows, with the rules
+//     for held items and scroll columns;
 //   - fixed_windows, game_menu_rows, d2win_cell, d2win_scroll: the cells of
 //     the game's panels, the game menu and D2Win's out-of-game screens, from
 //     what d2_menus.cpp read in the game's memory.
@@ -78,24 +78,6 @@ int next_cell(const std::vector<NavRect> &cells, int x, int y, NavDirection dir,
     return best;
 }
 
-// The cells' bounds.
-NavRect bounds(const std::vector<NavRect> &cells)
-{
-    NavRect b;
-    for (size_t i = 0; i < cells.size(); i++) {
-        const NavRect &c = cells[i];
-        if (i == 0) {
-            b = c;
-            continue;
-        }
-        b.left = c.left < b.left ? c.left : b.left;
-        b.top = c.top < b.top ? c.top : b.top;
-        b.right = c.right > b.right ? c.right : b.right;
-        b.bottom = c.bottom > b.bottom ? c.bottom : b.bottom;
-    }
-    return b;
-}
-
 // The cell a flick going `dir` comes into the window at: in the row (or
 // column) nearest `across` (a y for left and right, an x for up and down),
 // the first cell on the side it comes in from.
@@ -133,43 +115,7 @@ int entry_cell(const std::vector<NavRect> &cells, int across, NavDirection dir)
     return best;
 }
 
-// A place across `from`'s cells, the same share of the way across `to`'s.
-int same_share(int value, const NavRect &from, const NavRect &to, NavDirection dir)
-{
-    const int f0 = vertical(dir) ? from.left : from.top, f1 = vertical(dir) ? from.right : from.bottom;
-    const int t0 = vertical(dir) ? to.left : to.top, t1 = vertical(dir) ? to.right : to.bottom;
-    if (f1 <= f0)
-        return (t0 + t1) / 2;
-    const double share = (value - f0) / (double)(f1 - f0);
-    return t0 + (int)std::lround(share * (t1 - t0));
-}
-
-// The window next to `from` the flick's way: its panel starts where
-// `from`'s ends (or after) and the two overlap across the flick.
-constexpr int kTouching = 8;   // pixels between two panels that still count as side by side
-int neighbour(const std::vector<NavWindow> &windows, int from, NavDirection dir)
-{
-    const NavRect &a = windows[from].area;
-    int best = -1, best_gap = INT_MAX;
-    for (size_t i = 0; i < windows.size(); i++) {
-        if ((int)i == from || windows[i].cells.empty())
-            continue;
-        const NavRect &b = windows[i].area;
-        int gap = 0;
-        bool overlap = false;
-        switch (dir) {
-        case NavDirection::kUp: gap = a.top - b.bottom; overlap = b.left < a.right && a.left < b.right; break;
-        case NavDirection::kDown: gap = b.top - a.bottom; overlap = b.left < a.right && a.left < b.right; break;
-        case NavDirection::kLeft: gap = a.left - b.right; overlap = b.top < a.bottom && a.top < b.bottom; break;
-        case NavDirection::kRight: gap = b.left - a.right; overlap = b.top < a.bottom && a.top < b.bottom; break;
-        }
-        if (overlap && gap >= -kTouching && gap < best_gap) {
-            best = (int)i;
-            best_gap = gap;
-        }
-    }
-    return best;
-}
+constexpr int kTouching = 8;   // pixels: a window this close to the middle still covers that half
 
 // Which window and cell x, y is on (-1: none).
 void locate(const std::vector<NavWindow> &windows, int x, int y, int &window, int &cell)
@@ -268,24 +214,37 @@ MenuNav::Step MenuNav::step(const std::vector<NavWindow> &windows, int x, int y,
     }
 
     const NavWindow &win = windows[w];
-    if (win.cells.empty() || (win.up_down_only && !vertical(dir)))
+    if (win.up_down_only && !vertical(dir))
         return out;
-    // From the cell's middle (or, on the panel between cells, the cursor).
+    // From the cell's middle (or, on a panel between cells, the cursor):
+    // the nearest cell that way in any open window. A list of options
+    // (up_down_only) only takes up and down flicks, and keeps them to
+    // itself.
     const int fx = c >= 0 ? win.cells[c].centre_x() : x, fy = c >= 0 ? win.cells[c].centre_y() : y;
-    const int n = next_cell(win.cells, fx, fy, dir, c >= 0 ? &win.cells[c] : nullptr);
-    if (n >= 0)
-        return go(win.cells[n], "cell");
-
-    // At the window's edge.
-    const NavRect here = bounds(win.cells);
-    const int across = vertical(dir) ? fx : fy;
-    const int next = win.up_down_only ? -1 : neighbour(windows, w, dir);
-    if (next >= 0) {
-        const NavWindow &to = windows[next];
-        const int e = entry_cell(to.cells, same_share(across, here, bounds(to.cells), dir), dir);
-        if (e >= 0)
-            return go(to.cells[e], "window");
+    const NavRect *skip = c >= 0 ? &win.cells[c] : nullptr;
+    auto takes = [&](const NavWindow &other) {
+        if (win.up_down_only)
+            return &other == &win;
+        return !other.up_down_only || vertical(dir);
+    };
+    int best_w = -1, best_c = -1, best_score = INT_MAX;
+    for (size_t i = 0; i < windows.size(); i++) {
+        if (!takes(windows[i]))
+            continue;
+        const int n = next_cell(windows[i].cells, fx, fy, dir, skip);
+        if (n < 0)
+            continue;
+        const NavRect &cell = windows[i].cells[n];
+        const int score = along(cell, fx, fy, dir) + 2 * beside(cell, fx, fy, dir);
+        if (score < best_score) {
+            best_score = score;
+            best_w = (int)i;
+            best_c = n;
+        }
     }
+    if (best_w >= 0)
+        return go(windows[best_w].cells[best_c], best_w == w ? "cell" : "window");
+
     if (holding && !win.up_down_only) {
         // The free half: the left or right half no open window covers.
         bool left_taken = false, right_taken = false;
@@ -304,11 +263,17 @@ MenuNav::Step MenuNav::step(const std::vector<NavWindow> &windows, int x, int y,
             return out;
         }
     }
-    // Round to the far side, in the same row or column.
-    const NavDirection from_side = dir;   // the side a flick this way comes in from is the far one
-    const int e = entry_cell(win.cells, across, from_side);
-    if (e >= 0 && e != c)
-        return go(win.cells[e], "round");
+    // Nothing that way: round to the far side, over all the windows it may
+    // go to, nearest the same row or column.
+    std::vector<NavRect> all;
+    for (const NavWindow &other : windows)
+        if (takes(other))
+            all.insert(all.end(), other.cells.begin(), other.cells.end());
+    const int across = vertical(dir) ? fx : fy;
+    const int e = entry_cell(all, across, dir);   // the side a flick this way comes in from is the far one
+    if (e >= 0 && !(skip && all[e].left == skip->left && all[e].top == skip->top && all[e].right == skip->right &&
+                     all[e].bottom == skip->bottom))
+        return go(all[e], "round");
     return out;
 }
 

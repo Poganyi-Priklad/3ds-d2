@@ -5,15 +5,16 @@
 // (d2_menus.h) says which windows are open and where their cells are.
 //
 // The rules, for one flick from where the cursor was when the flick began:
-//   - on a cell: the next cell that way in the same window, one cell a flick
+//   - on a cell (or a panel): the nearest cell that way in any open window
+//     (a cell beside the line counts twice its distance), one cell a flick
 //     however large the item lying there;
-//   - at the window's edge: into the open window next to it that way
-//     (the inventory and a stash, shop or cube), at the same relative place;
 //   - else, with an item on the cursor: to the middle of the screen's free
 //     half (nothing open there), to drop it; a flick back towards the window
 //     puts the cursor back on the cell it left;
-//   - else round to the window's far side, in the same row or column;
-//   - a list of options (an NPC's menu) only goes up and down;
+//   - else round to the far side, over all the open windows, nearest the
+//     same row or column;
+//   - a list of options (an NPC's menu) only goes up and down, and keeps
+//     to itself;
 //   - off every window: the nearest cell that way.
 #ifndef D2_GAME_MENU_NAV_H
 #define D2_GAME_MENU_NAV_H

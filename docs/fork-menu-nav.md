@@ -19,10 +19,10 @@ down, left or right:
 
 - **In open panels** (inventory and equipment, stash, shop, Horadric Cube,
   trade, the mercenary, the belt, the character screen and its "+" buttons,
-  the skill tree, the quest log, the waypoints): the cursor moves one cell.
-  At a window's edge it goes into the window next to it at the same relative
-  place, or comes round to the far side. With an item on the cursor, a flick
-  off the window puts the cursor on the free half of the screen to drop it.
+  the skill tree, the quest log, the waypoints): the cursor moves to the
+  nearest cell that way, in whichever open window it is; with nothing that
+  way it comes round to the far side, over all the open windows. With an
+  item on the cursor and nothing that way, a flick puts the cursor on the free half of the screen to drop it.
   In the inventory, the weapon swap tabs drawn as "I" and "II" over each
   weapon are one button per weapon (either swaps the weapons, as W does): a
   flick up from a weapon reaches the tab over it.

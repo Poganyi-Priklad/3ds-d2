@@ -94,6 +94,8 @@ static void stash_cell(int col, int row, int &x, int &y)
     y = (82 + 231 * row / 8 + 82 + 231 * (row + 1) / 8) / 2;
 }
 
+static bool at(const MenuNav::Step &s, int x, int y);
+
 static MenuNav::Step flick_at(MenuNav &nav, const std::vector<NavWindow> &w, int x, int y, NavDirection d,
                               bool holding = false)
 {
@@ -180,6 +182,47 @@ static void test_next_window()
     inv_cell(9, 1, x, y);
     s = flick_at(nav, w, x, y, NavDirection::kRight, true);
     CHECK(s.moved && std::strcmp(s.why, "round") == 0);
+}
+
+// One rule for every window: the nearest cell that way, in whichever open
+// window it is, else round to the far side over all of them.
+static void test_one_rule()
+{
+    NavWindow a, b, list;
+    a.name = "a";
+    a.area = NavRect{0, 0, 130, 30};
+    a.cells = {NavRect{0, 0, 20, 20}, NavRect{100, 0, 120, 20}};
+    b.name = "b";
+    b.area = NavRect{30, 0, 70, 30};
+    b.cells = {NavRect{40, 0, 60, 20}};
+    MenuNav nav;
+    std::vector<NavWindow> w = {a, b};
+    // Right from a's first cell: b's, nearer than a's next.
+    MenuNav::Step s = flick_at(nav, w, 10, 10, NavDirection::kRight);
+    CHECK(at(s, 50, 10) && std::strcmp(s.why, "window") == 0);
+    s = flick_at(nav, w, 50, 10, NavDirection::kRight);
+    CHECK(at(s, 110, 10) && std::strcmp(s.why, "window") == 0);
+    // Nothing further right: round to the far side, a's first.
+    s = flick_at(nav, w, 110, 10, NavDirection::kRight);
+    CHECK(at(s, 10, 10) && std::strcmp(s.why, "round") == 0);
+    // And left from it, round to the last.
+    s = flick_at(nav, w, 10, 10, NavDirection::kLeft);
+    CHECK(at(s, 110, 10));
+    // A list of options keeps to itself: down from its last option, round
+    // to its first, not into the window under it; a sideways flick from
+    // the other window doesn't land on it.
+    CHECK(npc_menu_window(NavRect{0, 40, 102, 106}, 2, list));
+    NavWindow under;
+    under.area = NavRect{0, 120, 130, 160};
+    under.cells = {NavRect{0, 130, 20, 150}, NavRect{150, 60, 170, 80}};
+    w = {list, under};
+    const int first = list.cells[0].centre_y(), last = list.cells[1].centre_y();
+    s = flick_at(nav, w, 51, last, NavDirection::kDown);
+    CHECK(at(s, 51, first) && std::strcmp(s.why, "round") == 0);
+    s = flick_at(nav, w, 160, 70, NavDirection::kLeft);
+    CHECK(!s.moved || s.y >= 120);
+    s = flick_at(nav, w, 51, first, NavDirection::kRight);
+    CHECK(!s.moved);
 }
 
 static void test_free_half()
@@ -1360,6 +1403,7 @@ int main()
     test_one_cell();
     test_round_the_edges();
     test_next_window();
+    test_one_rule();
     test_free_half();
     test_npc_menu();
     test_fixed_windows();
