@@ -485,6 +485,47 @@ static void test_d2win_cells()
     // Nonsense sizes: not a stop.
     b.state = 5, b.width = 0;
     CHECK(!d2win_cell(b, 800, 600, r));
+    {
+        // The difficulty choice over the character screen (the lane at
+        // 800x600): its three buttons (state 0xD) are the only stops; OK,
+        // Exit, Delete Character and the hero's slot under it are not.
+        auto button = [](uint32_t state, int x, int y, int w, int h) {
+            D2WinControl c;
+            c.type = 6, c.state = state, c.x = x, c.y = y, c.width = w, c.height = h;
+            return c;
+        };
+        std::vector<D2WinControl> screen = {button(5, 627, 572, 128, 35), button(5, 33, 572, 128, 35),
+                                            button(5, 433, 528, 168, 60)};
+        D2WinControl hero_slot = slot;
+        hero_slot.lines = 4, hero_slot.on_click = true;
+        screen.push_back(hero_slot);
+        std::vector<NavRect> cells;
+        bool popup = true;
+        d2win_cells(screen, 800, 600, cells, popup);
+        CHECK(!popup && cells.size() == 4);
+        D2WinControl frame;
+        frame.type = 2, frame.state = 0xD, frame.x = 237, frame.y = 400, frame.width = 326, frame.height = 200;
+        screen.push_back(frame);   // the popup's frame: no stop, nor a popup alone
+        cells.clear();
+        d2win_cells(screen, 800, 600, cells, popup);
+        CHECK(!popup && cells.size() == 4);
+        for (int y : {297, 340, 383})
+            screen.push_back(button(0xD, 264, y, 272, 35));
+        cells.clear();
+        d2win_cells(screen, 800, 600, cells, popup);
+        CHECK(popup && cells.size() == 3 && cells[0].top == 262 && cells[2].bottom == 383);
+        // From Hell, down goes nowhere under the popup; up: Nightmare.
+        std::vector<NavWindow> ws(1);
+        ws[0].name = "screen";
+        ws[0].area = NavRect{0, 0, 800, 600};
+        ws[0].cells = cells;
+        MenuNav nav;
+        MenuNav::Step d = flick_at(nav, ws, 400, 365, NavDirection::kDown);
+        CHECK(!d.moved || (d.y >= 262 && d.y <= 383));
+        MenuNav up;
+        d = flick_at(up, ws, 400, 365, NavDirection::kUp);
+        CHECK(d.moved && d.x == 400 && d.y == 322);
+    }
 }
 
 // The main menu as the lane read it: a flick down from Single Player goes

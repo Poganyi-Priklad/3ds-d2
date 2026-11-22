@@ -109,6 +109,14 @@ struct D2WinControl {
 // (scroll bars, disabled or hidden controls, the background).
 bool d2win_cell(const D2WinControl &control, int width, int height, NavRect &out);
 
+// A screen's stops (d2win_cell for each control, in the list's order). A
+// popup over the screen (the difficulty choice, a confirmation such as
+// Delete Character's) adds its controls with state bit 8 set (0xD: shown,
+// enabled, the popup's; the lane at 800x600); while one is up, only its
+// controls are stops, the screen under it takes no clicks. popup: one is up.
+void d2win_cells(const std::vector<D2WinControl> &controls, int width, int height, std::vector<NavRect> &out,
+                 bool &popup);
+
 // A scroll bar's buttons (measured on the lane at 800x600 by clicking each
 // pixel): the up button the top 11 pixels of its box, the down button the
 // bottom 9, both its width; a click on either moves the list one row

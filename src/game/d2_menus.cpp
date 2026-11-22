@@ -313,13 +313,13 @@ void d2win_windows(int width, int height, std::vector<NavWindow> &out)
         uint32_t next = 0;
         if (!read_control(va, c, next))
             break;
-        NavRect cell;
-        if (d2win_cell(c, width, height, cell))
-            w.cells.push_back(cell);
         controls.push_back(c);
         va = next;
     }
-    d2win_scroll(controls, w.cells, width, height, w.scroll);
+    bool popup = false;
+    d2win_cells(controls, width, height, w.cells, popup);
+    if (!popup)   // the character list's scroll column is under the popup
+        d2win_scroll(controls, w.cells, width, height, w.scroll);
     if (!w.cells.empty())
         out.push_back(w);
 }

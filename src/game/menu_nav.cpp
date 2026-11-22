@@ -577,6 +577,19 @@ bool d2win_cell(const D2WinControl &c, int width, int height, NavRect &out)
     return true;
 }
 
+void d2win_cells(const std::vector<D2WinControl> &controls, int width, int height, std::vector<NavRect> &out,
+                 bool &popup)
+{
+    constexpr uint32_t kPopup = 8;
+    NavRect r;
+    popup = false;
+    for (const D2WinControl &c : controls)
+        popup |= (c.state & kPopup) && d2win_cell(c, width, height, r);
+    for (const D2WinControl &c : controls)
+        if ((!popup || (c.state & kPopup)) && d2win_cell(c, width, height, r))
+            out.push_back(r);
+}
+
 NavRect scroll_up_button(const D2WinControl &bar)
 {
     const int top = bar.y - bar.height;
