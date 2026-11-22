@@ -7,7 +7,7 @@ console there is no mouse to point at a monster, so in the game world **A** and
 press the left or right mouse button. A stick walk never talks, opens, picks
 up, attacks or takes a level warp; let go, and the hero stops where he stands.
 
-![Auto-target: hero, circle-pad direction, a cone, the nearest enemy highlighted, adjacent-enemy priority, and flick switching](images/fork-auto-target.png)
+![Auto-target: the cone in the circle pad's direction first, then the melee circle round the hero, flick switching, and the order with no enemy in either](images/fork-auto-target.png)
 
 The full rules and every setting are in [controls.md](controls.md#auto-target-a-and-b);
 this page is the short version and a map of the code.
