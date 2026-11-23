@@ -186,6 +186,15 @@ uint64_t aot_native_64d4e0(uint32_t esi, uint32_t room, uint32_t x, uint32_t y);
 #define AOT_FN __attribute__((visibility("hidden")))
 #endif
 
+/* A function off the recompiler's AOT_HOT list (issue #153): one that ran in
+ * none of the profiles. AOT_COLD_SIZE (the console's AOT build): compiled
+ * for size, its code being the heap's loss. */
+#ifdef AOT_COLD_SIZE
+#define AOT_FNC AOT_FN __attribute__((optimize("Os")))
+#else
+#define AOT_FNC AOT_FN
+#endif
+
 #define AOT_INL static inline __attribute__((always_inline))
 
 /* AOT_TRACE_ON (debugging the recompiler): each compiled function's entry

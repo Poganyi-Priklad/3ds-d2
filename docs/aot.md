@@ -684,6 +684,41 @@ The 2 refused are the C runtime's memcpy and memmove (`006829c0`, `00683840`: sw
 
 `AOT_C_ONLY=1` in front of `scripts/docker.sh test aot` stops after the recompiler: the C and the report in `build/aot/spike`, no build, no run.
 
+### The code that never ran, compiled for size (#153)
+
+The AOT build's compiled code is 25.5 MiB of the app's 124 (2.7 MiB of x86: 9.4 bytes of ARM a byte), and what the executable takes the heap doesn't have. Most of it never runs: of the 14,505 functions, 2,599 (18.7% of the x86 bytes) ran in the Box86 lane's profiles of the three scripts or in a console session's guest profile (Sentry `3DS-D2-1H`, the x86 run).
+
+- **The list:** `tools/aot/hot_functions.txt`, addresses alone, written by `tools/aot/hot_list.py` from `aot_spike.json` and the logs (the lane's `[hotprof]` lines, a console log's `prof eip` and `prof tail` lines; a 64-byte tail bucket counts for every function it touches).
+- **The recompiler** reads it from `AOT_HOT=<file>`, which `scripts/docker.sh` sets for a build without Box86 (`AOT_HOT=none`: no list). A function off the list is written `AOT_FNC` where the others are `AOT_FN`.
+- **The console's AOT build** defines `AOT_COLD_SIZE`, which makes `AOT_FNC` gcc's `optimize("Os")`. The lane's build doesn't: its C is compiled as before.
+
+| The AOT CIA's `.text` | KiB |
+|---|---|
+| `-O2` | 25,508 |
+| `-Os`, all of it (`AOT_OPT="-Os -g"`) | 18,660 |
+| `-O2`, the functions off the list `-Os` | 19,669 |
+
+All of it at `-Os` costs about 2% of a town frame in Azahar (`smooth-walk.txt`: the walk's windows 2-3% longer, pair by pair; medians 33.6-33.8 ms against 33.2-34.7, two runs each). The list gets 5.8 of its 6.8 MiB with the code that runs left at `-O2`.
+
+**Where the 5.8 MiB go.** The console's heap window is 95 MiB (`__system_allocateHeaps`), and the AOT build's heap was 92: 3 MiB go to the heap, so the guest arena is 83 MiB against 80. The rest is linear memory, which Box86's jump tables aren't there to use (`aot_linear_spare`, `src/app/ctr_game.cpp`):
+
+- **The tile store** (the read-ahead's ring, `rt::set_prefetch_arena`) is 3.5 MiB of it, where it was 1 MiB of `.bss` (and 2,048 ranges for 512). The console's AOT log had the 1 MiB store full all session with 0.4-1.5 MiB of the nearest rooms' tiles not loaded, and tiles were the most of the frame thread's waits on the card (4.0 s of 15.1 in 380 s).
+- **The threads' host stacks** (128 KiB each, `cpu_aot_set_stack_alloc`) are there too, out of the heap.
+
+The host's 12 MiB of the heap stay. With 10 the heap's top had 472 KiB of room left in Azahar (2,520 with 12); the most the host holds is during a film (its two 1.6 MiB frames).
+
+| Azahar, `act-load.txt`, the AOT CIA | Before | After (`b43f778ea450`) |
+|---|---|---|
+| Heap, linear | 94,208, 2,560 KiB | 97,280, 6,400 KiB |
+| Guest arena | 81,920 KiB | 84,992 KiB |
+| Tile store, the most held | 1,021 KiB | 3,557 KiB |
+| Reads served from the store | 686 | 728 |
+| The frame thread's wait on tile reads | 1,293 ms | 1,054 ms |
+| Host heap free, lowest; linear free, lowest | 4,596; 1,470 KiB | 5,236; 1,086 KiB |
+| Frame pass, median | 34.6 ms | 34.2 ms |
+
+The lane on `CpuAot` with the list: 2,005, 3,255 and 4,071 frames, as before. Not run on a console.
+
 ### A stop ends the run in order (#139)
 
 A stop of the build without Box86 (code that isn't compiled, an `int`, a function that returns with another esp, a callout that comes back wrong) called `abort()`, which on the console logs, breaks and loops: the screen froze with the HOME button dead, and the power button was the way out.

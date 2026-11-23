@@ -158,6 +158,12 @@ aot_prepare() {
     # none of the others, and the dispatcher names each one's first run).
     local loose=()
     [ "${2:-${AOT_CPU:-}}" = aot ] && loose=(--loose)
+    # There too, AOT_HOT (issue #153): the functions that ran in the profiles (tools/aot/hot_functions.txt, from
+    # tools/aot/hot_list.py). The others are written AOT_FNC, which the console's build compiles for size
+    # (AOT_COLD_SIZE, tests/cpu/ctr/Makefile); the lane's compiles them as the rest. AOT_HOT=none: no list.
+    if [ "${2:-${AOT_CPU:-}}" = aot ] && [ "${AOT_HOT:-}" != none ]; then
+        RUN_EXTRA+=(-e "AOT_HOT=${AOT_HOT:-tools/aot/hot_functions.txt}")
+    fi
     aot_recompiler_build
     # shellcheck disable=SC2046
     aot_recompile "$AOT_RECOMPILER" /aot/Game.exe --out build/aot/spike ${loose[@]+"${loose[@]}"} $(aot_args)

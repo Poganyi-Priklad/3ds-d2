@@ -28,12 +28,15 @@ AOT_OPT ?= -O2 -g
 ifeq ($(CPU),aot)
 OUT    := $(ROOT)/build/cpu/ctr-aot
 CPUDEF := -DD2RT_CPU_AOT
+# The functions off the recompiler's hot list (AOT_FNC, src/game/aot_rt.h) for
+# size: 81% of the code's bytes ran in none of the profiles (issue #153).
+AOTDEF := -DAOT_COLD_SIZE
 # AOT_SAMPLE=1: a profile of where compiled code is (src/game/aot_rt.h's
 # AOT_SAMPLE_ON), in a build directory of its own.
 ifneq ($(AOT_SAMPLE),)
 OUT    := $(ROOT)/build/cpu/ctr-aot-sample
 CPUDEF += -DAOT_SAMPLE_ON
-AOTDEF := -DAOT_SAMPLE_ON
+AOTDEF += -DAOT_SAMPLE_ON
 endif
 # AOT_OPT: the generated C's optimisation (its 24 MiB of code are the heap's
 # loss: docs/aot.md), with AOT_TAG naming a build directory of its own.
