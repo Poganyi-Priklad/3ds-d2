@@ -6,6 +6,7 @@
 //!     recompile Game.exe --census --modes sig --out build/aot/census [--hot log ...]
 //!     recompile Game.exe --survey
 //!     recompile Game.exe --all --modes sig --out build/aot/spike   (every function on --functions' list)
+//!     ... --loose   (for a build without Box86: a function refused only for its stack compiled loose)
 //!
 //! The output is Game.exe in another form: it goes under build/ and into
 //! the CIA (docs/aot.md's Distribution), never into the repository.
@@ -43,6 +44,7 @@ struct Args {
     modes: String,
     callees: usize,
     no_callouts: bool,
+    loose: bool,
     survey: bool,
     census: bool,
     all: bool,
@@ -54,7 +56,7 @@ struct Args {
 fn usage() -> ! {
     eprintln!(
         "usage: recompile EXE [--out DIR] [--root VA[:NAME]] [--compile VA,...] [--tree VA:DEPTH] [--functions TSV] \
-         [--modes sig,ctx] [--callees N] [--no-callouts] [--survey] [--census] [--all] [--hot LOG] [--explain VA,...] [--src-root DIR]"
+         [--modes sig,ctx] [--callees N] [--no-callouts] [--loose] [--survey] [--census] [--all] [--hot LOG] [--explain VA,...] [--src-root DIR]"
     );
     std::process::exit(2);
 }
@@ -70,6 +72,7 @@ fn parse_args() -> Args {
         modes: "sig,ctx".to_string(),
         callees: 0,
         no_callouts: false,
+        loose: false,
         survey: false,
         census: false,
         all: false,
@@ -94,10 +97,11 @@ fn parse_args() -> Args {
             Some((n, v)) => (n.to_string(), Some(v.to_string())),
             None => (s.clone(), None),
         };
-        let flag = |n: &str| ["--no-callouts", "--survey", "--census", "--all"].contains(&n);
+        let flag = |n: &str| ["--no-callouts", "--loose", "--survey", "--census", "--all"].contains(&n);
         if flag(&name) {
             match name.as_str() {
                 "--no-callouts" => a.no_callouts = true,
+                "--loose" => a.loose = true,
                 "--survey" => a.survey = true,
                 "--all" => a.all = true,
                 _ => a.census = true,
@@ -178,7 +182,7 @@ fn main() {
     let within_site = |v: u32| img.sites.iter().any(|&(_, s, n)| s < v && v < s + n as u32) && !site_calls.contains(&v);
     starts.retain(|v| !within_site(*v));
     if a.census {
-        census::census(&img, &starts, &a.functions, &a.out, &a.hot, &modes(&a.modes), callouts);
+        census::census(&img, &starts, &a.functions, &a.out, &a.hot, &modes(&a.modes), callouts, a.loose);
         return;
     }
     if a.survey {
@@ -230,8 +234,18 @@ fn main() {
                             // byte: the C runtime's functions have no pads
                             // (688c2b, its TlsAlloc wrapper, stored by 688fbb).
                             let ret = pad == 0xc3 || img.mem[(t - 3 - img.base) as usize] == 0xc2;
+                            // ... or, moved or pushed, on 16 bytes after
+                            // anything (a switch's table before it: 646be0,
+                            // the callback 644a6e and six more push), where
+                            // it decodes as a function that returns.
+                            let stored = matches!(i.mnemonic.as_str(), "mov" | "push");
+                            let decodes = || {
+                                let g = prog.func(t);
+                                g.refused.is_none() && !g.rets.is_empty()
+                            };
                             if (t % 16 == 0 && (pad == 0xcc || pad == 0x90))
-                                || (ret && matches!(i.mnemonic.as_str(), "mov" | "push"))
+                                || (ret && stored)
+                                || (t % 16 == 0 && stored && decodes())
                             {
                                 found.insert(t);
                             }
@@ -319,8 +333,18 @@ fn main() {
                             if t >= img.text_lo && t < img.text_hi && !have.contains(&t) {
                                 let pad = img.mem[(t - 1 - img.base) as usize];
                                 let ret = pad == 0xc3 || img.mem[(t - 3 - img.base) as usize] == 0xc2;
+                                // ... or, moved or pushed, on 16 bytes after
+                                // anything (a switch's table before it: 646be0,
+                                // the callback 644a6e and six more push), where
+                                // it decodes as a function that returns.
+                                let stored = matches!(i.mnemonic.as_str(), "mov" | "push");
+                                let decodes = || {
+                                    let g = prog.func(t);
+                                    g.refused.is_none() && !g.rets.is_empty()
+                                };
                                 if (t % 16 == 0 && (pad == 0xcc || pad == 0x90))
-                                    || (ret && matches!(i.mnemonic.as_str(), "mov" | "push"))
+                                    || (ret && stored)
+                                    || (t % 16 == 0 && stored && decodes())
                                 {
                                     found.insert(t);
                                 }
@@ -419,7 +443,7 @@ fn main() {
         census::explain(&img, &starts, &want, &parse_vas(ex).0, callouts);
         return;
     }
-    let rep = driver::compile_set(&img, &starts, &roots, &extra, &modes(&a.modes), &a.out, &names, callouts);
+    let rep = driver::compile_set(&img, &starts, &roots, &extra, &modes(&a.modes), &a.out, &names, callouts, a.loose);
     let get = |k: &str| -> i64 {
         match rep.report.get("exits").and_then(|e| e.get(k)) {
             Some(json::J::Int(n)) => *n,
@@ -440,6 +464,12 @@ fn main() {
         rep.refused.len(),
         a.out
     );
+    if a.loose {
+        println!(
+            "aot: {} of them loose (--loose): reached through the dispatcher, their rets and tail jumps its to follow",
+            rep.prog.compiled.iter().filter(|&&va| rep.prog.is_loose(va)).count()
+        );
+    }
     if let Some(pt) = rep.report.get("parts") {
         let n = |k: &str| match pt.get(k) {
             Some(json::J::Int(n)) => n.to_string(),

@@ -55,7 +55,7 @@ struct Fiber {
     uint32_t tib = 0;
     uint32_t entry = 0;
     bool done = false;
-    alignas(8) uint8_t fpu[416] = {};   // AotFpu holds doubles
+    alignas(8) uint8_t fpu[416 + 128] = {};   // AotFpu (it holds doubles), then xmm0..7 (aot_rt.h's AotXmm)
 };
 
 CpuAotDispatch g_dispatch = nullptr;
@@ -132,7 +132,10 @@ public:
         trap_hi_ = hi;
         trap_ = std::move(fn);
     }
-    void request_stop() override {}
+    // The scheduler's, when the game asks to exit (ExitProcess): the running
+    // thread yields at its trap call (slice_over) and isn't run again. Without
+    // it the compiled code went on past a call that doesn't return.
+    void request_stop() override { stop_ = true; }
 
     // Preemption (docs/aot.md): the scheduler gives each slice its length in
     // guest instructions (300,000; less for a background thread). Compiled
@@ -148,6 +151,8 @@ public:
     }
     bool slice_over()
     {
+        if (stop_ && cur_)
+            return true;
         if (!limit_ || !cur_ || ++calls_ < std::max<uint64_t>(16, limit_ >> 10))
             return false;
         hit_ = true;
@@ -233,6 +238,14 @@ public:
             out.push_back(line);
         }
     }
+    // The most any live thread has used of its host stack, in bytes.
+    size_t stack_peak()
+    {
+        size_t m = 0;
+        for (const auto &kv : fibers_)
+            m = std::max(m, used(*kv.second));
+        return m;
+    }
     void *fpu() { return cur_ ? cur_->fpu : boot_fpu_; }
     bool take_code_changed()
     {
@@ -273,7 +286,8 @@ private:
     uint32_t code_lo_ = 0, code_hi_ = UINT32_MAX;   // set_code_span
     uint64_t limit_ = 0, calls_ = 0;
     bool hit_ = false;
-    alignas(8) uint8_t boot_fpu_[416] = {};
+    bool stop_ = false;   // request_stop
+    alignas(8) uint8_t boot_fpu_[416 + 128] = {};
 
 public:
     static CpuAot *g_self;
@@ -297,6 +311,11 @@ void *cpu_aot_fpu(Cpu &c) { return static_cast<CpuAot &>(c).fpu(); }
 bool cpu_aot_take_code_changed(Cpu &c) { return static_cast<CpuAot &>(c).take_code_changed(); }
 void cpu_aot_set_code_span(Cpu &c, uint32_t lo, uint32_t hi) { static_cast<CpuAot &>(c).set_code_span(lo, hi); }
 bool cpu_aot_slice_over(Cpu &c) { return static_cast<CpuAot &>(c).slice_over(); }
+void cpu_aot_stack(uint32_t *peak, uint32_t *size)
+{
+    *peak = CpuAot::g_self ? (uint32_t)CpuAot::g_self->stack_peak() : 0;
+    *size = (uint32_t)kFiberStack;
+}
 std::vector<std::string> cpu_aot_lines()
 {
     std::vector<std::string> out;
@@ -317,6 +336,7 @@ void *cpu_aot_fpu(Cpu &) { return nullptr; }
 bool cpu_aot_take_code_changed(Cpu &) { return false; }
 void cpu_aot_set_code_span(Cpu &, uint32_t, uint32_t) {}
 bool cpu_aot_slice_over(Cpu &) { return false; }
+void cpu_aot_stack(uint32_t *peak, uint32_t *size) { *peak = *size = 0; }
 std::vector<std::string> cpu_aot_lines() { return {}; }
 
 #endif

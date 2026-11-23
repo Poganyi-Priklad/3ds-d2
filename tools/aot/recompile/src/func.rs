@@ -6,7 +6,7 @@ use crate::image::Image;
 use crate::omap::OMap;
 use crate::x86::{mem_written, regs_rw};
 use crate::Refused;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
 /// A call's or tail jump's target: a function's entry, an import's IAT
@@ -62,6 +62,10 @@ pub struct Func {
     pub plain: bool,
     /// ... its calls to imports too (the second fallback).
     pub plain_all: bool,
+    /// Its exits that are direct calls or tail jumps to a loose function
+    /// (Program::loose), each with what that function's rets pop where they
+    /// tell: callouts to its address.
+    pub loose_calls: HashMap<u32, Option<i64>>,
     pub data: HashSet<u32>,
     pub refused: Option<String>,
     pub ret_pops: BTreeSet<i64>,
@@ -91,6 +95,7 @@ impl Func {
             callouts: OMap::new(),
             plain: false,
             plain_all: false,
+            loose_calls: HashMap::new(),
             pops_fix: Vec::new(),
             data: HashSet::new(),
             refused: None,
@@ -284,15 +289,32 @@ impl Func {
     /// threw its stack off): only its calls to imports whose pops are known,
     /// which are no guess (issue #138: HeapAlloc and GetLastError were plain
     /// exits in such functions, 3,900 a script). 2: none.
-    pub fn set_exits(&mut self, sites: &BTreeSet<u32>, level: u8, tail_pops: Option<i64>, img: &Image, enabled: bool) {
+    ///
+    /// loose: the functions compiled loose (Program::loose_pops). A direct
+    /// call to one is a callout to its address, by its rets' pops or the
+    /// site's count; a tail jump to one, as one through a pointer.
+    pub fn set_exits(
+        &mut self,
+        sites: &BTreeSet<u32>,
+        level: u8,
+        tail_pops: Option<i64>,
+        img: &Image,
+        enabled: bool,
+        loose: &HashMap<u32, Option<i64>>,
+    ) {
         self.exits = sites.clone();
         self.plain = level > 0;
         self.plain_all = level > 1;
         let callouts = level == 0;
+        let to_loose = |t: &Tgt| t.direct().and_then(|d| loose.get(&d).copied());
         if enabled && level < 2 {
             let mut co = OMap::new();
             for &va in sites {
                 if let Some(t) = self.calls.get(&va) {
+                    if let (Some(p), false) = (to_loose(t), self.noreturn.contains(&va)) {
+                        co.insert(va, p.unwrap_or_else(|| self.callout_pops(va, img)));
+                        continue;
+                    }
                     let known = matches!(t, Tgt::Import(slot) if img.import_pops.get(slot).copied().flatten().is_some())
                         || self.reg_import_pops(&self.insns[&va], img).is_some();
                     if !self.noreturn.contains(&va) && t.is_pointer() && (callouts || known) {
@@ -318,7 +340,7 @@ impl Func {
             if let Some(p) = pops {
                 for &va in sites {
                     if let Some(t) = self.tails.get(&va) {
-                        if t.is_pointer() {
+                        if t.is_pointer() || to_loose(t).is_some() {
                             self.callouts.insert(va, p);
                         }
                     }
@@ -331,6 +353,17 @@ impl Func {
             .filter(|va| self.calls.contains_key(va) && !self.noreturn.contains(va) && !self.callouts.contains_key(va))
             .collect();
         self.cut(&hit);
+        self.loose_calls = self.loose_calls_for(loose);
+    }
+
+    /// loose_calls, were `loose` the functions compiled loose.
+    pub fn loose_calls_for(&self, loose: &HashMap<u32, Option<i64>>) -> HashMap<u32, Option<i64>> {
+        self.calls
+            .iter()
+            .chain(self.tails.iter())
+            .filter(|(va, _)| self.exits.contains(va))
+            .filter_map(|(va, t)| t.direct().and_then(|d| loose.get(&d)).map(|p| (*va, *p)))
+            .collect()
     }
 
     /// What a callout's callee is taken to pop: an import's, none where the
@@ -447,7 +480,8 @@ impl Func {
         for (va, p) in self.callouts.iter() {
             let Some(t) = self.calls.get(va) else { continue };
             let known = matches!(t, Tgt::Import(slot) if img.import_pops.get(slot).copied().flatten().is_some())
-                || self.reg_import_pops(&self.insns[va], img).is_some();
+                || self.reg_import_pops(&self.insns[va], img).is_some()
+                || self.loose_calls.get(va).is_some_and(|p| p.is_some());
             if !known {
                 out.push((*va, *p));
             }
@@ -781,6 +815,22 @@ impl Func {
                         break;
                     }
                     n += 1;
+                }
+                // ... or, where that finds none, into its code after it too
+                // (issue #138: the C runtime's memcpy and memmove, 6829c0 and
+                // 683840, whose and edx, 3 is the bound and whose tables
+                // stand between their pieces): while the entries are
+                // addresses near the function's and outside the table.
+                if n < 2 && bytes_table.is_none() {
+                    n = 0;
+                    while n < 512 {
+                        let t = img.u32(table.wrapping_add(4 * n));
+                        let inside = t >= table && t < table.wrapping_add(4 * (n + 1));
+                        if t < self.entry || t >= self.entry.wrapping_add(0x1000) || inside || img.insn(t).is_err() {
+                            break;
+                        }
+                        n += 1;
+                    }
                 }
                 if n < 2 {
                     return Err(Refused(format!("a switch at {:08x} the guard rule doesn't bound", va)));

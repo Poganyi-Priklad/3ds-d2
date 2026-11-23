@@ -624,6 +624,66 @@ The stubs in `.text`'s slack stay as they are: in a build without Box86 their by
 
 What this leaves of the plan above: the natives are still called through the Bridge's shim with the registers copied to the CPU and back (no `ENTRY` rows, no adapter the recompiler emits), so the call's cost is as it was; and the Box86 build hooks as before, with its 39 functions changed since compiled. Both are for a profile from the console to ask for.
 
+### The first console run of the app without Box86 (#138)
+
+The AOT CIA of `26ec4c8` stopped twice on a New 3DS XL (Sentry `3DS-D2-1G`, two events), each a function a build without Box86 has nothing to run:
+
+| What the player did | The stop | Why it wasn't compiled | The fix |
+|---|---|---|---|
+| Loaded a character from the menu | `00646be0`: no compiled code here | A callback seven sites push as an immediate. It follows a switch's table with no pad, and the rule for pushed and moved immediates took only a target after a pad or a `ret`. | The data pointers' third rule for those immediates too: on 16 bytes after anything, where it decodes as a function that returns. |
+| Chose Exit Diablo II | `00681aa1`: an exit in the compiled code | The C runtime's own exit: its last instruction calls `ExitProcess` through the import, and a call through a pointer that doesn't return was refused. | Such a call is an exit to the import's shim. With Box86 the thread goes on there; `CpuAot` runs the shim in place (`aot_exit`), and its `request_stop`, empty until now, makes the thread yield at that trap for good. |
+
+The lane's save doesn't reach the first, and none of its scripts left through the menu: `tests/m4/scripts/menu-exit.txt` does now (`AOT_RUNS=menu-exit`, by name alone, since its end is an exit). 14,311 functions are compiled against 14,302, 196 refused against 201.
+
+Both stops froze the console, the HOME button dead: `abort()` logs, breaks and loops, in the x86 build as well. Not changed here.
+
+### Every function covered (#138)
+
+A third stop on the console (Sentry `3DS-D2-1G`, third event): talking to Cain about the Cube reached `0049d3c0`, refused for `imul cx, cx, 0xf` (a 16-bit `imul` of two or three operands; compiled since `ec67ff1`). Each of the 195 functions still refused was a stop of that kind waiting for a player to reach it, so a build without Box86 now refuses none it can't run another way. The lane doesn't reach most of them: what follows is compiled, not proven by a run.
+
+| The recompiler, `CPU=aot` | Compiled | Refused | Loose | Exits left in the C |
+|---|---|---|---|---|
+| `ec67ff1` | 14,312 | 195 | | 275 |
+| Loose functions | 14,446 | 61 | 149 | 18 |
+| With the rest below | 14,505 | 2 | 177 | 6 |
+
+The 2 refused are the C runtime's memcpy and memmove (`006829c0`, `00683840`: switches the guard rule doesn't bound), which the dispatcher does itself. The 6 exits are calls to imports that don't return, which `CpuAot` runs in place.
+
+**Loose functions.** A function refused only for its stack (esp at a `ret` not known to be the entry's, a tail call to an import or an intrinsic, `leave` from a register, an SEH epilogue of unknown size) is compiled without the promise the others make. The recompiler's `--loose` does it, which `scripts/docker.sh` passes for a build without Box86 (`AOT_CPU=aot`, the AOT CIA) and never for a Box86 build.
+
+- **Its form:** `uint32_t sig_<va>(AotRegs *R)`, every register through the context, no check of esp or of the return address. It returns the address control goes to next and leaves esp in the context, whatever it is.
+- **Who runs it:** the dispatcher alone. Its table row's pops are `AOT_POPS_LOOSE` (0xff); a compiled caller reaches it by a callout to its address, as it would reach code that isn't compiled, and takes esp as it comes back.
+- **What they are:** 177, many of them pieces of functions (SEH funclets, hand-written C runtime code entered in the middle) that may never be entered at all.
+- **Seen in a log:** the first run of each is logged ("cpu_aot: the loose function … ran").
+- **Testing the mechanism:** `AOT_LOOSE=<va>,<va>` makes loose functions of compiled ones. With six of the town walk's hot functions loose (`524a30,625480,65c310,4f6480,463dd0,4f65c0`) the walk runs its 2,005 frames as before. No script reaches a function that is loose by itself.
+- **Cost:** a call to one is a round trip through the dispatcher. Not measured.
+
+**Flags across calls** (only with `--loose`). Seven functions branch on the flags they are entered with and two return flags their callers read (`698795` and `6987d8`, pieces of the C runtime's trigonometry that its sine, cosine and three more call). A pass before the compile finds both sets to a fixpoint. A call to one of the first and a `ret` of one of the second store the flags as an eflags word in `aot_xf`; the entry and the call are then definers of a new flag kind, `AOT_EFL`, whose value is that word. The dispatcher yields only at traps, so nothing runs between the store and the read. A Box86 build refuses these functions as before.
+
+**`AOT_EFL` elsewhere** (all builds): `sahf` (a reader of OF after it is still refused: `sahf` doesn't set it), `bt`, `bts`, `btr` and `btc` on 4-byte operands, the form that indexes memory by a register included (CF alone), `ucomisd` and `comisd`.
+
+**x87 instructions and eflags** (all builds). Capstone gives an x87 instruction's FPU flags in the field the recompiler read as eflags, so an `fld` or `fstp` between a compare and its branch looked like it changed the flags and the function was refused. An x87 instruction now has no effect on eflags, but `fcomi`, `fcomip`, `fucomi` and `fucomip` (which set them) and `fcmov` (which reads them).
+
+**SSE2** (only with `--loose`). The C runtime's math has SSE2 paths, taken when CPUID reports SSE2. The app and the lane report none (`rt::kCpuidNoSimd`), so these don't run; they are compiled so that they aren't stops if that ever changes.
+
+- **State:** `xmm0`-`xmm7` per thread, after the fiber's x87 state. No MXCSR: rounding is to nearest, `ldmxcsr` does nothing, `stmxcsr` gives the starting value.
+- **Instructions:** the moves (`movapd`, `movupd`, `movaps`, `movups`, `movdqa`, `movdqu`, `movlpd`, `movhpd`, `movsd`, `movq`, `movd`), `and`, `or`, `xor` and `andn` in their pd, ps and integer forms, `add`, `sub`, `mul` and `div` (pd and sd), `sqrtsd`, `psrlq`, `psllq`, `paddq`, `psubq`, `paddd`, `psubd`, `unpcklpd`, `unpckhpd`, `pextrw`, `pinsrw`, `pshufd`, `pmaxsw`, `pcmpeqd`, `pmovmskb`, `cvtsi2sd`, `cvtsd2si`, `cvttsd2si`, `cvtdq2pd`, the `cmp` predicates (sd and pd), `ucomisd`, `comisd`.
+
+**The rest** (all builds):
+
+- **`fnsave` and `frstor`:** the 108-byte protected-mode image; `fnsave` leaves the `fninit` state.
+- **`repe` and `repne` with `scasb`, `scasw`, `scasd`, `cmpsw`, `cmpsd`:** the `scas` forms' flags aren't modelled (a reader is refused); the `cmps` ones' are.
+- **Segment registers read** as the constants a Windows process has (cs 0x1b; ds, es and ss 0x23; fs 0x3b; gs 0).
+- **`int` and `into`:** a stop naming the address. The 16 `int 6` pieces are the invalid entries of the C runtime's FDIV workaround table.
+- **A `jmp` to the next instruction** where no block starts: nothing.
+- **A switch with no guard and no byte table:** its entries are counted while they are addresses in the function's next 4 KiB that decode. It doesn't bound memcpy's or memmove's (a table entered one entry in, and one indexed with negative values).
+
+**memcpy and memmove in the dispatcher.** A call that reaches `006829c0` or `00683840` with no compiled code is done by `aot_memmove` on the three arguments, eax the destination, and returned (`cdecl`). Compiled callers already had them as intrinsics; this is for a call through a pointer.
+
+**Runs.** On `CpuAot`: the lane's scripts as before (2,005, 3,255 and 4,071 frames, "0 differ; 39 natives bound"), `menu-exit` exit code 0, none with a loose function's line. The AOT CIA (`c907cd8b58be-aot6c8f32`) does the town walk in Azahar at 250 frames a 10 s window and leaves through the menu. The Box86 lanes, whose recompiler takes the all-builds parts: 0 differ (10.7M, 12.7M and 46.6M calls of 13,980 functions against 13,965), Box86 ran 3,119,820 x86 bytes as before; the x86 CIA does the same walk in Azahar. Not run on a console.
+
+`AOT_C_ONLY=1` in front of `scripts/docker.sh test aot` stops after the recompiler: the C and the report in `build/aot/spike`, no build, no run.
+
 ### Threads that wait in place (#138, planned)
 
 The strict report's largest number is the waits: 435,032 in Act II, nearly all `Sleep`. Today a shim that must wait asks the Bridge to stop; compiled code unwinds (an exit to the return sites' trap), WinVita's `CooperativeScheduler` runs another thread's slice, and when the first runs again the trap re-enters each compiled function at its return site (`reent_<va>`). All of it exists because the guest threads share one host stack.

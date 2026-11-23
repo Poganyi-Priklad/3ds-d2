@@ -79,7 +79,7 @@ build_id() { run_in "$TOOLCHAIN_IMAGE" sh scripts/build-id.sh; }
 # the user's Game.exe (mounted read-only) and writes C into build/aot/spike/,
 # which the lane, the host cases and package-cia then compile in (AOT=...).
 # The output is the user's Game.exe in another form: it stays under build/
-# and in their own build. aot_prepare <game-dir> sets AOT_MAKE.
+# and in their own build. aot_prepare <game-dir> [<cpu>] sets AOT_MAKE.
 AOT_MAKE=()
 # The set compiled: tools/aot/<D2_AOT_SET>.args (spike, the default, or
 # coverage: tools/aot/coverage.py's list, issue #115), comment lines left out.
@@ -151,10 +151,16 @@ aot_prepare() {
     local game; game="$(cd "$1" && pwd)"
     local saved=(${RUN_EXTRA[@]+"${RUN_EXTRA[@]}"})
     # AOT_PART_MB (issue #135): the most C in one of the functions' files (8; a big one takes gcc GBs).
-    RUN_EXTRA=(-v "$(host_path "$game/Game.exe"):/aot/Game.exe:ro" -e "AOT_PART_MB=${AOT_PART_MB:-8}")
+    RUN_EXTRA=(-v "$(host_path "$game/Game.exe"):/aot/Game.exe:ro" -e "AOT_PART_MB=${AOT_PART_MB:-8}" -e "AOT_LOOSE=${AOT_LOOSE:-}")
+    # For a build without Box86 (AOT_CPU=aot, or <cpu> aot: the aot CIA; issue #138), --loose: the functions
+    # refused only for their stack compiled loose, for its dispatcher alone. A build with Box86 gets none:
+    # they stay Box86's, and its C is what it was. AOT_LOOSE=<va>,...: those loose too (a test: the lane reaches
+    # none of the others, and the dispatcher names each one's first run).
+    local loose=()
+    [ "${2:-${AOT_CPU:-}}" = aot ] && loose=(--loose)
     aot_recompiler_build
     # shellcheck disable=SC2046
-    aot_recompile "$AOT_RECOMPILER" /aot/Game.exe --out build/aot/spike $(aot_args)
+    aot_recompile "$AOT_RECOMPILER" /aot/Game.exe --out build/aot/spike ${loose[@]+"${loose[@]}"} $(aot_args)
     RUN_EXTRA=(${saved[@]+"${saved[@]}"})
     AOT_MAKE=(AOT=/work/build/aot/spike)
     aot_make_opts
@@ -246,10 +252,11 @@ test)
         # the production mode instead of the check (the lane's end alone is judged then); AOT_SPLIT=1:
         # compiled functions calling each other through Box86 (tests/m4/Makefile).
         D2_AOT_BUILD="${D2_AOT_BUILD:-1}" aot_prepare "$2"
+        [ "${AOT_C_ONLY:-}" = 1 ] && exit 0   # the recompiler's C and report alone (build/aot/spike): no build, no run
         runs=("town-walk 70000" "fight 120000")
         [ -n "${3:-}" ] && runs+=("act2-east 150000")
         if [ -n "${AOT_RUNS:-}" ]; then
-            all=("${runs[@]}"); runs=()
+            all=("${runs[@]}" "menu-exit 45000"); runs=()   # menu-exit: by name alone (its end is an exit)
             for r in "${all[@]}"; do [[ " $AOT_RUNS " == *" ${r% *} "* ]] && runs+=("$r"); done
         fi
         # AOT_OUT=<dir under build/>: this run's folders and logs there (build/m4-aot); AOT_BIN=<dir>: the
@@ -476,7 +483,7 @@ package-cia)   # [<game-dir> | --slim|--full <game-dir>]: the game app (+ the us
     fi
     if [ "${D2_AOT_BUILD:-}" = 1 ] || [ "${D2_AOT_BUILD:-}" = keep ]; then   # the AOT spike (issue #113): needs the user's Game.exe (keep: the C the last run wrote)
         [ -n "$art" ] || die "D2_AOT_BUILD=$D2_AOT_BUILD package-cia <game-dir>: the recompiler reads its Game.exe"
-        aot_prepare "$art"
+        aot_prepare "$art" "$cia_cpu"
         echo "docker.sh: this CIA holds code compiled from Game.exe, which may be shared; Game.exe, the MPQs and saves may not (docs/aot.md)"
     fi
     # Reports (issue #26): the build ID and version ("0.4.0-dev" unless built

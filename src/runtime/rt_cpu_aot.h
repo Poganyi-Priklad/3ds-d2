@@ -31,7 +31,8 @@ bool cpu_aot_is_trap(Cpu &c, uint32_t va);
 // The running thread stops here until the scheduler runs it again (a yield or
 // a wait the trap just asked for); the registers are `c`'s on both sides.
 void cpu_aot_yield(Cpu &c);
-// The running thread's x87 state (416 bytes, aot_rt.h's AotFpu).
+// The running thread's x87 state (416 bytes, aot_rt.h's AotFpu), with its
+// xmm0..7 after it (128 bytes, AotXmm).
 void *cpu_aot_fpu(Cpu &c);
 // Code changed since this was last asked (a native's hook): true once.
 bool cpu_aot_take_code_changed(Cpu &c);
@@ -40,6 +41,9 @@ void cpu_aot_set_code_span(Cpu &c, uint32_t lo, uint32_t hi);
 // After a trap that asked for no yield: whether the running thread's slice is
 // over (its share of trap calls made). True once; cpu_aot_yield then.
 bool cpu_aot_slice_over(Cpu &c);
+// The most any live thread has used of its host stack, and a stack's size,
+// in bytes (INFO's line). It reads each stack's unused part: not every frame.
+void cpu_aot_stack(uint32_t *peak, uint32_t *size);
 // Each live thread's host stack and the most of it used ("cpu_aot: ..."),
 // for the lane's end; empty without CpuAot.
 std::vector<std::string> cpu_aot_lines();
