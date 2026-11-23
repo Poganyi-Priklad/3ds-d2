@@ -1021,6 +1021,7 @@ std::atomic<bool> g_lock_on{false};
 // would put them a quarter second apart.
 std::atomic<bool> g_lock_in_game{false};
 bool g_lock_test = false;
+uint32_t g_stop_test_s = 0;   // stoptest=<s> in settings.txt: a CpuAot stop that long after the first heartbeat (issue #139)
 int32_t g_lock_err_us = 0;    // the render thread's: where the swaps fall from a refresh's middle, averaged
 uint64_t g_lock_last_us = 0;  // the render thread's: the last swap
 std::atomic<uint32_t> g_lock_pushes{0};   // frames the clock was moved for
@@ -1657,6 +1658,8 @@ void load_settings()
                                                        : g_ss.port_options() & ~game::kPortCore2Draw);
         else if (std::strncmp(line, "copycheck=", 10) == 0)   // a measurement's (Azahar), issue #80
             g_copy_check = std::atoi(line + 10) != 0;
+        else if (std::strncmp(line, "stoptest=", 9) == 0)   // a stop as a test (issue #139)
+            g_stop_test_s = (uint32_t)std::atoi(line + 9);
         else if (std::strncmp(line, "locktest=", 9) == 0)   // the frame lock against the host clock (Azahar), issue #86
             g_lock_test = std::atoi(line + 9) != 0;
         else if (std::strncmp(line, "drawphases=", 11) == 0)   // the draw natives timed (issue #80)
@@ -2683,6 +2686,11 @@ int main()
         // left: the cache goes down to its minimum, once per new take. What
         // stays in the spare after it does not hold the cache there.
         const uint64_t t0 = rt::now_us();
+        static const uint64_t first = t0;
+        if (g_stop_test_s && t0 - first >= (uint64_t)g_stop_test_s * 1000000u) {
+            g_stop_test_s = 0;
+            d2rt::cpu_aot_stop_test();
+        }
         const rt::MemoryReport m = rt::memory_report();
         static uint32_t spare_takes_seen = 0;
         const bool spare_taken = m.spare_takes != spare_takes_seen;
@@ -2864,10 +2872,19 @@ int main()
         status("Diablo II ran out of memory (%u requests refused, see game.log).", rt::stats().alloc_failures);
     else if (game::fatal_exit_caller())
         status("Diablo II stopped on an internal error at %08lx.", (unsigned long)game::fatal_exit_caller());
+    // A stop of the build without Box86 (issue #139): what it can't run.
+    const char *const stopped = d2rt::cpu_aot_stop_text();
+    static char stopped_why[240];
+    if (stopped) {
+        status("FATAL: the compiled code stopped:");
+        status("%s", stopped);
+        std::snprintf(stopped_why, sizeof stopped_why, "the compiled code stopped: %s", stopped);
+    }
     // A report (issue #26), now that the game's memory is free: for an
     // error, or because the player asked for one on the INFO tab.
     const char *why = !r.loaded                    ? "the game did not start"
                       : rt::stats().alloc_failures ? "ran out of memory"
+                      : stopped                    ? stopped_why
                       : game::fatal_exit_caller()  ? "stopped on an internal error"
                       : g_ss.report_requested()    ? "asked for by the player"
                       : g_prof_used                ? "a profiler run"

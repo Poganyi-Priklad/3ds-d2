@@ -285,6 +285,10 @@ int main(int argc, char **argv)
     opt.trap_report = 250;
     opt.heartbeat_ms = 10000;
     opt.heartbeat = [] {   // as the console does it (M4_POOL_RESERVE_MB: another reserve)
+        // M4_STOP_TEST=<n>: a CpuAot stop at the n-th heartbeat (with CPU_AOT_STOP_IN_PLACE, the console's end; issue #139)
+        static int stop_at = std::getenv("M4_STOP_TEST") ? std::atoi(std::getenv("M4_STOP_TEST")) : 0;
+        if (stop_at && --stop_at == 0)
+            d2rt::cpu_aot_stop_test();
         static const uint32_t reserve = std::getenv("M4_POOL_RESERVE_MB")
                                             ? (uint32_t)std::atoi(std::getenv("M4_POOL_RESERVE_MB")) << 20
                                             : game::kCtrPoolReserve;

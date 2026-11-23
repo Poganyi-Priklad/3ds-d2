@@ -151,6 +151,10 @@ public:
     }
     bool slice_over()
     {
+        if (stop_test_ && cur_) {
+            stop_test_ = false;
+            cpu_aot_stop("a stop asked for as a test (stoptest)", regs_[R_EIP]);
+        }
         if (stop_ && cur_)
             return true;
         if (!limit_ || !cur_ || ++calls_ < std::max<uint64_t>(16, limit_ >> 10))
@@ -287,6 +291,10 @@ private:
     uint64_t limit_ = 0, calls_ = 0;
     bool hit_ = false;
     bool stop_ = false;   // request_stop
+public:
+    bool stop_test_ = false;   // cpu_aot_stop_test: the next trap call stops the run
+    bool on_fiber() const { return cur_ != nullptr; }
+private:
     alignas(8) uint8_t boot_fpu_[416 + 128] = {};
 
 public:
@@ -323,6 +331,21 @@ std::vector<std::string> cpu_aot_lines()
         CpuAot::g_self->lines(out);
     return out;
 }
+void cpu_aot_stop_test()
+{
+    if (CpuAot::g_self)
+        CpuAot::g_self->stop_test_ = true;
+}
+// A stop on a thread's fiber: the thread yields for good, and the scheduler,
+// asked to shut down, returns to the host, which ends the run as it ends any.
+static bool stop_in_place()
+{
+    if (!CpuAot::g_self || !CpuAot::g_self->on_fiber())
+        return false;
+    rt::request_exit(86);
+    for (;;)
+        CpuAot::g_self->yield();
+}
 
 #else   // no fibers on this host yet (the 3DS: a context switch of its own, docs/aot.md)
 
@@ -338,17 +361,33 @@ void cpu_aot_set_code_span(Cpu &, uint32_t, uint32_t) {}
 bool cpu_aot_slice_over(Cpu &) { return false; }
 void cpu_aot_stack(uint32_t *peak, uint32_t *size) { *peak = *size = 0; }
 std::vector<std::string> cpu_aot_lines() { return {}; }
+void cpu_aot_stop_test() {}
+static bool stop_in_place() { return false; }
 
 #endif
+
+static char g_stop_text[200];
+
+const char *cpu_aot_stop_text() { return g_stop_text[0] ? g_stop_text : nullptr; }
 
 void cpu_aot_stop(const char *what, uint32_t at)
 {
     rt::logf("cpu_aot: STOP at %08x: %s", at, what);
+    if (g_stop_text[0])   // a second stop while the first ends the run: nothing to add to it
+        std::abort();
+    std::snprintf(g_stop_text, sizeof g_stop_text, "%s %08x", what, (unsigned)at);
+#ifdef __3DS__
+    // The app's own end (issue #139): the game's threads stop where they are,
+    // run_exe returns, and the app shows the stop, keeps its report and leaves
+    // on START. abort() froze the console. Off a fiber (the start) there is
+    // no scheduler to return to.
+    stop_in_place();
+    std::abort();
+#else
+    if (std::getenv("CPU_AOT_STOP_IN_PLACE"))   // the 3DS's way, on the lane
+        stop_in_place();
     std::fprintf(stderr, "[rt] RESULT exited=0 timed_out=0 code=86 cpu_aot stopped at %08x: %s\n", at, what);
     std::fflush(stderr);
-#ifdef __3DS__
-    std::abort();   // the app's own end for a fatal error: its report and its screen
-#else
     std::_Exit(86);
 #endif
 }

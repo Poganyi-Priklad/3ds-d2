@@ -29,6 +29,19 @@ extern "C" {
 }
 #endif
 
+// A stop from compiled code: CpuAot's (the app's own end on the console,
+// issue #139); a Box86 build has no such end and aborts as before.
+[[noreturn]] static void aot_stop(const char *what, uint32_t at)
+{
+#ifdef D2RT_CPU_AOT
+    d2rt::cpu_aot_stop(what, at);
+#else
+    (void)what;
+    (void)at;
+    std::abort();
+#endif
+}
+
 extern "C" {
 uint8_t *aot_mem = nullptr;
 uint32_t aot_eflags = 0x202;   // aot_rt.h: pushfd's word (IF set, as a thread starts)
@@ -1886,6 +1899,16 @@ static bool cpuaot_dispatch(d2rt::Cpu &c, uint32_t eip, uint32_t until)
                      "to their functions' addresses",
                      (unsigned)++checks, (unsigned)changed, changed ? ": " : "", names.substr(0, 400).c_str(),
                      (unsigned)rt::entry_natives().size());
+#ifdef D2RT_CPU_AOT
+            // The start's check is the Game.exe's (issue #139): with every
+            // native's site known to the recompiler, a function that differs
+            // then is a Game.exe other than the one compiled, and nothing can
+            // run it. (D2_NATIVE_MASK, a test's: a group compiled and not
+            // applied differs, and the run goes on to where it is reached.)
+            if (checks == 1 && changed && !std::getenv("D2_NATIVE_MASK"))
+                d2rt::cpu_aot_stop("this Game.exe isn't the one this build was compiled from; functions that differ, the first at",
+                                   (uint32_t)std::strtoul(names.c_str(), nullptr, 16));
+#endif
         }
         if (aot_mem[eip] == 0xe9) {   // a native's hook at the entry: its shim's trap
             int32_t rel;
@@ -2156,7 +2179,7 @@ void aot_call_out(uint32_t x, AotRegs *t, uint32_t pops)
         if (r[4] != want || r[3] != keep[0] || r[5] != keep[1] || r[6] != keep[2] || r[7] != keep[3]) {
             rt::logf("aot: a callout to %08x (return %08x) came back with esp %08x, not %08x, where nothing can "
                      "exit: the compiled caller can't go on", x, ra, r[4], want);
-            std::abort();
+            aot_stop("a callout came back with another esp, to", x);
         }
         return;
     }
@@ -2295,19 +2318,19 @@ void aot_cpuid(uint32_t *eax, uint32_t *ebx, uint32_t *ecx, uint32_t *edx)
 void aot_bad_ret(uint32_t fn, uint32_t esp0, uint32_t esp)
 {
     rt::logf("aot: %08x returned with esp %08x, entered with %08x: the static stack doesn't hold", fn, esp, esp0);
-    std::abort();
+    aot_stop("a function returned with another esp than it was entered with:", fn);
 }
 
 void aot_unreachable(uint32_t va)
 {
     rt::logf("aot: reached %08x, which the recompiler took for unreachable", va);
-    std::abort();
+    aot_stop("code the recompiler took for unreachable was reached at", va);
 }
 
 void aot_fault(uint32_t va)
 {
     rt::logf("aot: a division by zero at %08x", va);
-    std::abort();
+    aot_stop("a division by zero at", va);
 }
 
 void aot_journal(uint32_t va, uint32_t n)
