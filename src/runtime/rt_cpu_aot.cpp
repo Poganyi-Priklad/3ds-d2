@@ -224,6 +224,26 @@ public:
 
     bool is_trap(uint32_t va) const { return va >= trap_lo_ && va < trap_hi_; }
     bool trap(uint32_t va) { return trap_(*this, va); }
+    // The runtime's in-line intrinsics (the clock reads, the lock calls that
+    // neither wait nor wake): served by the dispatcher and by a compiled
+    // caller's callout without the Bridge (cpu_aot_intrinsic). A few slots,
+    // found by a scan.
+    bool set_intrinsic_nogil(uint32_t slot_va, IntrinNoGilFn fn) override
+    {
+        if (!fn || intrin_n_ >= kIntrins)
+            return false;
+        intrin_[intrin_n_].va = slot_va;
+        intrin_[intrin_n_++].fn = fn;
+        return true;
+    }
+    IntrinNoGilFn intrinsic(uint32_t va) const
+    {
+        for (int k = 0; k < intrin_n_; k++)
+            if (intrin_[k].va == va)
+                return intrin_[k].fn;
+        return nullptr;
+    }
+    bool code_changed() const { return code_changed_; }
     void yield()
     {
         Fiber *f = cur_;
@@ -291,6 +311,9 @@ private:
     uint64_t limit_ = 0, calls_ = 0;
     bool hit_ = false;
     bool stop_ = false;   // request_stop
+    static constexpr int kIntrins = 8;
+    struct { uint32_t va; IntrinNoGilFn fn; } intrin_[kIntrins] = {};
+    int intrin_n_ = 0;
 public:
     bool stop_test_ = false;   // cpu_aot_stop_test: the next trap call stops the run
     bool on_fiber() const { return cur_ != nullptr; }
@@ -319,6 +342,8 @@ void *cpu_aot_fpu(Cpu &c) { return static_cast<CpuAot &>(c).fpu(); }
 bool cpu_aot_take_code_changed(Cpu &c) { return static_cast<CpuAot &>(c).take_code_changed(); }
 void cpu_aot_set_code_span(Cpu &c, uint32_t lo, uint32_t hi) { static_cast<CpuAot &>(c).set_code_span(lo, hi); }
 bool cpu_aot_slice_over(Cpu &c) { return static_cast<CpuAot &>(c).slice_over(); }
+Cpu::IntrinNoGilFn cpu_aot_intrinsic(Cpu &c, uint32_t va) { return static_cast<CpuAot &>(c).intrinsic(va); }
+bool cpu_aot_code_changed(Cpu &c) { return static_cast<CpuAot &>(c).code_changed(); }
 void cpu_aot_stack(uint32_t *peak, uint32_t *size)
 {
     *peak = CpuAot::g_self ? (uint32_t)CpuAot::g_self->stack_peak() : 0;
@@ -359,6 +384,8 @@ void *cpu_aot_fpu(Cpu &) { return nullptr; }
 bool cpu_aot_take_code_changed(Cpu &) { return false; }
 void cpu_aot_set_code_span(Cpu &, uint32_t, uint32_t) {}
 bool cpu_aot_slice_over(Cpu &) { return false; }
+Cpu::IntrinNoGilFn cpu_aot_intrinsic(Cpu &, uint32_t) { return nullptr; }
+bool cpu_aot_code_changed(Cpu &) { return false; }
 void cpu_aot_stack(uint32_t *peak, uint32_t *size) { *peak = *size = 0; }
 std::vector<std::string> cpu_aot_lines() { return {}; }
 void cpu_aot_stop_test() {}
