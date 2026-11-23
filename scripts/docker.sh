@@ -417,7 +417,7 @@ package-cia)   # [<game-dir> | --slim|--full <game-dir>]: the game app (+ the us
     mode=sdcard
     case "${1:-}" in --slim) mode=slim; shift ;; --full) mode=full; shift ;; --sdcard) shift ;; esac
     stage="$ROOT/build/cia/romfs/game"
-    rm -rf "$ROOT/build/cia/romfs" "$ROOT/build/cia/art-src" "$ROOT/build/cia/game-art" && mkdir -p "$stage"
+    rm -rf "$ROOT/build/cia/romfs" "$ROOT/build/cia/art-src" "$ROOT"/build/cia/game-art* && mkdir -p "$stage"
     RUN_EXTRA=(-e "D2_CIA_MODE=$mode")
     [ -n "${D2_BANNER:-}" ] && RUN_EXTRA+=(-e "D2_BANNER=$D2_BANNER")
     [ -n "${D2_BANNER_FRAMES:-}" ] && RUN_EXTRA+=(-e "D2_BANNER_FRAMES=$D2_BANNER_FRAMES")
@@ -458,8 +458,8 @@ package-cia)   # [<game-dir> | --slim|--full <game-dir>]: the game app (+ the us
     run_in "$HOSTTEST_IMAGE" make -C tests/cpu VARIANT=armv6 lib >/dev/null     # the patched backend tree
     # One CIA a CPU backend, the backend in its name (issue #138): 3ds-d2-x86-... with Box86, 3ds-d2-aot-...
     # with CpuAot, the AOT code alone and no Box86 in it (it needs <game-dir>: the recompiler reads its
-    # Game.exe). D2_CIA_CPU=x86 or aot builds that one alone; both is the default. They install as the
-    # same title, one in place of the other.
+    # Game.exe). D2_CIA_CPU=x86 or aot builds that one alone; both is the default. Each is a title
+    # of its own (package-cia.sh), so both can be installed; they share sdmc:/3ds/3ds-d2.
     cia_cpus="${D2_CIA_CPU:-both}"
     case "$cia_cpus" in both) cia_cpus="x86 aot" ;; x86|aot) ;; *) die "D2_CIA_CPU is x86, aot or both" ;; esac
     if [ -z "$art" ] && [ "$cia_cpus" != x86 ]; then
@@ -501,10 +501,14 @@ package-cia)   # [<game-dir> | --slim|--full <game-dir>]: the game app (+ the us
     [ ${#AOT_MAKE[@]} -gt 0 ] && run_in "$TOOLCHAIN_IMAGE" make -s -j"${AOT_JOBS:-2}" -C tests/cpu/ctr "${report_vars[@]}" aot-objs
     run_in "$TOOLCHAIN_IMAGE" make -s -j8 -C tests/cpu/ctr "${report_vars[@]}" "../../../$ctr_out/3ds-d2-game-cia.elf" "../../../$ctr_out/tls.bin"
     RUN_EXTRA=("${saved_extra[@]}" -e "D2_VERSION=$version" -e "D2_BUILD_ID=$bid" -e "D2_CIA_CPU=$cia_cpu" -e "D2_CIA_ELF_DIR=$ctr_out")   # the CIA's name and code
-    if [ -n "$art" ] && [ ! -d "$ROOT/build/cia/game-art" ]; then   # the icon, banner model and tune (packaging/cia/game_art.py), once
+    # The icon, banner model and tune (packaging/cia/game_art.py), once a backend: the banner's
+    # version line names it (v1.14D-AOT, v1.14D-X86; issue #116), so the two titles are told
+    # apart on the HOME menu.
+    if [ -n "$art" ] && [ ! -d "$ROOT/build/cia/game-art-$cia_cpu" ]; then
         ensure_image banner "$BANNER_IMAGE"
-        mkdir -p "$ROOT/build/cia/game-art"
-        run_in "$BANNER_IMAGE" python3 -I packaging/cia/game_art.py build/cia/art-src build/cia/game-art /opt/pycgfx
+        mkdir -p "$ROOT/build/cia/game-art-$cia_cpu"
+        RUN_EXTRA+=(-e "D2_BANNER_VERSION=v1.14D-$(echo "$cia_cpu" | tr a-z A-Z)")
+        run_in "$BANNER_IMAGE" python3 -I packaging/cia/game_art.py build/cia/art-src "build/cia/game-art-$cia_cpu" /opt/pycgfx
     fi
     run_in "$CTRTOOLS_IMAGE" sh scripts/package-cia.sh
     done
