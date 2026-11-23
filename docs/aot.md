@@ -684,6 +684,17 @@ The 2 refused are the C runtime's memcpy and memmove (`006829c0`, `00683840`: sw
 
 `AOT_C_ONLY=1` in front of `scripts/docker.sh test aot` stops after the recompiler: the C and the report in `build/aot/spike`, no build, no run.
 
+### A stop ends the run in order (#139)
+
+A stop of the build without Box86 (code that isn't compiled, an `int`, a function that returns with another esp, a callout that comes back wrong) called `abort()`, which on the console logs, breaks and loops: the screen froze with the HOME button dead, and the power button was the way out.
+
+- **In place:** `cpu_aot_stop` on a thread's fiber records what stopped and where, asks the scheduler to shut down (exit code 86) and yields for good. No guest code runs after it. `run_exe` returns as it does when the game exits.
+- **The app's end, as after any game:** the bottom screen says "FATAL: the compiled code stopped:" and the stop's line, the session's report is kept with that as its reason (`report.txt`: `reason=the compiled code stopped: <what> <address>`) and offered, and START leaves to the HOME menu.
+- **Off a fiber** (the start, before a thread runs) there is no scheduler to return to: `abort()` as before. So is `abort()` from anywhere else in the app, in both builds.
+- **The Game.exe that was compiled.** The start's code check found functions that differ and went on, to stop wherever one was reached. In a build without Box86 the first check is now a stop itself: "this Game.exe isn't the one this build was compiled from", with the first function that differs. (The app's own check before it, issue #77, takes any Game.exe with 1.14d's entry point.)
+- **Tests:** `stoptest=<s>` in settings.txt stops the run that long after the first heartbeat; on the lane `M4_STOP_TEST=<n>` stops at the n-th heartbeat, and `CPU_AOT_STOP_IN_PLACE=1` ends it the console's way (otherwise the lane's process exits with 86 at once).
+- **Runs:** the lane's town walk with `M4_STOP_TEST=4 CPU_AOT_STOP_IN_PLACE=1` ends with "scheduler stopped: shutdown requested, exit code 86"; with a Game.exe one byte off in `0049d3c0` it ends at the first check ("1 differ: 0049d3c0"). In Azahar the AOT CIA with `stoptest=60` shows the stop, keeps the report and closes its session. Not run on a console.
+
 ### Threads that wait in place (#138, planned)
 
 The strict report's largest number is the waits: 435,032 in Act II, nearly all `Sleep`. Today a shim that must wait asks the Bridge to stop; compiled code unwinds (an exit to the return sites' trap), WinVita's `CooperativeScheduler` runs another thread's slice, and when the first runs again the trap re-enters each compiled function at its return site (`reent_<va>`). All of it exists because the guest threads share one host stack.

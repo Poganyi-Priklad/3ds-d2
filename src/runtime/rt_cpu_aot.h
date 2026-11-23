@@ -47,7 +47,14 @@ void cpu_aot_stack(uint32_t *peak, uint32_t *size);
 // Each live thread's host stack and the most of it used ("cpu_aot: ..."),
 // for the lane's end; empty without CpuAot.
 std::vector<std::string> cpu_aot_lines();
-// The run can't go on: `what` logged, then the process ends.
+// The run can't go on: `what` logged with the address. On the 3DS, from a
+// thread's fiber, the thread stops there for good and the scheduler is asked
+// to shut down (exit code 86), so the host's run returns and the app ends as
+// it does after any game; elsewhere the process ends.
 [[noreturn]] void cpu_aot_stop(const char *what, uint32_t at);
+// What stopped the run ("<what> <address>"), or null.
+const char *cpu_aot_stop_text();
+// A test: the running thread's next trap call is a stop.
+void cpu_aot_stop_test();
 
 }  // namespace d2rt
