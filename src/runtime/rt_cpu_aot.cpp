@@ -55,7 +55,7 @@ struct Fiber {
     uint32_t tib = 0;
     uint32_t entry = 0;
     bool done = false;
-    alignas(8) uint8_t fpu[416] = {};   // AotFpu holds doubles
+    alignas(8) uint8_t fpu[416 + 128] = {};   // AotFpu (it holds doubles), then xmm0..7 (aot_rt.h's AotXmm)
 };
 
 CpuAotDispatch g_dispatch = nullptr;
@@ -287,7 +287,7 @@ private:
     uint64_t limit_ = 0, calls_ = 0;
     bool hit_ = false;
     bool stop_ = false;   // request_stop
-    alignas(8) uint8_t boot_fpu_[416] = {};
+    alignas(8) uint8_t boot_fpu_[416 + 128] = {};
 
 public:
     static CpuAot *g_self;

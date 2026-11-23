@@ -253,7 +253,7 @@ fn most_common(c: &OMap<String, i64>) -> Vec<(String, i64)> {
     v
 }
 
-pub fn census(img: &Image, starts: &HashSet<u32>, tsv: &str, outdir: &str, hot_logs: &[String], mode_list: &[&'static str], callouts: bool) {
+pub fn census(img: &Image, starts: &HashSet<u32>, tsv: &str, outdir: &str, hot_logs: &[String], mode_list: &[&'static str], callouts: bool, loose: bool) {
     let mut fnames = HashMap::new();
     let sizes = load_list(tsv, Some(&mut fnames));
     let hot = if hot_logs.is_empty() { HashMap::new() } else { load_hot(hot_logs, &sizes) };
@@ -261,7 +261,7 @@ pub fn census(img: &Image, starts: &HashSet<u32>, tsv: &str, outdir: &str, hot_l
     let hot_total = if hot_sum == 0 { 1 } else { hot_sum };
     let mut extra: Vec<u32> = sizes.keys().copied().collect();
     extra.sort();
-    let rep = compile_set(img, starts, &[], &extra, mode_list, outdir, &fnames, callouts);
+    let rep = compile_set(img, starts, &[], &extra, mode_list, outdir, &fnames, callouts, loose);
     let prog = &rep.prog;
     let compiled: BTreeSet<u32> = prog.compiled.clone();
     let refused = &rep.refused;
@@ -513,7 +513,7 @@ pub fn survey(img: &Image, starts: &HashSet<u32>, tsv: &str, callouts: bool) {
         }
         inc(&mut res, "functions", 1);
         inc(&mut res, "switches_bounded", f.switches.len() as i64);
-        match Flags::new(&f) {
+        match Flags::new(&f, &prog) {
             Ok(_) => inc(&mut res, "flags_ok", 1),
             Err(e) => {
                 if e.0.contains("from a call or the entry") {

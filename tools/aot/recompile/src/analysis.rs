@@ -52,7 +52,9 @@ pub struct Analysis<'p, 'a> {
 
 impl<'p, 'a> Analysis<'p, 'a> {
     pub fn new(p: &'p Program<'a>, f: Rc<Func>, outs: Option<Regs>, save_rule: bool) -> Result<Analysis<'p, 'a>, Refused> {
-        let save_rule = save_rule && !p.may_exit.contains(&f.entry);
+        // A loose function (Program::loose) stores every save too: its stack
+        // offsets aren't known, so no pop is known to take one back.
+        let save_rule = save_rule && !p.may_exit.contains(&f.entry) && !p.is_loose(f.entry);
         let mut a = Analysis {
             p,
             f,
@@ -116,6 +118,7 @@ impl<'p, 'a> Analysis<'p, 'a> {
                 }
                 // A tail call to a function that never returns (__report_gsfailure's, from
                 // __security_check_cookie) says nothing of what this one keeps (issue #138).
+                // (A loose function's tail jumps are no exits: all of them.)
                 if f.tails.contains_key(&va)
                     && (!f.exits.contains(&va) || f.callouts.contains_key(&va))
                     && !f.tails[&va].direct().is_some_and(|d| p.noreturn_funcs.contains(&d))
@@ -622,7 +625,7 @@ impl<'p, 'a> Analysis<'p, 'a> {
         let p = self.p;
         let i = &f.insns[&va];
         let m = i.mnemonic.as_str();
-        if f.exits.contains(&va) {
+        if f.exits.contains(&va) || p.loose_jump(f, va) {
             return (p_of(ALL), p_of(ALL));
         }
         if f.noreturn.contains(&va) {
@@ -641,6 +644,11 @@ impl<'p, 'a> Analysis<'p, 'a> {
             return (p_of(s.reads | bit(ESP)), p_of((ALL & !s.preserved) | bit(ESP)));
         }
         if let Some(&t) = f.tails.get(&va) {
+            // A loose function's tail jump hands every register to the
+            // dispatcher, as its ret does.
+            if p.is_loose(f.entry) {
+                return (p_of(ALL), p_of(ALL));
+            }
             let s = p.callee_summary(t);
             return (p_of(s.reads | (outs & s.preserved) | bit(ESP)), p_of(ALL));
         }
@@ -660,7 +668,10 @@ impl<'p, 'a> Analysis<'p, 'a> {
 
     fn liveness(&mut self, outs: Option<Regs>, save_rule: bool) {
         let f = self.f.clone();
-        let outs = outs.unwrap_or((ALL & !self.preserved) & !bit(ESP));
+        let mut outs = outs.unwrap_or((ALL & !self.preserved) & !bit(ESP));
+        if self.p.is_loose(f.entry) {
+            outs = ALL & !bit(ESP);   // every register is the dispatcher's to pass on
+        }
         self.outs = outs;
         let mut skip: Regs = 0;
         if save_rule {

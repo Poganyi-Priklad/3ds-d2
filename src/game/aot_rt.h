@@ -51,7 +51,7 @@ typedef struct {
     uint32_t va;
     AotRootFn sig;        /* its register-signature code (journaled in aotj_funcs) */
     const char *name;
-    uint8_t keep, pops;
+    uint8_t keep, pops;   /* pops AOT_POPS_LOOSE: a loose function (below) */
     uint8_t out;          /* bit k: r[k] is an output its compiled callers read */
     uint8_t preserved;    /* bit k: r[k] comes back as it went in */
     uint8_t root;         /* also in aot_roots */
@@ -81,6 +81,14 @@ typedef struct {
     /* 1: it has x87 code (issue #136), on the CPU's own x87 state. */
     uint8_t x87;
 } AotFunc;
+/* A loose function (issue #138, the recompiler's --loose, for a build without
+ * Box86): esp at its rets, or what its tail jump's target pops, isn't known
+ * when it is compiled (004bae60's pop ebp; jmp eax through a vtable). Its sig
+ * takes all eight registers and checks nothing at a ret: r[4] comes back as
+ * the ret or the jump left it, and what sig returns is where control goes on
+ * (the return address it popped, the jump's target). Only the dispatcher runs
+ * one; compiled callers reach it by a callout to its address. */
+#define AOT_POPS_LOOSE 0xffu
 /* The natives' hand-backs compiled (issue #138; AOT_SYM(resumes)): `func`'s
  * code entered at `va`, where a native that did its first instructions hands
  * the call back (resume_original), with all eight registers as there; r[4]
@@ -262,6 +270,100 @@ static_assert(sizeof(AotFpu) == 416, "AotFpu: Box86's x87 fields");
 _Static_assert(sizeof(AotFpu) == 416, "AotFpu: Box86's x87 fields");
 #endif
 extern AotFpu *aot_fpu;   /* aot_spike.cpp: the running emu's */
+/* xmm0..7 (issue #138, a build without Box86: the C runtime's SSE2 pow, log
+ * and exp, which it takes where cpuid reports SSE2). Each is two 64-bit
+ * halves; a double is its bits. No MXCSR is kept: every exception masked,
+ * round to nearest, as a thread starts and as that code leaves it. */
+typedef struct {
+    uint64_t q[2];
+} AotXmm;
+extern AotXmm *aot_xmm;   /* aot_spike.cpp: the running thread's */
+AOT_INL double aot_xd(uint64_t q)
+{
+    double d;
+    memcpy(&d, &q, 8);
+    return d;
+}
+AOT_INL uint64_t aot_xq(double d)
+{
+    uint64_t q;
+    memcpy(&q, &d, 8);
+    return q;
+}
+/* 16 bytes of guest memory (aot_ld64 and aot_st64 are below). */
+AOT_INL AotXmm aot_xld(uint8_t *m, uint32_t a)
+{
+    AotXmm x;
+    memcpy(&x, m + a, 16);
+    return x;
+}
+AOT_INL void aot_xst(uint8_t *m, uint32_t a, AotXmm x)
+{
+    AOT_STORE_HOOK(a, 16);
+    memcpy(m + a, &x, 16);
+}
+/* pmaxsw: the greater of each pair of signed words. */
+AOT_INL AotXmm aot_xmaxsw(AotXmm a, AotXmm b)
+{
+    int16_t x[8], y[8];
+    memcpy(x, &a, 16);
+    memcpy(y, &b, 16);
+    for (int k = 0; k < 8; k++)
+        if (y[k] > x[k])
+            x[k] = y[k];
+    memcpy(&a, x, 16);
+    return a;
+}
+/* pcmpeqd: all ones in each dword that is equal. */
+AOT_INL AotXmm aot_xcmpeqd(AotXmm a, AotXmm b)
+{
+    uint32_t x[4], y[4];
+    memcpy(x, &a, 16);
+    memcpy(y, &b, 16);
+    for (int k = 0; k < 4; k++)
+        x[k] = x[k] == y[k] ? 0xffffffffu : 0u;
+    memcpy(&a, x, 16);
+    return a;
+}
+/* pmovmskb: each byte's top bit. */
+AOT_INL uint32_t aot_xmovmskb(AotXmm a)
+{
+    uint8_t x[16];
+    uint32_t r = 0;
+    memcpy(x, &a, 16);
+    for (int k = 0; k < 16; k++)
+        r |= (uint32_t)(x[k] >> 7) << k;
+    return r;
+}
+/* cvtsd2si (round to nearest even) and cvttsd2si: out of range or NaN is 0x80000000. */
+AOT_INL uint32_t aot_xcvt(double d, int trunc)
+{
+    const double r = trunc ? __builtin_trunc(d) : __builtin_nearbyint(d);
+    if (!(r >= -2147483648.0 && r <= 2147483647.0))
+        return 0x80000000u;
+    return (uint32_t)(int32_t)r;
+}
+/* ucomisd and comisd as AOT_EFL's word: unordered ZF PF CF, below CF, equal ZF. */
+AOT_INL uint32_t aot_xcomi(double a, double b)
+{
+    return a < b ? 1u : a > b ? 0u : a == b ? 0x40u : 0x45u;
+}
+/* cmpsd's and cmppd's predicate (0 eq, 1 lt, 2 le, 3 unord, 4 neq, 5 nlt, 6 nle, 7 ord): all ones or none. */
+AOT_INL uint64_t aot_xcmp(double a, double b, int p)
+{
+    int t;
+    switch (p & 7) {
+    case 0: t = a == b; break;
+    case 1: t = a < b; break;
+    case 2: t = a <= b; break;
+    case 3: t = a != a || b != b; break;
+    case 4: t = !(a == b); break;
+    case 5: t = !(a < b); break;
+    case 6: t = !(a <= b); break;
+    default: t = a == a && b == b; break;
+    }
+    return t ? ~(uint64_t)0 : 0;
+}
 /* Box86's LD2D and D2LD (x87emu_private.c), 80-bit <-> double. */
 void aot_ld2d(const void *ld, double *d);
 void aot_d2ld(const double *d, void *ld);
@@ -417,6 +519,52 @@ AOT_INL void aot_fld80(AotFpu *F, uint8_t *m, uint32_t a)
     memcpy(ld + 10, &d, 8);
     aot_fset(F, 0, d);
 }
+/* fnsave (issue #138: the C runtime's 687d71 around its error handler): the
+ * 108 bytes of protected mode's 32-bit form (cw, sw, the tag word, 16 bytes
+ * of pointers left zero, st0..st7 as 80-bit values), then the state fninit
+ * leaves. frstor: that back. */
+AOT_INL void aot_fnsave(AotFpu *F, uint8_t *m, uint32_t a)
+{
+    uint32_t tw = 0;
+    AOT_STORE_HOOK(a, 108);
+    memset(m + a, 0, 108);
+    for (uint32_t i = 0; i < 8; i++) {
+        const double d = aot_fget(F, i);
+        if (((F->tags >> (2 * i)) & 3u) == 3u)
+            tw |= 3u << (2 * ((F->top + i) & 7u));
+        aot_d2ld(&d, m + a + 28 + 10 * i);
+    }
+    const uint16_t cw = F->cw, sw = (uint16_t)((F->sw & ~0x3800u) | ((F->top & 7u) << 11)), t16 = (uint16_t)tw;
+    memcpy(m + a, &cw, 2);
+    memcpy(m + a + 4, &sw, 2);
+    memcpy(m + a + 8, &t16, 2);
+    F->cw = 0x37f;
+    F->sw = 0;
+    F->top = 0;
+    F->stack = 0;
+    F->tags = 0xffffu;
+}
+AOT_INL void aot_frstor(AotFpu *F, uint8_t *m, uint32_t a)
+{
+    uint16_t cw, sw, tw;
+    memcpy(&cw, m + a, 2);
+    memcpy(&sw, m + a + 4, 2);
+    memcpy(&tw, m + a + 8, 2);
+    F->cw = cw;
+    F->sw = sw;
+    F->top = (sw >> 11) & 7u;
+    F->tags = 0;
+    F->stack = 0;
+    for (uint32_t i = 0; i < 8; i++) {
+        double d;
+        aot_ld2d(m + a + 28 + 10 * i, &d);
+        aot_fset(F, i, d);
+        if (((tw >> (2 * ((F->top + i) & 7u))) & 3u) == 3u)
+            F->tags |= 3u << (2 * i);
+        else
+            F->stack++;
+    }
+}
 /* fstp m80: those bytes again if st0 is still their value (compared as
  * numbers, as on ARMv6), else D2LD. */
 AOT_INL void aot_fstp80(AotFpu *F, uint8_t *m, uint32_t a)
@@ -488,7 +636,11 @@ AOT_INL void aot_stos(uint32_t di, uint32_t v, uint32_t n, int size, int down)
 }
 
 /* Flag kinds (the recompiler's KIND) and condition codes (CC_NUM). */
-enum { AOT_ADD, AOT_SUB, AOT_LOGIC, AOT_INC, AOT_DEC, AOT_NEG, AOT_SHL, AOT_SHR, AOT_SAR, AOT_MUL, AOT_ADC, AOT_SBB };
+enum { AOT_ADD, AOT_SUB, AOT_LOGIC, AOT_INC, AOT_DEC, AOT_NEG, AOT_SHL, AOT_SHR, AOT_SAR, AOT_MUL, AOT_ADC, AOT_SBB, AOT_EFL };
+/* AOT_EFL (issue #138): the flags as bits of eflags in F_A (CF 0x1, PF 0x4,
+ * ZF 0x40, SF 0x80, OF 0x800), where no instruction's operands give them:
+ * sahf's (ah; OF isn't its, and a reader of OF after it is refused), bt's
+ * (CF alone), ucomisd's, and the flags a call hands on or back (aot_xf). */
 enum { CC_O, CC_NO, CC_B, CC_AE, CC_E, CC_NE, CC_BE, CC_A, CC_S, CC_NS, CC_P, CC_NP, CC_L, CC_GE, CC_LE, CC_G };
 
 AOT_INL uint32_t aot_mask(int w) { return w == 4 ? 0xffffffffu : (1u << (8 * w)) - 1; }
@@ -564,8 +716,13 @@ AOT_INL int aot_cc(int cc, int k, int w, uint32_t a, uint32_t b, uint32_t r, uin
         default: break;
         }
     }
-    const int cf = aot_cf(k, w, a, b, r, c), zf = (r & m) == 0, sf = (r & aot_sbit(w)) != 0;
-    const int of = aot_of(k, w, a, b, r, c), pf = !__builtin_parity(r & 0xff);
+    int cf, zf, sf, of, pf;
+    if (k == AOT_EFL) {
+        cf = (int)(a & 1u), pf = (int)((a >> 2) & 1u), zf = (int)((a >> 6) & 1u), sf = (int)((a >> 7) & 1u), of = (int)((a >> 11) & 1u);
+    } else {
+        cf = aot_cf(k, w, a, b, r, c), zf = (r & m) == 0, sf = (r & aot_sbit(w)) != 0;
+        of = aot_of(k, w, a, b, r, c), pf = !__builtin_parity(r & 0xff);
+    }
     switch (cc) {
     case CC_O: return of;
     case CC_NO: return !of;
@@ -589,6 +746,21 @@ AOT_INL int aot_cc(int cc, int k, int w, uint32_t a, uint32_t b, uint32_t r, uin
 static inline int aot_cc_dyn(int cc, int kw, uint32_t a, uint32_t b, uint32_t r, uint32_t c)
 {
     return aot_cc(cc, kw >> 3, kw & 7, a, b, r, c);
+}
+/* Flags that cross a call (issue #138, a build without Box86: the C
+ * runtime's x87 helpers, 698795 leaving ZF for its caller's jz, 6879dd
+ * entered with it): the function that hands them on stores them here as
+ * AOT_EFL's word, at the call or at its ret, and the one that reads them
+ * takes them from here. One guest thread runs at a time, and nothing comes
+ * between the two but the call or the ret. */
+extern uint32_t aot_xf;
+AOT_INL uint32_t aot_flw(int k, int w, uint32_t a, uint32_t b, uint32_t r, uint32_t c)
+{
+    if (k == AOT_EFL)
+        return a;
+    return (aot_cc(CC_B, k, w, a, b, r, c) ? 1u : 0u) | (aot_cc(CC_P, k, w, a, b, r, c) ? 4u : 0u) |
+           (aot_cc(CC_E, k, w, a, b, r, c) ? 0x40u : 0u) | (aot_cc(CC_S, k, w, a, b, r, c) ? 0x80u : 0u) |
+           (aot_cc(CC_O, k, w, a, b, r, c) ? 0x800u : 0u);
 }
 
 #ifdef __cplusplus

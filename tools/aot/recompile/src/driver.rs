@@ -221,10 +221,13 @@ pub fn rel32_targets(img: &Image, want: &HashSet<u32>) -> BTreeSet<u32> {
 /// The compiled functions whose C, with every compiled callee's, never calls Box86.
 pub fn leaves(prog: &Program, compiled: &BTreeSet<u32>) -> HashSet<u32> {
     let direct = |va: u32| -> bool {
+        if prog.is_loose(va) {
+            return true;   // only the dispatcher runs it
+        }
         let f = prog.func(va);
         for t in f.calls.values().chain(f.tails.values()) {
             if let Tgt::Direct(t) = t {
-                if compiled.contains(t) || prog.intrinsics.contains_key(t) || prog.native_direct(*t) {
+                if (compiled.contains(t) && !prog.is_loose(*t)) || prog.intrinsics.contains_key(t) || prog.native_direct(*t) {
                     continue;
                 }
             }
@@ -274,7 +277,7 @@ fn solve_pops(prog: &mut Program, va: u32, full_outs: Regs) -> bool {
         }
         let fix: Vec<(u32, i64)> = guessed.iter().zip(c).map(|(&(site, p), &d)| (site, p + 4 * d)).collect();
         prog.with_pops(va, fix);
-        if Analysis::new(prog, prog.func(va), Some(full_outs), true).is_ok_and(|a| a.esp_ok) {
+        if Analysis::new(prog, prog.func(va), Some(full_outs), true).is_ok_and(|a| stack_why(prog, &a).is_none()) {
             return true;
         }
     }
@@ -282,6 +285,55 @@ fn solve_pops(prog: &mut Program, va: u32, full_outs: Regs) -> bool {
     prog.with_pops(va, Vec::new());
     prog.pops_fix.remove(&va);
     false
+}
+
+/// Why a function can't have the static stack: esp at each of its rets known
+/// to be the entry's. None where it can, and for a loose one, which has none
+/// (Program::loose).
+///
+/// With --loose, its tail jumps through a pointer or to a loose function
+/// too: a callout there is a tail call only with esp the entry's, and where
+/// it isn't, or the target's pops aren't the function's own, the code has
+/// nothing but Box86 to go on in (issue #138: the guard's exit).
+fn stack_why(prog: &Program, a: &Analysis) -> Option<String> {
+    let f = &a.f;
+    if prog.is_loose(f.entry) {
+        return None;
+    }
+    if !a.esp_ok {
+        return Some(format!("esp at a ret isn't known to be the entry's: {}", a.esp_why()));
+    }
+    if prog.loose_on {
+        let mut sites: Vec<(&u32, &Tgt)> = f.tails.iter().filter(|(va, _)| f.exits.contains(va)).collect();
+        sites.sort();
+        for (va, t) in sites {
+            if !t.is_pointer() && !t.direct().is_some_and(|d| prog.is_loose(d)) {
+                continue;
+            }
+            if !f.callouts.contains_key(va) {
+                return Some(format!("the tail jump at {:08x}: what its target pops isn't known", va));
+            }
+            if a.sp_at.get(va).copied().flatten() != Some(0) {
+                return Some(format!("esp at the tail jump at {:08x} isn't known to be the entry's", va));
+            }
+        }
+        // A call to a loose function that doesn't come back to the code after
+        // it is a jump of the dispatcher's (Program::loose_jump).
+        let mut gone: Vec<&u32> = f.noreturn.iter().filter(|va| !f.exits.contains(va)).collect();
+        gone.sort();
+        for va in gone {
+            if f.calls.get(va).and_then(|t| t.direct()).is_some_and(|d| prog.is_loose(d)) {
+                return Some(format!("the call at {:08x} to a loose function doesn't come back", va));
+            }
+        }
+    }
+    None
+}
+
+/// A refusal for the stack alone (stack_why's, and the emitter's for a tail
+/// call whose pops don't agree): what --loose compiles loose.
+fn for_stack(why: &str) -> bool {
+    why.starts_with("esp at ") || why.starts_with("the tail jump at ") || why.starts_with("the call at ") || why.starts_with("tail call ")
 }
 
 pub fn may_block(img: &Image, prog: &Program, vas: &HashSet<u32>) -> HashMap<u32, bool> {
@@ -433,6 +485,10 @@ pub fn hookable(img: &Image, prog: &Program) -> (BTreeMap<u32, (u32, Vec<u8>)>, 
                 continue;
             }
             Ok((keep, hd, t)) => {
+                if prog.is_loose(va) {
+                    why.insert(va, "loose: the dispatcher's alone".to_string());
+                    continue;
+                }
                 if prog.summ[&va].pops.is_none() {
                     why.insert(va, "its ret pops aren't known".to_string());
                     continue;
@@ -524,6 +580,7 @@ pub fn compile_set<'a>(
     outdir: &str,
     names: &HashMap<u32, String>,
     callouts: bool,
+    loose: bool,
 ) -> Compiled<'a> {
     let t0 = Instant::now();
     let mut progress = Progress::new(t0);
@@ -531,6 +588,7 @@ pub fn compile_set<'a>(
     all.extend(roots.iter().copied());
     all.extend(extra.iter().copied());
     let mut prog = Program::new(img, all, natives(), callouts);
+    prog.loose_on = loose;
     let mut want: Vec<u32> = roots.to_vec();
     for &v in extra {
         if !roots.contains(&v) {
@@ -543,17 +601,80 @@ pub fn compile_set<'a>(
     reach_sorted.sort();
     eprintln!("aot: {} functions to compile, {} with their callees, {:.0} s", want.len(), reach.len(), t0.elapsed().as_secs_f64());
     let mut refused: OMap<u32, String> = OMap::new();
+    // What --loose may compile loose: not a root (its trap takes its pops),
+    // nor a function a native stands for (called in C where it hands back).
+    let wanted: HashSet<u32> = want.iter().copied().collect();
+    let nat = natives();
+    let can_loose = |va: u32| loose && wanted.contains(&va) && !roots.contains(&va) && !nat.contains_key(&va);
+    // Each function's direct callers, before any is cut at an exit: theirs
+    // are the exits to set again when it is made loose.
+    let mut callers_of: HashMap<u32, Vec<u32>> = HashMap::new();
+    if loose {
+        for &va in &reach_sorted {
+            let f = prog.func(va);
+            let ts: BTreeSet<u32> = calls_tails(&f).filter_map(|(_, t)| t.direct()).collect();
+            for t in ts {
+                callers_of.entry(t).or_default().push(va);
+            }
+        }
+    }
     // Thunks through a pointer whose pops nothing tells (issue #138): refused, as their decoding would be.
+    // With --loose, loose: its jmp is the dispatcher's, with esp as it is there.
     prog.thunk_pops = Some(prog.compute_thunk_pops());
     for &va in &reach_sorted {
         let f = prog.func(va);
         let mut ptr: Vec<u32> = f.tails.iter().filter(|(_, t)| t.is_pointer()).map(|(k, _)| *k).collect();
         ptr.sort();
         if f.refused.is_none() && f.ret_pops.is_empty() && !ptr.is_empty() && !prog.thunk_pops.as_ref().unwrap().contains_key(&va) {
+            let why = format!("a thunk through a pointer at {:08x} whose pops aren't known", ptr[0]);
+            if can_loose(va) {
+                prog.make_loose(va, &why);
+                continue;
+            }
             let mut g = (*f).clone();
-            g.refused = Some(format!("a thunk through a pointer at {:08x} whose pops aren't known", ptr[0]));
+            g.refused = Some(why);
             prog.set_func(va, g);
         }
+    }
+    // AOT_LOOSE=<va>,<va>... (with --loose): those compiled loose whatever
+    // their stack, to see the lane run some (its scripts reach none of the
+    // others; the dispatcher names each one's first run).
+    if let Ok(list) = std::env::var("AOT_LOOSE") {
+        for v in list.split(',').filter(|v| !v.trim().is_empty()) {
+            let va = parse_hex(v).expect("AOT_LOOSE: hex addresses");
+            if can_loose(va) && prog.func(va).refused.is_none() {
+                prog.make_loose(va, "AOT_LOOSE");
+            } else {
+                eprintln!("aot: AOT_LOOSE: {:08x} can't be compiled loose", va);
+            }
+        }
+    }
+    // Flags across calls (flags.rs), with --loose: which functions read the
+    // flags they are entered with and which hand theirs back, found before
+    // any is compiled, since each changes what its callers and callees are.
+    if loose {
+        loop {
+            let mut grew = false;
+            for &va in &reach_sorted {
+                let f = prog.func(va);
+                if f.refused.is_some() {
+                    continue;
+                }
+                let Ok(fl) = Flags::new_x(&f, &prog, true) else { continue };
+                if fl.needs_in && prog.flag_in.insert(va) {
+                    grew = true;
+                }
+                for t in fl.needs_out {
+                    if prog.flag_out.insert(t) {
+                        grew = true;
+                    }
+                }
+            }
+            if !grew {
+                break;
+            }
+        }
+        eprintln!("aot: flags across calls: {} functions read their entry's, {} hand theirs back", prog.flag_in.len(), prog.flag_out.len());
     }
     for &va in &want {
         let f = prog.func(va);
@@ -575,10 +696,10 @@ pub fn compile_set<'a>(
         for attempt in 0..4 {
             let res: Result<(Regs, Option<Summary>), Refused> = (|| {
                 let a = Analysis::new(&prog, prog.func(va), Some(full_outs), true)?;
-                if !a.esp_ok {
-                    return Err(Refused(format!("esp at a ret isn't known to be the entry's: {}", a.esp_why())));
+                if let Some(why) = stack_why(&prog, &a) {
+                    return Err(Refused(why));
                 }
-                Flags::new(&prog.func(va))?;
+                Flags::new(&prog.func(va), &prog)?;
                 let g = a.garbage;
                 let s2 = if attempt >= 1 {
                     let s2 = Analysis::new(&prog, prog.func(va), None, true)?;
@@ -607,7 +728,18 @@ pub fn compile_set<'a>(
                     // of a decoded pointer, with one argument pushed before
                     // the call that decodes it): each up to 12 more, the
                     // least change in all first, where there are at most four.
-                    if attempt == 0 && e.0.starts_with("esp at a ret") && solve_pops(&mut prog, va, full_outs) {
+                    if attempt == 0 && e.0.starts_with("esp at ") && solve_pops(&mut prog, va, full_outs) {
+                        continue;
+                    }
+                    // Loose, where plain exits would have nothing to exit
+                    // to: its callers' calls become callouts now, for their
+                    // own screening.
+                    if attempt < 3 && for_stack(&e.0) && can_loose(va) && !prog.is_loose(va) {
+                        prog.make_loose(va, &e.0);
+                        let mut vas = vec![va];
+                        vas.extend(callers_of.get(&va).into_iter().flatten().copied());
+                        let lp = prog.loose_pops();
+                        prog.exits_of(&vas, &blocks, &lp);
                         continue;
                     }
                     if attempt < 3 && e.0.starts_with("esp at a ret") && prog.make_plain(va, &e.0) {
@@ -620,6 +752,9 @@ pub fn compile_set<'a>(
         }
     }
     for (va, site) in flags_read_after(img, &prog.compiled).iter() {
+        if prog.flag_out.contains(va) {
+            continue;   // it hands them back in aot_xf (flags.rs), and the caller that reads them was compiled for that
+        }
         refused.insert(*va, format!("its flags are read after the call at {:08x}", site));
     }
     for va in refused.keys() {
@@ -712,10 +847,10 @@ pub fn compile_set<'a>(
                 let f = prog.func(va);
                 let res = (|| {
                     let a = Analysis::new(&prog, f.clone(), Some(outs[&va]), true)?;
-                    if !a.esp_ok {
-                        return Err(Refused(format!("esp at a ret isn't known to be the entry's: {}", a.esp_why())));
+                    if let Some(why) = stack_why(&prog, &a) {
+                        return Err(Refused(why));
                     }
-                    Flags::new(&f)?;
+                    Flags::new(&f, &prog)?;
                     Ok((a.live_in, a.live_out.clone()))
                 })();
                 let (live_in, live_out) = match res {
@@ -743,8 +878,8 @@ pub fn compile_set<'a>(
                 }
                 for (site, t) in calls_tails(&f) {
                     let Tgt::Direct(t) = *t else { continue };
-                    if !prog.compiled.contains(&t) {
-                        continue;
+                    if !prog.compiled.contains(&t) || prog.is_loose(t) {
+                        continue;   // (a loose one's outs are every register)
                     }
                     let live = if f.tails.contains_key(site) { outs[&va] } else { live_out[site] };
                     let g = prog.garbage.get(&t).copied().unwrap_or(0);
@@ -764,6 +899,10 @@ pub fn compile_set<'a>(
                 panic!("signatures: {} functions put off with no refusal", put_off.len());
             }
             for (va, why) in hit.iter() {
+                if for_stack(why) && can_loose(*va) && !prog.is_loose(*va) {
+                    prog.make_loose(*va, why);
+                    continue;
+                }
                 if why.starts_with("esp at a ret") && prog.make_plain(*va, why) {
                     continue;
                 }
@@ -785,6 +924,10 @@ pub fn compile_set<'a>(
             .iter()
             .map(|&va| {
                 let sm = prog.summ[&va];
+                if prog.is_loose(va) {
+                    // Every register in and out, none taken as kept.
+                    return (va, Sig { ins: regs_of(full_outs), outs: regs_of(full_outs), preserved: Vec::new() });
+                }
                 (va, Sig { ins: regs_of(sm.reads & !bit(ESP)), outs: regs_of(outs[&va]), preserved: regs_of(sm.preserved) })
             })
             .collect();
@@ -814,6 +957,12 @@ pub fn compile_set<'a>(
             break;
         }
         for (va, why) in bad.iter() {
+            // A tail call whose pops aren't its target's: a jump the
+            // dispatcher makes, from a loose function.
+            if for_stack(why) && can_loose(*va) && !prog.is_loose(*va) {
+                prog.make_loose(*va, why);
+                continue;
+            }
             refused.insert(*va, why.clone());
             prog.compiled.remove(va);
         }
@@ -888,6 +1037,10 @@ fn write_out<'a>(
                 resume_why.push((x, "a compiled function's entry".to_string()));
                 continue;
             }
+            if prog.is_loose(va) {
+                resume_why.push((x, "in a loose function: no stack offset there".to_string()));
+                continue;
+            }
             if let Some(r) = Flags::read_before_set(&f, x) {
                 resume_why.push((x, format!("flags read at {:08x} before anything sets them", r)));
                 continue;
@@ -928,8 +1081,8 @@ fn write_out<'a>(
         let em = &mut ems[mi];
         for (n, &va) in compiled.iter().enumerate() {
             progress.tick("writing the return sites' entries", n, compiled.len());
-            if !prog.may_exit.contains(&va) {
-                continue;
+            if !prog.may_exit.contains(&va) || prog.is_loose(va) {
+                continue;   // (a loose function's sites have no stack offset to enter with)
             }
             let f = prog.func(va);
             let mut want: Vec<u32> = Vec::new();
@@ -1232,6 +1385,16 @@ fn write_out<'a>(
     if mode_list.contains(&"sig") {
         let em = Emitter::new(&prog, "sig", &sigs);
         for &va in &compiled {
+            if prog.is_loose(va) {
+                // All eight registers in and out, r[4] as its ret or tail
+                // jump left it; what it returns is where control goes on.
+                chunks.push(format!(
+                    "static uint32_t AOT_SYM(fn_{:08x})(uint32_t *r) {{ AotRegs t; for (int k = 0; k < 8; k++) t.r[k] = r[k]; uint32_t to = {}(&t); for (int k = 0; k < 8; k++) r[k] = t.r[k]; return to; }}",
+                    va,
+                    em.name(va)
+                ));
+                continue;
+            }
             let sig = &sigs[&va];
             let mut a = vec!["r[4]".to_string()];
             a.extend(sig.ins.iter().map(|x| format!("r[{}]", x)));
@@ -1253,10 +1416,19 @@ fn write_out<'a>(
             chunks.push(format!("static uint32_t AOT_SYM(fn_{:08x})(uint32_t *r) {{ {} return r[0]; }}", va, body));
         }
         let index: HashMap<u32, usize> = compiled.iter().enumerate().map(|(k, &v)| (v, k)).collect();
+        // The compiled functions `f` calls in C: not a loose one, a callout
+        // (and from a loose function, not its tail jumps' targets).
+        let in_c = |f: &Func| -> BTreeSet<u32> {
+            calls_tails(f)
+                .filter(|(site, _)| !(prog.is_loose(f.entry) && f.tails.contains_key(site)))
+                .filter_map(|(_, t)| t.direct())
+                .filter(|t| cset.contains(t) && !prog.is_loose(*t))
+                .collect()
+        };
         for &va in &compiled {
             let f = prog.func(va);
             let rg = code_ranges(&f);
-            let cl: BTreeSet<usize> = calls_tails(&f).filter_map(|(_, t)| t.direct()).filter(|t| cset.contains(t)).map(|t| index[&t]).collect();
+            let cl: BTreeSet<usize> = in_c(&f).into_iter().map(|t| index[&t]).collect();
             chunks.push(format!(
                 "static const uint32_t AOT_SYM(rg_{:08x})[] = {{{}}};",
                 va,
@@ -1288,12 +1460,21 @@ fn write_out<'a>(
         }
         ex.set("plain_why", pw);
         report.set("exits", ex);
+        if prog.loose_on {
+            // The loose functions, each with the refusal it would have had.
+            let lj: Vec<(String, J)> = compiled
+                .iter()
+                .filter(|&&va| prog.is_loose(va))
+                .map(|va| (format!("{:08x}", va), J::Str(prog.loose_why.get(va).cloned().unwrap_or_default())))
+                .collect();
+            report.set("loose", J::Obj(lj));
+        }
         chunks.push("const AotFunc AOT_SYM(funcs)[] = {".to_string());
         for &va in &compiled {
             let (keep, hd) = heads.get(&va).cloned().unwrap_or((0, vec![0u8; 16]));
             let f = prog.func(va);
             let rg = code_ranges(&f);
-            let ncl = calls_tails(&f).filter_map(|(_, t)| t.direct()).filter(|t| cset.contains(t)).collect::<HashSet<_>>().len();
+            let ncl = in_c(&f).len();
             let name = names.get(&va).cloned().unwrap_or_else(|| format!("{:08x}", va));
             let hard = f.exits.iter().any(|s| !f.callouts.contains_key(s));
             chunks.push(format!(
@@ -1302,7 +1483,7 @@ fn write_out<'a>(
                 va,
                 name,
                 keep,
-                prog.summ[&va].pops.unwrap_or(0),
+                if prog.is_loose(va) { 0xff } else { prog.summ[&va].pops.unwrap_or(0) },   // AOT_POPS_LOOSE
                 mask(&sigs[&va].outs),
                 mask(&sigs[&va].preserved),
                 if roots.contains(&va) { 1 } else { 0 },

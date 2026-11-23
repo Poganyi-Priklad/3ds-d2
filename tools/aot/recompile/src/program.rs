@@ -234,6 +234,25 @@ pub struct Program<'a> {
     pub cfg_pops: HashMap<u32, Option<i64>>,
     pub summarized: bool,
     pub callouts: bool,
+    /// --loose (issue #138, a build without Box86): a function refused only
+    /// for its stack is compiled loose instead.
+    pub loose_on: bool,
+    /// The functions compiled loose: esp at their rets, or what their tail
+    /// jumps' targets pop, isn't known (4bae60's pop ebp; jmp eax through a
+    /// vtable). All eight registers in and out, no check at the ret: it says
+    /// where control goes on and with what esp, and the dispatcher takes both
+    /// from it. No compiled caller calls one in C: a call to one is a callout
+    /// to its address.
+    pub loose: BTreeSet<u32>,
+    /// Why each of them is: the refusal it would have had.
+    pub loose_why: HashMap<u32, String>,
+    /// With loose_on, flags across calls (flags.rs): the functions a jcc of
+    /// whose reads the flags they were entered with (the C runtime's 687b18:
+    /// push edx; fstcw [esp]; jz), and those whose callers read the flags
+    /// they return with (698795). Callers of the first store theirs in
+    /// aot_xf at the call, the second at each ret.
+    pub flag_in: HashSet<u32>,
+    pub flag_out: HashSet<u32>,
 }
 
 impl<'a> Program<'a> {
@@ -268,6 +287,11 @@ impl<'a> Program<'a> {
             cfg_pops: HashMap::new(),
             summarized: false,
             callouts,
+            loose_on: false,
+            loose: BTreeSet::new(),
+            loose_why: HashMap::new(),
+            flag_in: HashSet::new(),
+            flag_out: HashSet::new(),
         }
     }
 
@@ -291,6 +315,42 @@ impl<'a> Program<'a> {
 
     pub fn native_direct(&self, t: u32) -> bool {
         self.natives.get(&t).is_some_and(|n| !n.handback)
+    }
+
+    /// A function that can hand its flags back at its rets: one this
+    /// recompiler writes (not an intrinsic's or a native's, written in line
+    /// or run by the host).
+    pub fn can_flag_out(&self, t: u32) -> bool {
+        !self.intrinsics.contains_key(&t) && !self.natives.contains_key(&t) && !ERROR_PATH_FUNCS.contains(&t) && self.func(t).refused.is_none()
+    }
+
+    /// Compiled loose (and not refused since for something else).
+    pub fn is_loose(&self, va: u32) -> bool {
+        self.loose.contains(&va) && self.compiled.contains(&va)
+    }
+
+    /// A call in a loose function to a loose one that doesn't come back to
+    /// the code after it (40d809's call 0x40d80e, the next instruction, for
+    /// its own address; d2d's list starts a function there): the return
+    /// address pushed and a jump, the dispatcher's as a tail jump is.
+    pub fn loose_jump(&self, f: &Func, va: u32) -> bool {
+        self.is_loose(f.entry)
+            && f.noreturn.contains(&va)
+            && !f.exits.contains(&va)
+            && f.calls.get(&va).and_then(|t| t.direct()).is_some_and(|d| self.is_loose(d))
+    }
+
+    /// Each loose function with what its rets pop, where they all pop the
+    /// same: what a callout to it counts on. None: the site's own count.
+    pub fn loose_pops(&self) -> HashMap<u32, Option<i64>> {
+        self.loose
+            .iter()
+            .filter(|va| self.compiled.contains(va))
+            .map(|&va| {
+                let f = self.func(va);
+                (va, if f.ret_pops.len() == 1 { f.ret_pops.iter().next().copied() } else { None })
+            })
+            .collect()
     }
 
     /// Every function the roots reach by direct calls.
@@ -361,14 +421,26 @@ impl<'a> Program<'a> {
         if !self.compiled.contains(&t) {
             s.preserved |= CALLEE_SAVED;
         }
+        if self.is_loose(t) {
+            // Reached through the dispatcher with every register, and what it
+            // pops is the call site's to count (its callout's). Of what it
+            // keeps, only the callee-saved registers its own code shows kept.
+            return Summary { reads: ALL, preserved: s.preserved & CALLEE_SAVED, pops: None, known: true };
+        }
         s
     }
 
     /// A compiled function's exits (issue #115).
     pub fn exit_sites(&self, f: &Func, blocks: &HashMap<u32, bool>) -> BTreeSet<u32> {
         let mut out = BTreeSet::new();
+        let loose = self.is_loose(f.entry);
         for (site, t) in f.calls.iter().chain(f.tails.iter()) {
             if f.noreturn.contains(site) && !f.exits.contains(site) {
+                continue;
+            }
+            // A loose function's tail jumps leave through the dispatcher,
+            // wherever they go: no exit, no callout.
+            if loose && f.tails.contains_key(site) {
                 continue;
             }
             let t = match t {
@@ -378,6 +450,12 @@ impl<'a> Program<'a> {
                     continue;
                 }
             };
+            // A callout to its address (but alloca_probe and its like, loose
+            // where they stand as functions, are still written in line).
+            if self.is_loose(t) && !self.intrinsics.contains_key(&t) && !self.native_direct(t) {
+                out.insert(*site);
+                continue;
+            }
             if self.compiled.contains(&t)
                 || self.intrinsics.contains_key(&t)
                 || ERROR_PATH_FUNCS.contains(&t)
@@ -515,7 +593,7 @@ impl<'a> Program<'a> {
         let mut g = Func::new(self.img, va, &self.starts);
         g.pops_fix = fix.clone();
         let tp = self.thunk_pops.as_ref().and_then(|m| m.get(&va).copied());
-        g.set_exits(&f.exits, 0, tp, self.img, self.callouts);
+        g.set_exits(&f.exits, 0, tp, self.img, self.callouts, &self.loose_pops());
         self.pops_fix.insert(va, fix);
         self.set_func(va, g);
     }
@@ -538,18 +616,27 @@ impl<'a> Program<'a> {
         let mut g = Func::new(self.img, va, &self.starts);
         g.pops_fix = self.pops_fix.get(&va).cloned().unwrap_or_default();
         let tp = self.thunk_pops.as_ref().and_then(|m| m.get(&va).copied());
-        g.set_exits(&f.exits, level, tp, self.img, self.callouts);
+        g.set_exits(&f.exits, level, tp, self.img, self.callouts, &self.loose_pops());
         self.set_func(va, g);
         true
     }
 
-    /// Each compiled function's exits for the compiled set as it is now.
-    pub fn apply_exits(&mut self, blocks: &HashMap<u32, bool>) -> usize {
-        if self.thunk_pops.is_none() {
-            self.thunk_pops = Some(self.compute_thunk_pops());
-        }
+    /// A function refused only for its stack, compiled loose instead (see
+    /// `loose`). Its own exits and its callers' are the next apply_exits'.
+    pub fn make_loose(&mut self, va: u32, why: &str) {
+        self.loose.insert(va);
+        self.loose_why.insert(va, why.to_string());
+        self.plain.remove(&va);
+        self.plain_all.remove(&va);
+        self.plain_why.remove(&va);
+        self.pops_fix.remove(&va);
+    }
+
+    /// These functions' exits for the compiled set as it is now (apply_exits'
+    /// first half; alone, for a function just made loose and its callers).
+    pub fn exits_of(&mut self, vas: &[u32], blocks: &HashMap<u32, bool>, loose: &HashMap<u32, Option<i64>>) -> usize {
         let mut n = 0;
-        for va in self.func_keys() {
+        for &va in vas {
             let f = self.func(va);
             if f.refused.is_some() {
                 continue;
@@ -563,7 +650,10 @@ impl<'a> Program<'a> {
             } else {
                 BTreeSet::new()
             };
-            if want == f.exits && f.plain == self.plain.contains(&va) && f.plain_all == self.plain_all.contains(&va) {
+            // A callee made loose, or refused since: the site was a callout to
+            // it by its rets' pops, or will be.
+            let same_loose = f.loose_calls == f.loose_calls_for(loose);
+            if want == f.exits && same_loose && f.plain == self.plain.contains(&va) && f.plain_all == self.plain_all.contains(&va) {
                 continue;
             }
             let mut g = Func::new(self.img, va, &self.starts);
@@ -571,11 +661,21 @@ impl<'a> Program<'a> {
             if !want.is_empty() {
                 let tp = self.thunk_pops.as_ref().and_then(|m| m.get(&va).copied());
                 let level = if self.plain_all.contains(&va) { 2 } else if self.plain.contains(&va) { 1 } else { 0 };
-                g.set_exits(&want, level, tp, self.img, self.callouts);
+                g.set_exits(&want, level, tp, self.img, self.callouts, loose);
             }
             self.set_func(va, g);
             n += 1;
         }
+        n
+    }
+
+    /// Each compiled function's exits for the compiled set as it is now.
+    pub fn apply_exits(&mut self, blocks: &HashMap<u32, bool>) -> usize {
+        if self.thunk_pops.is_none() {
+            self.thunk_pops = Some(self.compute_thunk_pops());
+        }
+        let loose = self.loose_pops();
+        let mut n = self.exits_of(&self.func_keys(), blocks, &loose);
         let calls_of = |f: &Func| -> Vec<u32> { f.calls.values().chain(f.tails.values()).filter_map(|t| t.direct()).collect() };
         let mut me: HashSet<u32> = self.compiled.iter().copied().filter(|&va| !self.func(va).exits.is_empty()).collect();
         let mut changed = true;
@@ -670,7 +770,9 @@ impl<'a> Program<'a> {
             }
             let cp = if pops.len() == 1 { pops.iter().next().copied() } else { None };
             self.cfg_pops.insert(va, cp);
-            self.summ.insert(va, Summary { reads: 0, preserved: ALL, pops: cp, known: f.refused.is_none() && pops.len() <= 1 });
+            // (A loose function's rets may pop what they like: no caller counts on it.)
+            let known = f.refused.is_none() && (pops.len() <= 1 || self.is_loose(va));
+            self.summ.insert(va, Summary { reads: 0, preserved: ALL, pops: cp, known });
         }
         let mut changed = true;
         while changed {

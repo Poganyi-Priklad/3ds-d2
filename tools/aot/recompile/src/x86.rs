@@ -103,7 +103,7 @@ pub fn cc_of<'a>(mnemonic: &'a str, prefix: &str) -> &'a str {
 pub fn kind(m: &str) -> Option<u8> {
     Some(match m {
         "add" => 0,
-        "sub" | "cmp" | "repe cmpsb" | "repne cmpsb" => 1,
+        "sub" | "cmp" | "repe cmpsb" | "repne cmpsb" | "repe cmpsw" | "repne cmpsw" | "repe cmpsd" | "repne cmpsd" => 1,
         "and" | "or" | "xor" | "test" | "bsf" | "bsr" => 2,
         "inc" => 3,
         "dec" => 4,
@@ -116,6 +116,8 @@ pub fn kind(m: &str) -> Option<u8> {
         "sbb" => 11,
         // ZF alone, as a logic result is read: 0 where it stored (emit.rs).
         "cmpxchg8b" | "lock cmpxchg8b" => 2,
+        // AOT_EFL: the flags as a word of eflags' bits (aot_rt.h).
+        "sahf" | "bt" | "bts" | "btr" | "btc" | "ucomisd" | "comisd" => 12,
         _ => return None,
     })
 }
@@ -210,6 +212,19 @@ pub fn parts_rw(i: &Insn) -> (Parts, Parts) {
 /// The flags an instruction writes and reads; Capstone 5 leaves out what
 /// `test` with a memory operand writes, so by mnemonic too.
 pub fn flags_rw(i: &Insn) -> (u8, u8) {
+    let m = i.mnemonic.as_str();
+    // x87 leaves eflags alone but for fcomi and its kin; Capstone's field is
+    // its fpu_flags there, another set of bits (issue #138: 4144c0's cmp,
+    // fld, fld1, jnc was refused as reading fld1's flags).
+    if crate::emit::x87_op(i).is_some() {
+        if m.starts_with("fcomi") || m.starts_with("fucomi") {
+            return (FALL, 0);
+        }
+        if m.starts_with("fcmov") {
+            return (0, FC | FP | FZ);
+        }
+        return (0, 0);
+    }
     let e = i.eflags;
     let (mut d, mut u) = (0u8, 0u8);
     for (ours, m, t) in EFL {
@@ -220,13 +235,23 @@ pub fn flags_rw(i: &Insn) -> (u8, u8) {
             u |= ours;
         }
     }
-    let m = i.mnemonic.as_str();
     d |= match m {
         "add" | "sub" | "cmp" | "and" | "or" | "xor" | "test" | "neg" | "adc" | "sbb" | "imul" | "mul" | "shl" | "sal"
         | "shr" | "sar" => FALL,
         "inc" | "dec" => FALL & !FC,
         _ => 0,
     };
+    // bt: the carry alone (the rest undefined, ZF left: an earlier
+    // instruction's still). sahf: all but the overflow.
+    if ["bt", "bts", "btr", "btc"].contains(&m) {
+        d = FC;
+    }
+    if m == "sahf" {
+        d = FALL & !FO;
+    }
+    if m == "ucomisd" || m == "comisd" {
+        d = FALL;
+    }
     if m == "rcr" || m == "rcl" {
         u |= FC;   // through the carry (Capstone gives it as modified only)
     }

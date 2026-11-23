@@ -31,7 +31,8 @@ bool cpu_aot_is_trap(Cpu &c, uint32_t va);
 // The running thread stops here until the scheduler runs it again (a yield or
 // a wait the trap just asked for); the registers are `c`'s on both sides.
 void cpu_aot_yield(Cpu &c);
-// The running thread's x87 state (416 bytes, aot_rt.h's AotFpu).
+// The running thread's x87 state (416 bytes, aot_rt.h's AotFpu), with its
+// xmm0..7 after it (128 bytes, AotXmm).
 void *cpu_aot_fpu(Cpu &c);
 // Code changed since this was last asked (a native's hook): true once.
 bool cpu_aot_take_code_changed(Cpu &c);

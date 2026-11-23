@@ -63,6 +63,36 @@ pub fn x87_op(i: &Insn) -> Option<(u8, u8)> {
     None
 }
 
+/// xmm0..7's number, for an operand that is one.
+fn xmm_of(o: &Op) -> Option<u8> {
+    let OpKind::Reg(r) = o.kind else { return None };
+    crate::cs::reg_name(r).strip_prefix("xmm").and_then(|n| n.parse::<u8>().ok()).filter(|n| *n < 8)
+}
+
+fn sse_arith(m: &str) -> &'static str {
+    match &m[..3] {
+        "add" => "+",
+        "sub" => "-",
+        "mul" => "*",
+        _ => "/",
+    }
+}
+
+/// (predicate, packed) of an SSE2 compare of doubles: cmpeqsd and its like
+/// by name, or cmpsd and cmppd with the predicate as a third operand.
+fn sse_cmp(m: &str, ops: &[Op]) -> Option<(u32, bool)> {
+    let body = m.strip_prefix("cmp")?;
+    let (pred, pd) = if let Some(p) = body.strip_suffix("sd") { (p, false) } else { (body.strip_suffix("pd")?, true) };
+    if pred.is_empty() {
+        return if ops.len() == 3 && ops[2].is_imm() { Some(((ops[2].imm() & 7) as u32, pd)) } else { None };
+    }
+    let k = ["eq", "lt", "le", "unord", "neq", "nlt", "nle", "ord"].iter().position(|p| *p == pred)?;
+    if ops.len() != 2 {
+        return None;
+    }
+    Some((k as u32, pd))
+}
+
 fn g(k: u8) -> String {
     format!("aot_fget(F, {})", k)
 }
@@ -145,7 +175,14 @@ impl<'p, 'a> Emitter<'p, 'a> {
     /// All eight registers in and out through AotRegs: ctx mode, or a
     /// resume entry (whose calls stay sig mode's).
     fn regs_ctx(&self) -> bool {
-        self.mode == "ctx" || self.resume.is_some()
+        self.mode == "ctx" || self.resume.is_some() || self.loose()
+    }
+
+    /// The function being written is a loose one (Program::loose): its
+    /// registers through AotRegs in either mode, no esp0 to check a ret
+    /// against, and where control goes on is what it returns.
+    fn loose(&self) -> bool {
+        self.f.as_ref().is_some_and(|f| self.p.is_loose(f.entry))
     }
 
     /// resume_<x> (issue #138): `va`'s code entered at x, where a native that
@@ -188,6 +225,16 @@ impl<'p, 'a> Emitter<'p, 'a> {
 
     // Operands
     fn reg_get(&self, i: &Insn, rid: u16) -> R<String> {
+        // A segment register read (issue #138: the C runtime's 6889d6 and
+        // 689501 fill a CONTEXT with them for a fatal error's report): the
+        // selectors a Win32 thread has.
+        match crate::cs::reg_name(rid) {
+            "cs" => return Ok("0x1bu".to_string()),
+            "ds" | "es" | "ss" => return Ok("0x23u".to_string()),
+            "fs" => return Ok("0x3bu".to_string()),
+            "gs" => return Ok("0u".to_string()),
+            _ => {}
+        }
         let Some((r, bits, sh)) = reg_full(rid) else {
             return refused(format!("{} {} at {:08x}", i.mnemonic, i.op_str, i.address));
         };
@@ -292,13 +339,34 @@ impl<'p, 'a> Emitter<'p, 'a> {
         }
     }
 
+    /// aot_xf set from the flags as they are at `va`, where it hands them to
+    /// another function (a call to one that reads its entry's, a ret of one
+    /// whose callers read them): flags.rs.
+    fn xf_store(&self, va: u32) -> String {
+        match self.flags().readers.get(&va) {
+            None => String::new(),
+            Some((_, None)) => "aot_xf = aot_flw(F_K >> 3, F_K & 7, F_A, F_B, F_R, F_C); ".to_string(),
+            Some((_, Some((k, w)))) => format!("aot_xf = aot_flw({}, {}, F_A, F_B, F_R, F_C); ", k, w),
+        }
+    }
+
+    /// The flags a definer that is a call (or the entry, AT_ENTRY) leaves:
+    /// aot_xf, as AOT_EFL's word.
+    fn xf_take(&self, va: u32) -> String {
+        let fl = self.flags();
+        if !fl.live_defs.contains(&va) {
+            return String::new();
+        }
+        format!(" F_A = aot_xf;{}", if fl.dynamic.contains(&va) { " F_K = 100;" } else { "" })
+    }
+
     /// One function's C.
     pub fn function(&mut self, va: u32) -> R<String> {
         let p = self.p;
         let f = p.func(va);
         self.f = Some(f.clone());
         self.flags = None;
-        self.flags = Some(Flags::new(&f)?);
+        self.flags = Some(Flags::new(&f, p)?);
         let sig = self.sigs[&va].clone();
         self.sig = Some(sig.clone());
         self.df = direction(&f);
@@ -323,6 +391,7 @@ impl<'p, 'a> Emitter<'p, 'a> {
                 .to_string(),
         );
         decl.push(match &self.resume {
+            _ if self.loose() => "uint8_t *const M = aot_mem;".to_string(),
             Some(_) if self.reent => "uint8_t *const M = aot_mem; uint32_t esp0 = 0, ra0 = 0;".to_string(),
             // The entry's esp, from the stack offset at x.
             Some(v) => format!("uint8_t *const M = aot_mem; const uint32_t esp0 = esp + 0x{:x}u, ra0 = LD32(esp0);", (v[0].1 as i32).wrapping_neg() as u32),
@@ -333,6 +402,10 @@ impl<'p, 'a> Emitter<'p, 'a> {
             decl.push("AotFpu *const F = aot_fpu;".to_string());
         }
         out.push(format!("    {}", decl.join(" ")));
+        let at_entry = self.xf_take(crate::flags::AT_ENTRY);
+        if !at_entry.is_empty() {
+            out.push(format!("   {}", at_entry));
+        }
         out.push(format!("    AOT_TRACE(0x{:08x}u, eax, ecx, edx, ebx, esp, ebp, esi, edi);", va));
         out.push(format!("    {}", (0..8).map(|r| format!("(void){};", REGS[r])).collect::<Vec<_>>().join(" ")));
         let starts: Vec<u32> = self.resume.as_ref().map_or(vec![f.entry], |v| v.iter().map(|e| e.0).collect());
@@ -395,6 +468,9 @@ impl<'p, 'a> Emitter<'p, 'a> {
     }
 
     pub fn proto(&self, va: u32) -> String {
+        if self.p.is_loose(va) {
+            return format!("AOT_FN uint32_t {}(AotRegs *R)", self.name(va));
+        }
         if self.mode == "ctx" {
             return format!("AOT_FN void {}(AotRegs *R)", self.name(va));
         }
@@ -431,6 +507,11 @@ impl<'p, 'a> Emitter<'p, 'a> {
     }
 
     fn ret_stmt(&self, pops: i64) -> String {
+        if self.loose() {
+            // The return address as it is on the stack, and esp past it and
+            // what the ret pops: the dispatcher goes on there.
+            return format!("{{ uint32_t to = LD32(esp); {} R->r[4] = esp + {}u; return to; }}", self.ctx_sets(), 4 + pops);
+        }
         let chk = format!("if (esp != esp0 || LD32(esp) != ra0) aot_bad_ret(0x{:08x}u, esp0, esp); ", self.f().entry);
         if self.regs_ctx() {
             return format!("{}{} R->r[4] = esp + {}u; return;", chk, self.ctx_sets(), 4 + pops);
@@ -493,6 +574,9 @@ impl<'p, 'a> Emitter<'p, 'a> {
 
     /// call_ and stale_ for va (sig mode).
     pub fn wrappers(&self, va: u32) -> String {
+        if self.p.is_loose(va) {
+            return String::new();   // never called in C: a callout to its address
+        }
         let sig = &self.sigs[&va];
         let mut params = vec!["uint32_t esp".to_string()];
         params.extend(sig.ins.iter().map(|&r| format!("uint32_t {}", REGS[r as usize])));
@@ -565,13 +649,62 @@ impl<'p, 'a> Emitter<'p, 'a> {
         let ops = &i.ops;
         let f = self.f.clone().unwrap();
         if f.calls.contains_key(&va) || f.tails.contains_key(&va) {
-            return self.call(i);
+            // Flags across the call (flags.rs): stored for a callee that
+            // reads them, taken from one that hands them back.
+            let back = if f.calls.contains_key(&va) { self.xf_take(va) } else { String::new() };
+            return Ok(format!("{}{}{}", self.xf_store(va), self.call(i)?, back));
         }
         if m == "ret" {
-            return Ok(self.ret_stmt(if ops.is_empty() { 0 } else { ops[0].imm() }));
+            return Ok(format!("{}{}", self.xf_store(va), self.ret_stmt(if ops.is_empty() { 0 } else { ops[0].imm() })));
         }
         if m == "int3" || m == "hlt" || m == "ud2" {
             return Ok(format!("aot_unreachable(0x{:08x}u);", va));
+        }
+        if m == "int" || m == "into" {
+            // A software interrupt (issue #138: int 6 in the entries of
+            // 6a9a17's table that stand for an opcode it can't have): Windows
+            // raises an exception there; here it is the stop.
+            return Ok(format!("aot_unreachable(0x{:08x}u);", va));
+        }
+        if m == "sahf" {
+            // ah as the flags (CF, PF, AF, ZF, SF; OF isn't sahf's).
+            let s = self.flag_store(va, "((eax >> 8) & 0xd5u)", "0u", "0u", "0");
+            return Ok(if s.is_empty() { ";".to_string() } else { s });
+        }
+        if ["bt", "bts", "btr", "btc"].contains(&m) && ops.len() == 2 && ops[0].size == 4 {
+            // The bit into CF, then set, cleared or flipped. In a register,
+            // or by an immediate, its number is taken within the operand; in
+            // memory by a register it counts on from the operand's address,
+            // by dwords (issue #138: 686990's bts [esp], eax builds a set of
+            // 256 characters on the stack, and its bt [esp], eax asks it).
+            let n = self.get(i, &ops[1], Some(4))?;
+            let cf = self.flag_store(va, "((v >> k) & 1u)", "0u", "0u", "0");
+            let new = match m {
+                "bt" => None,
+                "bts" => Some("v | (1u << k)"),
+                "btr" => Some("v & ~(1u << k)"),
+                _ => Some("v ^ (1u << k)"),
+            };
+            if ops[0].is_mem() && !ops[1].is_imm() {
+                let st = new.map(|e| format!("ST32(a, {});", e)).unwrap_or_default();
+                return Ok(format!(
+                    "{{ const uint32_t n = {}; const uint32_t a = {} + (uint32_t)(((int32_t)n >> 5) * 4), k = n & 31u, v = LD32(a); (void)v; {}{} }}",
+                    n,
+                    self.addr(i, &ops[0])?,
+                    cf,
+                    st
+                ));
+            }
+            let st = match new {
+                Some(e) => self.put(i, &ops[0], e)?,
+                None => String::new(),
+            };
+            return Ok(format!("{{ const uint32_t k = ({}) & 31u, v = {}; (void)v; (void)k; {}{} }}", n, self.get(i, &ops[0], None)?, cf, st));
+        }
+        if self.p.loose_on {
+            if let Some(s) = self.sse(i)? {
+                return Ok(s);
+            }
         }
         if m == "nop" {
             return Ok(";".to_string());
@@ -584,6 +717,11 @@ impl<'p, 'a> Emitter<'p, 'a> {
                 }
                 s += &format!("default: aot_unreachable(0x{:08x}u); }}", va);
                 return Ok(s);
+            }
+            // A jump to the instruction after it (683080's jmp +0) that
+            // nothing else jumps to has no label: the code just goes on.
+            if ops[0].imm() as u32 == va.wrapping_add(i.size) && !f.leaders.contains(&va.wrapping_add(i.size)) {
+                return Ok(";".to_string());
             }
             return Ok(format!("goto L_{:08x};", ops[0].imm()));
         }
@@ -795,10 +933,195 @@ if (!r) {{ ST32(a, ebx); ST32(a + 4u, ecx); }} else {{ eax = lo; edx = hi; }} {}
         if m == "wait" || x87_op(i).is_some() {
             return self.x87(i);
         }
-        if m.starts_with("rep") || ["stosd", "stosb", "stosw", "movsd", "movsb", "movsw"].contains(&m) {
+        if (m.starts_with("rep") || ["stosd", "stosb", "stosw", "movsd", "movsb", "movsw"].contains(&m)) && !ops.iter().any(|o| xmm_of(o).is_some()) {
             return self.string(i);
         }
         refused(format!("{} at {:08x}", m, va))
+    }
+
+    /// An SSE2 instruction (issue #138, a build without Box86): the C
+    /// runtime's pow, log, log10 and exp for a CPU with SSE2, which cpuid
+    /// reports, and its memset and memcpy by 16 bytes. On aot_xmm, a double
+    /// as its bits; rounding to nearest, no exception raised (aot_rt.h).
+    /// None for an instruction that isn't one of these.
+    fn sse(&self, i: &Insn) -> R<Option<String>> {
+        let va = i.address;
+        let m = i.mnemonic.as_str();
+        let ops = &i.ops;
+        if m == "ldmxcsr" {
+            return Ok(Some("; /* ldmxcsr: no MXCSR is kept */".to_string()));
+        }
+        if !ops.iter().any(|o| xmm_of(o).is_some()) {
+            return Ok(None);
+        }
+        let x = |o: &Op| format!("aot_xmm[{}]", xmm_of(o).unwrap());
+        // An operand's 128 bits, or its low 64.
+        let s128 = |o: &Op| -> R<String> {
+            Ok(match xmm_of(o) {
+                Some(n) => format!("aot_xmm[{}]", n),
+                None => format!("aot_xld(M, {})", self.addr(i, o)?),
+            })
+        };
+        let s64 = |o: &Op| -> R<String> {
+            Ok(match xmm_of(o) {
+                Some(n) => format!("aot_xmm[{}].q[0]", n),
+                None => format!("aot_ld64(M, {})", self.addr(i, o)?),
+            })
+        };
+        let no = || refused(format!("{} {} at {:08x}", m, i.op_str, va));
+        let d_is_x = xmm_of(&ops[0]).is_some();
+        let two = ops.len() == 2;
+        let out = match m {
+            "movapd" | "movupd" | "movaps" | "movups" | "movdqa" | "movdqu" if two => {
+                if d_is_x {
+                    format!("{{ const AotXmm s = {}; {} = s; }}", s128(&ops[1])?, x(&ops[0]))
+                } else {
+                    format!("aot_xst(M, {}, {});", self.addr(i, &ops[0])?, x(&ops[1]))
+                }
+            }
+            "movlpd" | "movhpd" if two => {
+                let k = if m == "movlpd" { 0 } else { 1 };
+                if d_is_x {
+                    format!("{}.q[{}] = aot_ld64(M, {});", x(&ops[0]), k, self.addr(i, &ops[1])?)
+                } else {
+                    format!("aot_st64(M, {}, {}.q[{}]);", self.addr(i, &ops[0])?, x(&ops[1]), k)
+                }
+            }
+            "movsd" | "movq" if two => {
+                if !d_is_x {
+                    format!("aot_st64(M, {}, {}.q[0]);", self.addr(i, &ops[0])?, x(&ops[1]))
+                } else if m == "movsd" && xmm_of(&ops[1]).is_some() {
+                    format!("{}.q[0] = {}.q[0];", x(&ops[0]), x(&ops[1]))   // the high half stays
+                } else {
+                    format!("{{ const uint64_t s = {}; {}.q[0] = s; {}.q[1] = 0; }}", s64(&ops[1])?, x(&ops[0]), x(&ops[0]))
+                }
+            }
+            "movd" if two => {
+                if d_is_x {
+                    format!("{{ const uint32_t s = {}; {}.q[0] = s; {}.q[1] = 0; }}", self.get(i, &ops[1], None)?, x(&ops[0]), x(&ops[0]))
+                } else {
+                    self.put(i, &ops[0], &format!("(uint32_t){}.q[0]", x(&ops[1])))?
+                }
+            }
+            "andpd" | "andps" | "pand" | "orpd" | "orps" | "por" | "xorpd" | "xorps" | "pxor" | "andnpd" | "andnps" | "pandn" if two && d_is_x => {
+                let e = |k: u8| match m {
+                    "andpd" | "andps" | "pand" => format!("d->q[{0}] &= s.q[{0}];", k),
+                    "orpd" | "orps" | "por" => format!("d->q[{0}] |= s.q[{0}];", k),
+                    "xorpd" | "xorps" | "pxor" => format!("d->q[{0}] ^= s.q[{0}];", k),
+                    _ => format!("d->q[{0}] = ~d->q[{0}] & s.q[{0}];", k),
+                };
+                format!("{{ const AotXmm s = {}; AotXmm *const d = &{}; {} {} }}", s128(&ops[1])?, x(&ops[0]), e(0), e(1))
+            }
+            "addpd" | "subpd" | "mulpd" | "divpd" if two && d_is_x => {
+                let o = sse_arith(m);
+                let e = |k: u8| format!("d->q[{0}] = aot_xq(aot_xd(d->q[{0}]) {1} aot_xd(s.q[{0}]));", k, o);
+                format!("{{ const AotXmm s = {}; AotXmm *const d = &{}; {} {} }}", s128(&ops[1])?, x(&ops[0]), e(0), e(1))
+            }
+            "addsd" | "subsd" | "mulsd" | "divsd" if two && d_is_x => format!(
+                "{{ const uint64_t s = {}; AotXmm *const d = &{}; d->q[0] = aot_xq(aot_xd(d->q[0]) {} aot_xd(s)); }}",
+                s64(&ops[1])?,
+                x(&ops[0]),
+                sse_arith(m)
+            ),
+            "sqrtsd" if two && d_is_x => format!("{{ const uint64_t s = {}; {}.q[0] = aot_xq(__builtin_sqrt(aot_xd(s))); }}", s64(&ops[1])?, x(&ops[0])),
+            "psrlq" | "psllq" if two && d_is_x => {
+                let n = if ops[1].is_imm() { format!("{}u", ops[1].imm() & 0xff) } else { s64(&ops[1])? };
+                let o = if m == "psrlq" { ">>" } else { "<<" };
+                format!(
+                    "{{ const uint64_t n = {}; AotXmm *const d = &{}; d->q[0] = n > 63 ? 0 : d->q[0] {} n; d->q[1] = n > 63 ? 0 : d->q[1] {} n; }}",
+                    n,
+                    x(&ops[0]),
+                    o,
+                    o
+                )
+            }
+            "psubq" | "paddq" if two && d_is_x => {
+                let o = if m == "psubq" { "-" } else { "+" };
+                format!("{{ const AotXmm s = {}; AotXmm *const d = &{}; d->q[0] {}= s.q[0]; d->q[1] {}= s.q[1]; }}", s128(&ops[1])?, x(&ops[0]), o, o)
+            }
+            "psubd" | "paddd" if two && d_is_x => {
+                let o = if m == "psubd" { "-" } else { "+" };
+                let e = |k: u8| {
+                    format!(
+                        "d->q[{0}] = (uint64_t)(uint32_t)((uint32_t)d->q[{0}] {1} (uint32_t)s.q[{0}]) | (uint64_t)(uint32_t)((uint32_t)(d->q[{0}] >> 32) {1} (uint32_t)(s.q[{0}] >> 32)) << 32;",
+                        k, o
+                    )
+                };
+                format!("{{ const AotXmm s = {}; AotXmm *const d = &{}; {} {} }}", s128(&ops[1])?, x(&ops[0]), e(0), e(1))
+            }
+            "unpcklpd" | "punpcklqdq" if two && d_is_x => format!("{{ const AotXmm s = {}; {}.q[1] = s.q[0]; }}", s128(&ops[1])?, x(&ops[0])),
+            "unpckhpd" | "punpckhqdq" if two && d_is_x => {
+                format!("{{ const AotXmm s = {}; AotXmm *const d = &{}; d->q[0] = d->q[1]; d->q[1] = s.q[1]; }}", s128(&ops[1])?, x(&ops[0]))
+            }
+            "pextrw" if ops.len() == 3 && ops[0].is_reg() && xmm_of(&ops[1]).is_some() && ops[2].is_imm() => {
+                let k = (ops[2].imm() & 7) as u32;
+                self.put(i, &ops[0], &format!("(uint32_t)(({}.q[{}] >> {}) & 0xffffu)", x(&ops[1]), k / 4, (k % 4) * 16))?
+            }
+            "pinsrw" if ops.len() == 3 && d_is_x && ops[2].is_imm() => {
+                let k = (ops[2].imm() & 7) as u32;
+                let v = if ops[1].is_mem() { format!("LD16({})", self.addr(i, &ops[1])?) } else { self.get(i, &ops[1], None)? };
+                format!(
+                    "{{ const uint64_t v = ({}) & 0xffffu; AotXmm *const d = &{}; d->q[{}] = (d->q[{}] & ~((uint64_t)0xffffu << {})) | (v << {}); }}",
+                    v,
+                    x(&ops[0]),
+                    k / 4,
+                    k / 4,
+                    (k % 4) * 16,
+                    (k % 4) * 16
+                )
+            }
+            "cvtsi2sd" if two && d_is_x => format!("{}.q[0] = aot_xq((double)(int32_t)({}));", x(&ops[0]), self.get(i, &ops[1], Some(4))?),
+            "cvtsd2si" | "cvttsd2si" if two && ops[0].is_reg() && ops[0].size == 4 => {
+                if m == "cvttsd2si" && ops[1].is_mem() {
+                    return Ok(None);   // _ftol2's, written as it always was (insn)
+                }
+                self.put(i, &ops[0], &format!("aot_xcvt(aot_xd({}), {})", s64(&ops[1])?, if m == "cvttsd2si" { 1 } else { 0 }))?
+            }
+            "cvtdq2pd" if two && d_is_x => format!(
+                "{{ const uint64_t s = {}; AotXmm *const d = &{}; d->q[0] = aot_xq((double)(int32_t)(uint32_t)s); d->q[1] = aot_xq((double)(int32_t)(uint32_t)(s >> 32)); }}",
+                s64(&ops[1])?,
+                x(&ops[0])
+            ),
+            "pshufd" if ops.len() == 3 && d_is_x && ops[2].is_imm() => {
+                let k = ops[2].imm() as u32;
+                format!(
+                    "{{ const AotXmm s = {}; const uint32_t w[4] = {{(uint32_t)s.q[0], (uint32_t)(s.q[0] >> 32), (uint32_t)s.q[1], (uint32_t)(s.q[1] >> 32)}}; \
+AotXmm *const d = &{}; d->q[0] = w[{}] | (uint64_t)w[{}] << 32; d->q[1] = w[{}] | (uint64_t)w[{}] << 32; }}",
+                    s128(&ops[1])?,
+                    x(&ops[0]),
+                    k & 3,
+                    (k >> 2) & 3,
+                    (k >> 4) & 3,
+                    (k >> 6) & 3
+                )
+            }
+            "pmaxsw" if two && d_is_x => format!("{0} = aot_xmaxsw({0}, {1});", x(&ops[0]), s128(&ops[1])?),
+            "pcmpeqd" if two && d_is_x => format!("{0} = aot_xcmpeqd({0}, {1});", x(&ops[0]), s128(&ops[1])?),
+            "pmovmskb" if two && ops[0].is_reg() && xmm_of(&ops[1]).is_some() => self.put(i, &ops[0], &format!("aot_xmovmskb({})", x(&ops[1])))?,
+            "ucomisd" | "comisd" if two && d_is_x => {
+                let s = self.flag_store(va, &format!("aot_xcomi(aot_xd({}.q[0]), aot_xd({}))", x(&ops[0]), s64(&ops[1])?), "0u", "0u", "0");
+                if s.is_empty() { ";".to_string() } else { s }
+            }
+            _ => {
+                // cmpeqsd, cmpltpd and the rest: the predicate in the name, or cmpsd's third operand.
+                let Some((pred, pd)) = sse_cmp(m, ops) else { return no() };
+                if !d_is_x {
+                    return no();
+                }
+                if pd {
+                    format!(
+                        "{{ const AotXmm s = {}; AotXmm *const d = &{}; d->q[0] = aot_xcmp(aot_xd(d->q[0]), aot_xd(s.q[0]), {}); d->q[1] = aot_xcmp(aot_xd(d->q[1]), aot_xd(s.q[1]), {}); }}",
+                        s128(&ops[1])?,
+                        x(&ops[0]),
+                        pred,
+                        pred
+                    )
+                } else {
+                    format!("{{ const uint64_t s = {}; AotXmm *const d = &{}; d->q[0] = aot_xcmp(aot_xd(d->q[0]), aot_xd(s), {}); }}", s64(&ops[1])?, x(&ops[0]), pred)
+                }
+            }
+        };
+        Ok(Some(out))
     }
 
     fn x87_next(&self, i: &Insn) -> R<Vec<u8>> {
@@ -858,6 +1181,8 @@ if (!r) {{ ST32(a, ebx); ST32(a + 4u, ecx); }} else {{ eax = lo; edx = hi; }} {}
                 match reg {
                     0 => return Ok(format!("aot_fpush(F, aot_ldf64(M, {}));", a)),
                     2 | 3 => return Ok(format!("aot_stf64(M, {}, {});{}", a, g(0), pop3(reg, 3))),
+                    4 => return Ok(format!("aot_frstor(F, M, {});", a)),
+                    6 => return Ok(format!("aot_fnsave(F, M, {});", a)),
                     7 => return Ok(format!("ST16({}, aot_fnstsw(F));", a)),
                     _ => {}
                 }
@@ -1119,6 +1444,37 @@ if (!r) {{ ST32(a, ebx); ST32(a + 4u, ecx); }} else {{ eax = lo; edx = hi; }} {}
             _ => None,
         };
         let Some(size) = size else { return refused(format!("{} at {:08x}", m, va)) };
+        if op.starts_with("scas") && (m.starts_with("repe ") || m.starts_with("repne ")) {
+            // al, ax or eax against what edi is at, while they differ (repne)
+            // or are equal (repe) and ecx lasts (issue #138: 687860's and
+            // strrchr's repne scasb for a string's end). The flags it leaves
+            // aren't modelled: a reader refuses the function.
+            let stop = if m.starts_with("repne ") { "v == a" } else { "v != a" };
+            let step = (if d != 0 { -size } else { size }) as u32;
+            return Ok(format!(
+                "{{ const uint32_t a = eax & {}; while (ecx) {{ const uint32_t v = LD{}(edi); edi += {}u; ecx--; if ({}) break; }} }}",
+                mask(size as u32),
+                sizes(size as u32),
+                step,
+                stop
+            ));
+        }
+        if op.starts_with("cmps") && size != 1 && (m.starts_with("repe ") || m.starts_with("repne ")) {
+            // As cmpsb below, by words or dwords (517a36's repe cmpsd).
+            let stop = if m.starts_with("repe ") { "a != b" } else { "a == b" };
+            let step = (if d != 0 { -size } else { size }) as u32;
+            return Ok(format!(
+                "{{ uint32_t a = 0, b = 0; while (ecx) {{ a = LD{}(esi); b = LD{}(edi); esi += {}u; edi += {}u; ecx--; if ({}) break; }} \
+uint32_t r = (a - b) & {}; {} }}",
+                sizes(size as u32),
+                sizes(size as u32),
+                step,
+                step,
+                stop,
+                mask(size as u32),
+                self.flag_store(va, "a", "b", "r", "0")
+            ));
+        }
         if op == "cmpsb" && (m.starts_with("repe ") || m.starts_with("repne ")) {
             // Bytes at esi against those at edi, while they are equal (repe) or
             // differ (repne) and ecx lasts; the flags are the last pair's, a
@@ -1181,6 +1537,15 @@ uint32_t r = (a - b) & 0xffu; {} }}",
         let va = i.address;
         let f = self.f();
         let p = self.p;
+        if self.loose() {
+            // A jump, with esp as it is: the dispatcher goes on at the target
+            // (4bae60's pop ebp; jmp eax, whatever the target pops).
+            let x = match t {
+                Tgt::Direct(d) => format!("0x{:08x}u", d),
+                _ => self.get(i, &i.ops[0], None)?,
+            };
+            return Ok(format!("{{ uint32_t to = {}; {} R->r[4] = esp; return to; }}", x, self.ctx_sets()));
+        }
         if f.callouts.contains_key(&va) {
             return self.tail_call_out(i);
         }
@@ -1222,16 +1587,41 @@ uint32_t r = (a - b) & 0xffu; {} }}",
         if pops != Some(co) {
             return refused(format!("tail call through a pointer at {:08x}: pops {}, the rets' {}", va, Self::fmt_pops(pops), co));
         }
+        // With --loose esp is the entry's here by the analysis, as at a ret
+        // (else the function is a loose one): the same check as a ret's.
+        let off = if self.p.loose_on { format!("aot_bad_ret(0x{:08x}u, esp0, esp);", f.entry) } else { self.exit("x") };
         let s = format!(
-            "{{ uint32_t x = {}; if (esp != esp0 || LD32(esp) != ra0) {{ {} }} AotRegs t = {{{{eax, ecx, edx, ebx, esp, ebp, esi, edi}}}}; aot_call_out(x, &t, {}u); eax = t.r[0]; ecx = t.r[1]; edx = t.r[2]; esp = t.r[4]; }} ",
-            self.get(i, &i.ops[0], None)?,
-            self.exit("x"),
-            co
+            "{{ uint32_t x = {}; if (esp != esp0 || LD32(esp) != ra0) {{ {} }} AotRegs t = {{{{eax, ecx, edx, ebx, esp, ebp, esi, edi}}}}; aot_call_out(x, &t, {}u); {} }} ",
+            self.callout_target(i, f.tails[&va])?,
+            off,
+            co,
+            self.callout_back(f.tails[&va])
         );
         if self.regs_ctx() {
             return Ok(format!("{}{} R->r[4] = esp; return;", s, self.ctx_sets()));
         }
         Ok(s + &self.ret_outs())
+    }
+
+    /// A callout's target: the pointer, or a loose function's address.
+    fn callout_target(&self, i: &Insn, t: Tgt) -> R<String> {
+        match t {
+            Tgt::Direct(d) => Ok(format!("0x{:08x}u", d)),
+            _ => self.get(i, &i.ops[0], None),
+        }
+    }
+
+    /// The registers a callout's caller takes back: esp, and those its target
+    /// isn't taken to keep (through a pointer, eax, ecx and edx; a loose
+    /// function's by its summary).
+    fn callout_back(&self, t: Tgt) -> String {
+        let s = self.p.callee_summary(t);
+        let keeps = if t.is_pointer() { crate::program::CALLEE_SAVED } else { s.preserved };
+        (0..8u8)
+            .filter(|&r| r == ESP || !has(keeps, r))
+            .map(|r| format!("{} = t.r[{}];", REGS[r as usize], r))
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 
     fn frame_helper(&self, name: &str, ra: u32) -> String {
@@ -1282,10 +1672,11 @@ esp = f + 4u; }}",
         let push = format!("esp -= 4u; ST32(esp, 0x{:08x}u); ", ra);
         if let Some(&co) = f.callouts.get(&va) {
             return Ok(format!(
-                "{{ uint32_t x = {}; {}AotRegs t = {{{{eax, ecx, edx, ebx, esp, ebp, esi, edi}}}}; aot_call_out(x, &t, {}u); eax = t.r[0]; ecx = t.r[1]; edx = t.r[2]; esp = t.r[4]; }}",
-                self.get(i, &i.ops[0], None)?,
+                "{{ uint32_t x = {}; {}AotRegs t = {{{{eax, ecx, edx, ebx, esp, ebp, esi, edi}}}}; aot_call_out(x, &t, {}u); {} }}",
+                self.callout_target(i, t)?,
                 push,
-                co
+                co,
+                self.callout_back(t)
             ));
         }
         if f.exits.contains(&va) {
@@ -1347,6 +1738,9 @@ ST32(esp - 4u, ecx); ST32(esp - eax, 0x{:08x}u); esp = esp - eax + 4u; eax = 0x{
             }
             return refused(format!("an import or indirect call at {:08x}", va));
         };
+        if p.loose_jump(f, va) {
+            return Ok(format!("{}{{ {} R->r[4] = esp; return 0x{:08x}u; }}", push, self.ctx_sets(), td));
+        }
         let nat = p.natives.get(&td);
         let mut inner = if p.compiled.contains(&td) {
             format!("\n#ifdef AOT_SPLIT\n    {}\n#else\n    {}\n#endif\n    ", self.call_guest(td), self.call_compiled(td, true))
