@@ -34,9 +34,11 @@ this page is the short version and a map of the code.
    waypoints and portals, doors, levers and level warps such as cave
    entrances, stairs and passages to the next area, barrels), then NPCs, then
    the nearest item on the ground. In town, A and B go to the NPCs first.
-6. With the items shown (Alt: Y held, or Items latched on KEYS), A on an
-   item clicks its name, and the cursor keeps off the other names, so enemies
-   and chests are hit as without Alt.
+6. Alt is for highlighting items. With the items shown (Alt: Y held, or Items
+   latched on KEYS), A on an item clicks its name. Alt stays held down, and
+   while it is held the original game does not report monsters under the
+   cursor (no monster name or life bar, a click only walks or picks up), so
+   the auto-target cannot attack then. Turn Alt off to fight.
 7. Hold **ZR + D-pad** to pick up the items around you one after another:
    **up** unique, set items and runes; **right** gold; **down** everything.
 8. When the right-hand skill works on corpses (Raise Skeleton, Corpse
