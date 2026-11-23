@@ -8,7 +8,7 @@ scripts/docker.sh package-cia --slim ../3ds-d2-gamefiles/1.14d     # with the ga
 scripts/docker.sh package-cia --full ../3ds-d2-gamefiles/1.14d     # with every MPQ inside, ~2 GB
 ```
 
-The hardware build is `dist/cia/3ds-d2-x86-<version>-<build-id>.cia` (`3ds-d2-aot-...` beside it when built with a game directory: [aot.md](aot.md)). It holds the app only and reads the game files from `sdmc:/3ds/3ds-d2/game/`, so a new build is a 2 MB install. The two bundled variants add `-slim` or `-full` to the name. A `.txt` next to each CIA lists its version, SHA-256 and the files inside. Every run checks the CIA's content, exheader and logo hashes with `ctrtool`, the same hashes the console's AM checks at the end of an install.
+The hardware build is `dist/cia/3ds-d2-x86-<version>-<build-id>.cia` (`3ds-d2-aot-...` beside it when built with a game directory: [aot.md](aot.md)). The two are titles of their own and can both be installed: the AOT one is **3ds-d2** (`000400000D2D3D00`, as every release up to v0.4.0, which it installs over), the x86 one **3ds-d2 x86** (`000400000D2D3E00`); they share `sdmc:/3ds/3ds-d2` (game files, saves, settings, logs, reports). Each holds the app only and reads the game files from `sdmc:/3ds/3ds-d2/game/`, so a new build is a 2 MB install. The two bundled variants add `-slim` or `-full` to the name. A `.txt` next to each CIA lists its version, SHA-256 and the files inside. Every run checks the CIA's content, exheader and logo hashes with `ctrtool`, the same hashes the console's AM checks at the end of an install.
 
 The build ID is a hash of everything that goes into the CIA: `src/`, the build rules, the CPU backend's patch series and the packaging (`scripts/package-cia.sh`, `packaging/cia/`). The title version (`version=` in `scripts/package-cia.sh`, now 0.5.0) is what FBI and the HOME menu show.
 
@@ -34,7 +34,7 @@ Either way works:
 - **From the SD card:** copy the `.cia` to the SD card, then FBI → *SD* → select it → *Install CIA*. You can delete the `.cia` afterwards.
 
 The HOME menu shows the Lord of Destruction icon, and the top screen shows the title screen's burning logo, with the opening of the title music, when the title is selected. They are taken from your Game.exe, d2data.mpq, d2exp.mpq and d2xmusic.mpq when the CIA is packaged with a game directory (`scripts/docker.sh package-cia <game-dir>`). Without one, a drawn "3ds-d2" icon and a silent banner are used. `D2_BANNER` on `scripts/docker.sh package-cia <game-dir>` picks the banner:
-- `animated` (the default): the burning logo as a 3D banner model, with "Expansion Set / Lord of Destruction" and "v1.14d" under it, without a background and always facing the viewer.
+- `animated` (the default): the burning logo as a 3D banner model, with "Expansion Set / Lord of Destruction" and the backend's version line under it ("v1.14D-AOT" or "v1.14D-X86"), without a background and always facing the viewer.
 - `stack`: the same model without its animation, for diagnosis.
 - `still`: a single-frame model with no animation.
 - `static`: the first frame as bannertool's own still banner, with no model of ours.

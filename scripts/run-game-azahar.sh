@@ -180,7 +180,8 @@ fi
 [ -n "$cia" ] || cia="$(ls -t "$ROOT"/dist/cia/*.cia 2>/dev/null | head -1)"
 [ -f "$cia" ] || die "no CIA (scripts/docker.sh package-cia dist/game)"
 case "$cia" in /*) ;; *) cia="$PWD/$cia" ;; esac   # Azahar takes a relative path from its own folder ("File not found")
-content="$SDMC/Nintendo 3DS/00000000000000000000000000000000/00000000000000000000000000000000/title/00040000/0d2d3d00/content"
+case "$(basename "$cia")" in 3ds-d2-x86-*) title=0d2d3e00 ;; *) title=0d2d3d00 ;; esac   # a title a backend (issue #116)
+content="$SDMC/Nintendo 3DS/00000000000000000000000000000000/00000000000000000000000000000000/title/00040000/$title/content"
 before="$(ls "$content" 2>/dev/null || true)"
 ilog="$(mktemp)"
 echo "installing $(basename "$cia")"
