@@ -168,6 +168,11 @@ impl<'p, 'a> Emitter<'p, 'a> {
         }
     }
 
+    /// AOT_FN, or AOT_FNC for a function off AOT_HOT's list (Program::is_cold).
+    fn fn_kw(&self, va: u32) -> &'static str {
+        if self.p.is_cold(va) { "AOT_FNC" } else { "AOT_FN" }
+    }
+
     pub fn name(&self, va: u32) -> String {
         format!("AOT_SYM({}_{:08x})", self.mode, va)
     }
@@ -372,7 +377,7 @@ impl<'p, 'a> Emitter<'p, 'a> {
         self.df = direction(&f);
         let mut out: Vec<String> = Vec::new();
         out.push(match &self.resume {
-            Some(_) if self.reent => format!("AOT_FN void {}(AotRegs *R, uint32_t at)\n{{", reent_name(va)),
+            Some(_) if self.reent => format!("{} void {}(AotRegs *R, uint32_t at)\n{{", self.fn_kw(va), reent_name(va)),
             Some(v) => format!("AOT_FN void {}(AotRegs *R)\n{{", resume_name(v[0].0)),
             None => self.proto(va) + "\n{",
         });
@@ -469,10 +474,10 @@ impl<'p, 'a> Emitter<'p, 'a> {
 
     pub fn proto(&self, va: u32) -> String {
         if self.p.is_loose(va) {
-            return format!("AOT_FN uint32_t {}(AotRegs *R)", self.name(va));
+            return format!("{} uint32_t {}(AotRegs *R)", self.fn_kw(va), self.name(va));
         }
         if self.mode == "ctx" {
-            return format!("AOT_FN void {}(AotRegs *R)", self.name(va));
+            return format!("{} void {}(AotRegs *R)", self.fn_kw(va), self.name(va));
         }
         let sig = &self.sigs[&va];
         let mut args = vec!["uint32_t esp".to_string()];
@@ -486,7 +491,7 @@ impl<'p, 'a> Emitter<'p, 'a> {
                 "void"
             }
         };
-        format!("AOT_FN {} {}({})", ret, self.name(va), args.join(", "))
+        format!("{} {} {}({})", self.fn_kw(va), ret, self.name(va), args.join(", "))
     }
 
     fn ret_outs(&self) -> String {

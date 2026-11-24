@@ -237,6 +237,11 @@ pub struct Program<'a> {
     /// --loose (issue #138, a build without Box86): a function refused only
     /// for its stack is compiled loose instead.
     pub loose_on: bool,
+    /// AOT_HOT=<file> (issue #153): the functions that ran in the profiles
+    /// (tools/aot/hot_list.py), one address a line. The others are written
+    /// AOT_FNC, which a build may compile for size: 72% of the code's bytes
+    /// never ran in the lane's scripts. None: every function AOT_FN.
+    pub hot: Option<HashSet<u32>>,
     /// The functions compiled loose: esp at their rets, or what their tail
     /// jumps' targets pop, isn't known (4bae60's pop ebp; jmp eax through a
     /// vtable). All eight registers in and out, no check at the ret: it says
@@ -288,6 +293,7 @@ impl<'a> Program<'a> {
             summarized: false,
             callouts,
             loose_on: false,
+            hot: hot_list(),
             loose: BTreeSet::new(),
             loose_why: HashMap::new(),
             flag_in: HashSet::new(),
@@ -322,6 +328,11 @@ impl<'a> Program<'a> {
     /// or run by the host).
     pub fn can_flag_out(&self, t: u32) -> bool {
         !self.intrinsics.contains_key(&t) && !self.natives.contains_key(&t) && !ERROR_PATH_FUNCS.contains(&t) && self.func(t).refused.is_none()
+    }
+
+    /// Not on AOT_HOT's list (false with no list).
+    pub fn is_cold(&self, va: u32) -> bool {
+        self.hot.as_ref().is_some_and(|h| !h.contains(&va))
     }
 
     /// Compiled loose (and not refused since for something else).
@@ -913,4 +924,21 @@ impl<'a> Program<'a> {
         }
         out
     }
+}
+
+/// AOT_HOT's file: a hexadecimal address a line, `#` comments and blank lines aside.
+fn hot_list() -> Option<HashSet<u32>> {
+    let path = std::env::var("AOT_HOT").ok().filter(|s| !s.is_empty())?;
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("AOT_HOT={}: {}", path, e));
+    let mut set = HashSet::new();
+    for line in text.lines() {
+        let s = line.split('#').next().unwrap_or("").trim();
+        if s.is_empty() {
+            continue;
+        }
+        let v = u32::from_str_radix(s.trim_start_matches("0x"), 16).unwrap_or_else(|_| panic!("AOT_HOT={}: not an address: {}", path, line));
+        set.insert(v);
+    }
+    eprintln!("aot: AOT_HOT: {} functions on the list; the others are AOT_FNC", set.len());
+    Some(set)
 }

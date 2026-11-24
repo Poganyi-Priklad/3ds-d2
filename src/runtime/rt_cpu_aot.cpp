@@ -59,6 +59,10 @@ struct Fiber {
 };
 
 CpuAotDispatch g_dispatch = nullptr;
+// cpu_aot_set_stack_alloc: where the threads' host stacks come from (the
+// console's linear memory, the heap being the guest arena's).
+void *(*g_stack_alloc)(size_t) = nullptr;
+void (*g_stack_free)(void *) = nullptr;
 
 class CpuAot : public Cpu {
 public:
@@ -185,7 +189,7 @@ public:
             mprotect(st, 4096, PROT_NONE);   // a guard page under it
             f->stack = (uint8_t *)st + 4096;
 #else
-            f->stack = (uint8_t *)memalign(8, kFiberStack);
+            f->stack = (uint8_t *)(g_stack_alloc ? g_stack_alloc(kFiberStack) : memalign(8, kFiberStack));
             if (!f->stack)
                 cpu_aot_stop("no host stack for a thread", eip);
 #endif
@@ -213,7 +217,10 @@ public:
 #if defined(__linux__)
             munmap(f->stack - 4096, kFiberStack + 4096);
 #else
-            std::free(f->stack);
+            if (g_stack_free)
+                g_stack_free(f->stack);
+            else
+                std::free(f->stack);
 #endif
             fibers_.erase(fs_);
         }
@@ -338,6 +345,7 @@ void cpu_aot_set_dispatch(CpuAotDispatch fn) { g_dispatch = fn; }
 bool cpu_aot_trap(Cpu &c, uint32_t va) { return static_cast<CpuAot &>(c).trap(va); }
 bool cpu_aot_is_trap(Cpu &c, uint32_t va) { return static_cast<CpuAot &>(c).is_trap(va); }
 void cpu_aot_yield(Cpu &c) { static_cast<CpuAot &>(c).yield(); }
+void cpu_aot_set_stack_alloc(void *(*alloc)(size_t), void (*release)(void *)) { g_stack_alloc = alloc, g_stack_free = release; }
 void *cpu_aot_fpu(Cpu &c) { return static_cast<CpuAot &>(c).fpu(); }
 bool cpu_aot_take_code_changed(Cpu &c) { return static_cast<CpuAot &>(c).take_code_changed(); }
 void cpu_aot_set_code_span(Cpu &c, uint32_t lo, uint32_t hi) { static_cast<CpuAot &>(c).set_code_span(lo, hi); }
@@ -380,6 +388,7 @@ void cpu_aot_set_dispatch(CpuAotDispatch) {}
 bool cpu_aot_trap(Cpu &, uint32_t) { return false; }
 bool cpu_aot_is_trap(Cpu &, uint32_t) { return false; }
 void cpu_aot_yield(Cpu &) {}
+void cpu_aot_set_stack_alloc(void *(*)(size_t), void (*)(void *)) {}
 void *cpu_aot_fpu(Cpu &) { return nullptr; }
 bool cpu_aot_take_code_changed(Cpu &) { return false; }
 void cpu_aot_set_code_span(Cpu &, uint32_t, uint32_t) {}

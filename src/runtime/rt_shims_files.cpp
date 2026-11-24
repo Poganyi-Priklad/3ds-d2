@@ -349,7 +349,9 @@ FileStats g_file_stats;
 // before each read of an MPQ file) is read ahead again once it has gone.
 // The files are the read-only game files a ReadCache was opened on, by
 // name; the worker reads them through descriptors of its own.
-constexpr uint32_t kPfRanges = 512, kPfFiles = 32;
+// (The AOT build's is 3.5 MiB of linear memory: 2,048 ranges, where 512 held
+// the 1 MiB.)
+constexpr uint32_t kPfRanges = 2048, kPfFiles = 32;
 uint8_t *g_pf_arena = nullptr;
 uint32_t g_pf_arena_size = 0, g_pf_head = 0;   // the ring's next write (the worker's)
 struct PfFile {

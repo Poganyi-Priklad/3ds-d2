@@ -111,7 +111,9 @@ extern uint32_t dyn86_ctr_jitpool_refused;   // mman_ctr.c: chunks refused, the 
 // the port's own allocations share. The pool's other MiB goes to the budget
 // __system_allocateHeaps hands the linear heap, for jump tables that would
 // otherwise take the main heap.
+#ifndef D2RT_CPU_AOT
 alignas(64) uint8_t g_prefetch_arena[1u << 20];
+#endif
 
 // libctru's own __system_allocateHeaps panics (svcBreak) when the kernel
 // refuses the heap it asks for, and the console refused "all that is left":
@@ -2483,6 +2485,29 @@ extern "C" __attribute__((noreturn)) void __wrap_abort(void)
 // keeps the rest: the jump tables not in linear memory, the JIT's metadata
 // and the runtime (JIT code is in its pool). The largest layout that the
 // heap and the linear memory set aside for jump tables allow.
+#ifdef D2RT_CPU_AOT
+// The AOT build with its code off the hot list compiled for size (issue
+// #153) has 6 MiB more than the 95 MiB heap window can take: the heap is at
+// the window, and the rest (3.3 MiB) is linear memory, which Box86's jump
+// tables aren't there to use. True when it is so.
+static bool aot_linear_spare() { return g_heap_setup.jmptbl_linear >= (3u << 20); }
+// Linear memory first, the heap when it has none: for what the AOT build
+// keeps out of the heap (reserve_arena).
+static void *linear_first(size_t n)
+{
+    if (void *p = linearMemAlign(n, 8))
+        return p;
+    return memalign(8, n);
+}
+static void linear_first_free(void *p)
+{
+    const u32 a = (u32)p;
+    if (a >= __ctru_linear_heap && a - __ctru_linear_heap < __ctru_linear_heap_size)
+        linearFree(p);
+    else
+        free(p);
+}
+#endif
 static const rt::Layout *reserve_arena()
 {
 #ifdef D2RT_CPU_AOT
@@ -2495,6 +2520,10 @@ static const rt::Layout *reserve_arena()
     // run with 4 MiB of room. The map is kCtrGameLayoutN3's with the pool's
     // end moved.
     constexpr u32 kAotHostHeap = 12u << 20;
+    // With linear memory to spare (aot_linear_spare), the threads' host
+    // stacks are there (128 KiB each), out of the heap.
+    if (aot_linear_spare())
+        d2rt::cpu_aot_set_stack_alloc(linear_first, linear_first_free);
     static rt::Layout aot = rt::kCtrGameLayoutN3;
     const u32 span = __ctru_heap_size > kAotHostHeap ? (__ctru_heap_size - kAotHostHeap) & ~0xFFFFFu : 0;
     if (span >= rt::kCtrGameLayout.span && (g_arena = memalign(0x1000, span))) {
@@ -2792,7 +2821,25 @@ int main()
         if (g_storm_direct)
             game::install_storm_direct_reads(c);
         game::install_frame_reads(c);
+#ifdef D2RT_CPU_AOT
+        {
+            // The AOT build's store: 3.5 MiB of the linear memory to spare,
+            // where the console's log had the 1 MiB one full all session
+            // with 0.4-1.5 MiB of the nearest rooms' tiles not loaded and
+            // the frame thread waiting 4 s of 380 on tiles (3DS-D2-1H). 1 MiB
+            // of linear memory stays free after it, as the Box86 build has;
+            // without the room, 1 MiB of the heap.
+            const u32 want = aot_linear_spare() ? 3584u << 10 : 0;
+            void *store = want && linearSpaceFree() >= want + (1u << 20) ? linearMemAlign(want, 64) : nullptr;
+            const u32 size = store ? want : 1u << 20;
+            if (!store)
+                store = memalign(64, size);
+            rt::set_prefetch_arena(store, store ? size : 0);
+            status("tile store: %u KiB, %s", (unsigned)(store ? size >> 10 : 0), store && size == want ? "linear" : "heap");
+        }
+#else
         rt::set_prefetch_arena(g_prefetch_arena, sizeof g_prefetch_arena);
+#endif
         if (g_storm_rate_kib)
             game::set_storm_read_rate(c, g_storm_rate_kib << 10);
         game::install_fatal_exit(c);
