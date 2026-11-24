@@ -695,6 +695,34 @@ A stop of the build without Box86 (code that isn't compiled, an `int`, a functio
 - **Tests:** `stoptest=<s>` in settings.txt stops the run that long after the first heartbeat; on the lane `M4_STOP_TEST=<n>` stops at the n-th heartbeat, and `CPU_AOT_STOP_IN_PLACE=1` ends it the console's way (otherwise the lane's process exits with 86 at once).
 - **Runs:** the lane's town walk with `M4_STOP_TEST=4 CPU_AOT_STOP_IN_PLACE=1` ends with "scheduler stopped: shutdown requested, exit code 86"; with a Game.exe one byte off in `0049d3c0` it ends at the first check ("1 differ: 0049d3c0"). In Azahar the AOT CIA with `stoptest=60` shows the stop, keeps the report and closes its session. Not run on a console.
 
+### Callouts without the dispatcher (#153)
+
+A call the compiled code can't make in C (an import, a call through a pointer) is a callout: `aot_call_out`, then on `CpuAot` the dispatcher's loop, the registers copied to the CPU and back through its virtual calls, and for an import the Bridge. `D2_AOT_CALLOUTS=1` on the lane counts them by target in each window (`aot: <n> callouts to <m> places:`). The fight script makes about 3,100 a frame:
+
+| Callouts a frame (lane, `fight.txt`) | |
+|---|---|
+| `GetTickCount` | 524 |
+| `EnterCriticalSection`, `LeaveCriticalSection` | 936 |
+| `Sleep`, `QueryPerformanceCounter`, `timeGetTime`, `PeekMessageA`, `GetAsyncKeyState` (the main loop's idle passes) | about 470 |
+| Compiled functions called through a pointer (`6c8c80`, `4f8120`, `608540`, `6c95d0`, …) | about 1,200 |
+
+The Box86 build serves the clock reads and the uncontended lock calls in line (`set_intrinsic_nogil`: a trap for `GetTickCount` cost about 10% of a town frame on the console). `CpuAot` had no such thing, so the console's AOT log read `prof locks: 0 in line, 201009 through the shim` in a window. Two routes now skip the dispatcher (`cpuaot_call`):
+
+- **The in-line intrinsics.** `CpuAot` keeps the functions `set_intrinsic_nogil` is given (`cpu_aot_intrinsic`). A callout to such a trap, and the dispatcher at one, calls the function with the return address and the first argument; true from it is the call done (eax, the bytes popped). A lock call that would wait or wake someone answers false and takes the trap as before. The call still counts for the thread's slice (`cpu_aot_slice_over`), so preemption is as it was.
+- **A compiled function called through a pointer.** Its row comes from an open-addressing table (`FastAt`: a multiply and a mask, where `unordered_map` divides, which the ARM11 does in software) and its code is called on the caller's registers. Not when code changed and hasn't been checked, when the entry holds a native's jump, when the row is stale (a native bound to it) or the function is loose: those go to the dispatcher as before.
+
+`D2_AOT_NOFAST=1` on the lane turns both off, to compare.
+
+| | Before | After |
+|---|---|---|
+| Lane, `fight.txt` on `CpuAot`: frames, state lines | 3,255 | 3,255, the same lines |
+| Its six fight windows' host time (qemu), ms | 8,938 8,198 8,365 7,669 7,003 7,118 | 7,121 6,426 7,325 6,567 6,053 6,033 (−14%) |
+| Lock calls in a window | 234,646 through the shim | 234,646 in line |
+| Azahar, Cold Plains (`coldplains.txt`): a main-loop idle pass (five such calls) | 226–277 µs | 151–190 µs |
+| Azahar, Cold Plains: a frame pass, median of the windows | 42.1 ms | 42.8 ms |
+
+Azahar's frame pass doesn't separate the two builds: the windows differ by what the script meets (34–48 ms within a run), and Azahar doesn't time host code as the console does. Not run on a console.
+
 ### Threads that wait in place (#138, planned)
 
 The strict report's largest number is the waits: 435,032 in Act II, nearly all `Sleep`. Today a shim that must wait asks the Bridge to stop; compiled code unwinds (an exit to the return sites' trap), WinVita's `CooperativeScheduler` runs another thread's slice, and when the first runs again the trap re-enters each compiled function at its return site (`reent_<va>`). All of it exists because the guest threads share one host stack.

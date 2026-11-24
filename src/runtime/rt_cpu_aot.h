@@ -41,6 +41,13 @@ void cpu_aot_set_code_span(Cpu &c, uint32_t lo, uint32_t hi);
 // After a trap that asked for no yield: whether the running thread's slice is
 // over (its share of trap calls made). True once; cpu_aot_yield then.
 bool cpu_aot_slice_over(Cpu &c);
+// The in-line intrinsic set for the trap at `va` (Cpu::set_intrinsic_nogil),
+// or null. True from it: the call is done, eax and the bytes its ret pops in
+// the frame; false: the trap as ever. A call it serves still counts for the
+// slice (cpu_aot_slice_over).
+Cpu::IntrinNoGilFn cpu_aot_intrinsic(Cpu &c, uint32_t va);
+// Whether code changed and cpu_aot_take_code_changed hasn't been asked yet.
+bool cpu_aot_code_changed(Cpu &c);
 // The most any live thread has used of its host stack, and a stack's size,
 // in bytes (INFO's line). It reads each stack's unused part: not every frame.
 void cpu_aot_stack(uint32_t *peak, uint32_t *size);

@@ -170,6 +170,41 @@ static void cpuaot_fault(int sig, siginfo_t *si, void *uc)
 }
 #endif
 static std::unordered_map<uint32_t, uint32_t> g_all_at;   // every compiled function: va -> its row
+// g_all_at for the callouts (cpuaot_call): open addressing, a multiply and a
+// mask (the ARM11 has no divide, and unordered_map's bucket is one).
+struct FastAt {
+    static constexpr uint32_t kNone = UINT32_MAX;
+    std::vector<uint32_t> va, row;
+    uint32_t mask = 0;
+    void build(const std::unordered_map<uint32_t, uint32_t> &m)
+    {
+        uint32_t n = 16;
+        while (n < m.size() * 2 + 1)
+            n <<= 1;
+        va.assign(n, 0), row.assign(n, kNone), mask = n - 1;
+        for (const auto &kv : m) {
+            uint32_t k = (kv.first * 2654435761u) >> 8 & mask;
+            while (row[k] != kNone)
+                k = (k + 1) & mask;
+            va[k] = kv.first, row[k] = kv.second;
+        }
+    }
+    uint32_t find(uint32_t x) const
+    {
+        if (!mask)
+            return kNone;
+        for (uint32_t k = (x * 2654435761u) >> 8 & mask;; k = (k + 1) & mask) {
+            if (row[k] == kNone)
+                return kNone;
+            if (va[k] == x)
+                return row[k];
+        }
+    }
+};
+static FastAt g_fast_at;
+static const bool g_fast_on = std::getenv("D2_AOT_NOFAST") == nullptr;   // the lane's: the callouts as before, to compare
+static const bool g_co_on = std::getenv("D2_AOT_CALLOUTS") != nullptr;   // count CpuAot's callouts by target (the lane)
+static std::unordered_map<uint32_t, uint32_t> g_co_by;
 static std::vector<uint32_t> g_native_slot;               // by row: the trap of the native bound to it, else 0
 extern "C" {   // defined among aot_rt.h's functions
 static bool cpuaot_dispatch(d2rt::Cpu &c, uint32_t eip, uint32_t until);
@@ -1233,6 +1268,7 @@ int install_aot(Cpu &c)
         g_all_at.clear();
         for (uint32_t k = 0; aot_funcs && aot_funcs[k].va; k++)
             g_all_at[aot_funcs[k].va] = k;
+        g_fast_at.build(g_all_at);
         d2rt::cpu_aot_set_dispatch(cpuaot_dispatch);
         {   // the image, from its PE header: what a write can change the code of
             const uint32_t base = 0x00400000u;
@@ -1682,6 +1718,22 @@ std::vector<std::string> aot_lines()
         }
         g_prof_window_t0 = now;
         g_prof_outer = 0;
+        if (!g_co_by.empty()) {   // D2_AOT_CALLOUTS=1: CpuAot's callouts this window, the most first
+            std::vector<std::pair<uint32_t, uint32_t>> by;
+            uint32_t all = 0;
+            for (const auto &kv : g_co_by)
+                by.push_back({kv.second, kv.first}), all += kv.second;
+            std::sort(by.begin(), by.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
+            char line[640];
+            int p = std::snprintf(line, sizeof line, "aot: %u callouts to %u places:", all, (unsigned)by.size());
+            for (size_t k = 0; k < by.size() && k < 24 && p < (int)sizeof line; k++) {
+                const d2rt::Shim *sh = rt::bridge().slot_shim(by[k].second);
+                p += std::snprintf(line + p, sizeof line - p, " %s%s%08x %u", sh ? sh->tag.c_str() : "", sh ? "@" : "",
+                                   by[k].second, by[k].first);
+            }
+            out.push_back(line);
+            g_co_by.clear();
+        }
         std::vector<std::pair<uint32_t, const Fn *>> direct;
         uint32_t directs = 0;
         for (Fn &F : g_fns) {
@@ -1855,6 +1907,23 @@ static bool cpuaot_dispatch(d2rt::Cpu &c, uint32_t eip, uint32_t until)
         if (until && eip == until)
             return true;
         if (d2rt::cpu_aot_is_trap(c, eip)) {
+            if (const d2rt::Cpu::IntrinNoGilFn in = g_fast_on ? d2rt::cpu_aot_intrinsic(c, eip) : nullptr) {
+                // A clock read or a lock call nobody waits on (the runtime's
+                // in-line intrinsics): no Bridge, the call done here.
+                const uint32_t esp = c.reg(4);
+                d2rt::Cpu::IntrinFrame fr = {aot_ld32(aot_mem, esp), aot_ld32(aot_mem, esp + 4u), 0, 0, nullptr};
+                if (in(fr, eip)) {
+                    c.set_reg(0, fr.eax);
+                    c.set_reg(4, esp + 4u + fr.pop);
+                    if (d2rt::cpu_aot_slice_over(c)) {
+                        c.set_reg(d2rt::R_EIP, fr.ret);
+                        d2rt::cpu_aot_yield(c);
+                        cpuaot_bind(c);
+                    }
+                    eip = fr.ret;
+                    continue;
+                }
+            }
             c.set_reg(d2rt::R_EIP, eip);
             g_at_trap = eip;
             AOT_AT_SAVE;
@@ -1982,6 +2051,40 @@ static void cpuaot_call(uint32_t x, AotRegs *t)
 {
     d2rt::Cpu &c = *game::g_cpu;
     const uint32_t ra = aot_ld32(aot_mem, t->r[4]);
+    // The two callouts there are most of (the lane's fight: 3,100 a frame,
+    // half of them the clock and the lock calls, the rest mostly compiled
+    // functions called through a pointer), without the dispatcher's loop,
+    // its copies of the registers to the CPU and back, or the Bridge.
+    if (!g_fast_on) {
+    } else if (d2rt::cpu_aot_is_trap(c, x)) {
+        if (const d2rt::Cpu::IntrinNoGilFn in = d2rt::cpu_aot_intrinsic(c, x)) {
+            const uint32_t esp = t->r[4];
+            d2rt::Cpu::IntrinFrame fr = {ra, aot_ld32(aot_mem, esp + 4u), 0, 0, nullptr};
+            if (in(fr, x)) {
+                t->r[0] = fr.eax;
+                t->r[4] = esp + 4u + fr.pop;
+                if (d2rt::cpu_aot_slice_over(c)) {   // its slice's share of calls made: the others' turn
+                    for (int k = 0; k < 8; k++)
+                        c.set_reg(k, t->r[k]);
+                    c.set_reg(d2rt::R_EIP, ra);
+                    d2rt::cpu_aot_yield(c);
+                    cpuaot_bind(c);
+                }
+                return;
+            }
+        }
+    } else if (!d2rt::cpu_aot_code_changed(c) && aot_mem[x] != 0xe9) {
+        const uint32_t row = g_fast_at.find(x);
+        if (row != FastAt::kNone && !aot_stale[row] && aot_funcs[row].pops != AOT_POPS_LOOSE) {
+            const uint32_t esp0 = t->r[4];
+            g_at_fn = x;
+            AOT_AT_SAVE;
+            aot_funcs[row].sig(t->r);
+            AOT_AT_BACK;
+            t->r[4] = esp0 + 4u + aot_funcs[row].pops;
+            return;
+        }
+    }
     for (int k = 0; k < 8; k++)
         c.set_reg(k, t->r[k]);
     if (!cpuaot_dispatch(c, x, ra))
@@ -2155,6 +2258,8 @@ void aot_call_out(uint32_t x, AotRegs *t, uint32_t pops)
     uint32_t *r = t->r;
     const uint32_t esp0 = r[4], ra = aot_ld32(aot_mem, esp0), want = esp0 + 4u + pops;
     if (g_cpu_aot) {
+        if (g_co_on)
+            g_co_by[x]++;
         // No trap to go back to: the callee where it is, whatever it is. One
         // that pops other than the site counted is named once and goes on
         // (the code after takes esp as it comes back).
