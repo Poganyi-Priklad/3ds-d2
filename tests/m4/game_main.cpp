@@ -38,6 +38,7 @@
 
 #include "game/dcc_native.h"
 #include "game/frame_reads.h"
+#include "game/sound_defer.h"
 #include "game/autoplay.h"
 #include "game/d2_units.h"
 #include "game/automap.h"
@@ -251,6 +252,8 @@ int main(int argc, char **argv)
         if (!std::getenv("M4_STORM_DIRECT") || std::string(std::getenv("M4_STORM_DIRECT")) != "0")
             game::install_storm_direct_reads(c);
         game::install_frame_reads(c);
+        // Sounds read off the game thread at their first play (D2_SOUND_DEFER=0: as the game does).
+        game::install_sound_defer(c, !std::getenv("D2_SOUND_DEFER") || std::string(std::getenv("D2_SOUND_DEFER")) != "0");
         game::install_fatal_exit(c);
         if (ctr_layout) {
             game::install_pool_release(c);

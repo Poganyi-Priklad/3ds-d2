@@ -35,6 +35,7 @@
 #include "game/draw_census.h"
 #include "game/dcc_native.h"
 #include "game/frame_reads.h"
+#include "game/sound_defer.h"
 #include "game/tiles_ahead.h"
 #include "game/frame_trace.h"
 #include "game/port_options.h"
@@ -1023,6 +1024,7 @@ std::atomic<bool> g_lock_on{false};
 // would put them a quarter second apart.
 std::atomic<bool> g_lock_in_game{false};
 bool g_lock_test = false;
+bool g_sound_defer = true;   // sounddefer=0 in settings.txt: sounds read by the game thread, as the game does (issue #153)
 uint32_t g_stop_test_s = 0;   // stoptest=<s> in settings.txt: a CpuAot stop that long after the first heartbeat (issue #139)
 int32_t g_lock_err_us = 0;    // the render thread's: where the swaps fall from a refresh's middle, averaged
 uint64_t g_lock_last_us = 0;  // the render thread's: the last swap
@@ -1660,6 +1662,8 @@ void load_settings()
                                                        : g_ss.port_options() & ~game::kPortCore2Draw);
         else if (std::strncmp(line, "copycheck=", 10) == 0)   // a measurement's (Azahar), issue #80
             g_copy_check = std::atoi(line + 10) != 0;
+        else if (std::strncmp(line, "sounddefer=", 11) == 0)   // issue #153: 0 for a run to compare
+            g_sound_defer = std::atoi(line + 11) != 0;
         else if (std::strncmp(line, "stoptest=", 9) == 0)   // a stop as a test (issue #139)
             g_stop_test_s = (uint32_t)std::atoi(line + 9);
         else if (std::strncmp(line, "locktest=", 9) == 0)   // the frame lock against the host clock (Azahar), issue #86
@@ -2821,6 +2825,7 @@ int main()
         if (g_storm_direct)
             game::install_storm_direct_reads(c);
         game::install_frame_reads(c);
+        game::install_sound_defer(c, g_sound_defer);
 #ifdef D2RT_CPU_AOT
         {
             // The AOT build's store: 1.5 MiB of the linear memory to spare,
