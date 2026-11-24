@@ -1038,7 +1038,8 @@ void prof_report(uint64_t ms)
     }
     const FileStats &f = now.files, &f0 = g_mark.files;
     logf("prof files: %llu reads (%llu async), %llu hits, %llu fills, %llu direct, %llu seeks; disk %llu reads %llu KiB in "
-         "%llu ms; cache %llu KiB; waited %llu ms in %llu reads (frame thread %llu ms), stalled %llu ms",
+         "%llu ms; cache %llu KiB; waited %llu ms in %llu reads (frame thread %llu ms), stalled %llu ms; stdio %llu reads "
+         "%llu ms",
          (unsigned long long)(f.calls - f0.calls), (unsigned long long)(f.async - f0.async),
          (unsigned long long)(f.hits - f0.hits),
          (unsigned long long)(f.fills - f0.fills), (unsigned long long)(f.direct - f0.direct),
@@ -1046,7 +1047,8 @@ void prof_report(uint64_t ms)
          (unsigned long long)((f.disk_bytes - f0.disk_bytes) >> 10), (unsigned long long)((f.disk_us - f0.disk_us) / 1000),
          (unsigned long long)(f.cache_bytes >> 10), (unsigned long long)((f.wait_us - f0.wait_us) / 1000),
          (unsigned long long)(f.waits - f0.waits), (unsigned long long)((f.wait_frame_us - f0.wait_frame_us) / 1000),
-         (unsigned long long)((f.stall_us - f0.stall_us) / 1000));
+         (unsigned long long)((f.stall_us - f0.stall_us) / 1000), (unsigned long long)(f.plain - f0.plain),
+         (unsigned long long)((f.plain_us - f0.plain_us) / 1000));
     if (f.jobs != f0.jobs)
         logf("prof jobs: %llu on the I/O worker, %llu ms (%llu past 5 ms), %llu ms queued",
              (unsigned long long)(f.jobs - f0.jobs), (unsigned long long)((f.job_us - f0.job_us) / 1000),

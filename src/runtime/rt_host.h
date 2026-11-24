@@ -264,6 +264,7 @@ struct FileStats {
     uint64_t disk_reads = 0, disk_bytes = 0, disk_us = 0;   // file system reads by the cache
     uint64_t cache_bytes = 0; // block memory held now (freed with its handle)
     uint64_t async = 0;       // reads handed to the I/O worker, the guest thread waiting
+    uint64_t plain = 0, plain_us = 0;   // ReadFile calls on stdio files (created, or written), and their time
     // Time the game waited on the file system (issue #31): a guest thread
     // waiting on the I/O worker as a guest wait, the other threads running
     // (from the read's submission to the waiter waking; wait_frame_us those

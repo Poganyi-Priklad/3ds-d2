@@ -13,13 +13,15 @@
 // stream and guest memory (no staging buffer), file handles are a fixed-size
 // table, and directory listings are read once.
 //
-// Read-only files from the game install (the MPQs) bypass stdio. The game
+// Existing files opened to read (the MPQs, and a save's files) bypass stdio. The game
 // reads them in small sector-sized pieces with a seek before most of them,
 // and stdio dropped its small buffer at every fseek: on the console each
 // call became an SD access, at 400-750 KiB/s. Such a file is an unbuffered
 // descriptor under a per-handle block cache (ReadCache), and its position is
 // kept here, so SetFilePointer never reaches the file system. Files the
-// guest may write keep stdio, so no cache can go stale against a write.
+// guest creates or truncates keep stdio; one opened to read and write is
+// cached until its first write (to_stdio), so no cache is older than a write
+// through its own handle.
 #include "runtime/rt_host.h"
 #include "runtime/rt_layout.h"
 
@@ -740,6 +742,7 @@ struct RtFile : Waitable {
     bool suspended = false;
     long fp_pos = 0;
     uint32_t traced = 0;             // the file trace (set_file_trace) that named it
+    uint32_t plain_reads = 0;        // ReadFile calls through stdio, logged at its close when many
     RtFile() { g_files.push_back(this); }
     ~RtFile() override
     {
@@ -748,6 +751,8 @@ struct RtFile : Waitable {
         while (cache && cache->inflight.load(std::memory_order_acquire) > 0)
             if (options().sleep_ms)
                 options().sleep_ms(1);
+        if (plain_reads >= 64)   // each may be an SD access (see the top)
+            logf("files: %s (\"%s\") closed after %u reads through stdio", host.c_str(), mode, (unsigned)plain_reads);
         if (fp)
             std::fclose(fp);
         if (fd >= 0)
@@ -1396,6 +1401,31 @@ bool ini_write(const std::string &file, const std::string &app, const std::strin
     return std::fclose(f) == 0;
 }
 
+// A file opened to read and write starts under the read cache (create_file).
+// Its first write, or a change of its size, puts it on stdio at the position
+// it has: the cache goes, so nothing cached is older than a write. False:
+// it couldn't be opened to write.
+bool to_stdio(RtFile *f)
+{
+    if (!f->cache)
+        return true;
+    if (std::strcmp(f->mode, "r+b") != 0)
+        return false;   // opened to read alone
+    while (f->cache->inflight.load(std::memory_order_acquire) > 0)
+        if (options().sleep_ms)
+            options().sleep_ms(1);
+    FILE *fp = std::fopen(f->host.c_str(), "r+b");
+    if (!fp)
+        return false;
+    std::fseek(fp, (long)f->pos, SEEK_SET);
+    f->cache.reset();
+    if (f->fd >= 0)
+        ::close(f->fd);
+    f->fd = -1;
+    f->fp = fp;
+    return true;
+}
+
 // ---- file creation ------------------------------------------------------------------
 
 uint32_t create_file(Cpu &c, const std::string &guest, uint32_t access, uint32_t disp)
@@ -1440,14 +1470,21 @@ uint32_t create_file(Cpu &c, const std::string &guest, uint32_t access, uint32_t
     f->mode = mode;
     if (mode[0] == 'w' || write)
         touched(host);   // created, truncated or about to be written
-    // Read-only and in the game install: the cached path (see the top).
+    // An existing file opened to read: the cached path (see the top). A file
+    // of the write root too, and one opened to read and write (a save's map
+    // file, "r+b"): the game reads those about a hundred bytes a call, each
+    // call an SD access through stdio (an act change by waypoint: 30,000
+    // reads of 145 opens, 24 s in ReadFile on the console, 3DS-D2-1H). The
+    // cache is this handle's and ends with it or at its first write
+    // (to_stdio); only the game install's files are read ahead.
     const std::string &data = data_root();
-    if (std::strcmp(mode, "rb") == 0 && split_roots() && host.compare(0, data.size(), data) == 0) {
+    if ((std::strcmp(mode, "rb") == 0 || std::strcmp(mode, "r+b") == 0) && split_roots()) {
+        const bool install = host.compare(0, data.size(), data) == 0;
         f->fd = ::open(host.c_str(), O_RDONLY);
         struct stat fst;
         if (f->fd >= 0 && ::fstat(f->fd, &fst) == 0) {
             f->size = (uint64_t)fst.st_size;
-            f->cache.reset(new ReadCache(f->fd, f->size, pf_register(host)));
+            f->cache.reset(new ReadCache(f->fd, f->size, install ? pf_register(host) : -1));
         } else if (f->fd >= 0) {
             ::close(f->fd);
             f->fd = -1;
@@ -1691,9 +1728,13 @@ void install_files(Bridge &br)
             got = cached_read(c, *f, buf, n);
             g_file_stats.stall_us += g_file_stats.disk_us - disk_us;   // synchronous: the disk time is the stall
         } else {
+            const uint64_t t0 = wx86_now_us();
             if (ov)
                 std::fseek(f->fp, (long)c.read_u32(ov + 8), SEEK_SET);
             got = (uint32_t)stream_read(c, f->fp, buf, n);
+            g_file_stats.plain++;
+            f->plain_reads++;
+            g_file_stats.plain_us += wx86_now_us() - t0;
         }
         stats().bytes_read += got;
         if (pread)
@@ -1722,7 +1763,7 @@ void install_files(Bridge &br)
         }
         RtFile *f = file_of(h);
         if (!f) { set_last_error(c, ERROR_INVALID_HANDLE); return 0; }
-        if (f->cache) { set_last_error(c, ERROR_ACCESS_DENIED); return 0; }   // opened for reading only
+        if (!to_stdio(f)) { set_last_error(c, ERROR_ACCESS_DENIED); return 0; }   // opened for reading only
         touched(f->host);   // its size and time change
         if (ov)
             std::fseek(f->fp, (long)c.read_u32(ov + 8), SEEK_SET);
@@ -1785,7 +1826,7 @@ void install_files(Bridge &br)
     K("SetEndOfFile", 1, [](Cpu &c) -> uint32_t {
         RtFile *f = file_of(c.arg(0));
         if (!f) { set_last_error(c, ERROR_INVALID_HANDLE); return 0; }
-        if (f->cache) { set_last_error(c, ERROR_ACCESS_DENIED); return 0; }
+        if (!to_stdio(f)) { set_last_error(c, ERROR_ACCESS_DENIED); return 0; }
         std::fflush(f->fp);
         touched(f->host);
         return ::ftruncate(fileno(f->fp), std::ftell(f->fp)) == 0;
