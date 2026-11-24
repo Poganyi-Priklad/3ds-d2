@@ -702,7 +702,7 @@ All of it at `-Os` costs about 2% of a town frame in Azahar (`smooth-walk.txt`: 
 
 **Where the 5.8 MiB go.** The console's heap window is 95 MiB (`__system_allocateHeaps`), and the AOT build's heap was 92: 3 MiB go to the heap, so the guest arena is 83 MiB against 80. The rest is linear memory, which Box86's jump tables aren't there to use (`aot_linear_spare`, `src/app/ctr_game.cpp`):
 
-- **The tile store** (the read-ahead's ring, `rt::set_prefetch_arena`) is 3.5 MiB of it, where it was 1 MiB of `.bss` (and 2,048 ranges for 512). The console's AOT log had the 1 MiB store full all session with 0.4-1.5 MiB of the nearest rooms' tiles not loaded, and tiles were the most of the frame thread's waits on the card (4.0 s of 15.1 in 380 s).
+- **The tile store** (the read-ahead's ring, `rt::set_prefetch_arena`) is 3.5 MiB of it (1.5 MiB since the read cache took 2: the next section), where it was 1 MiB of `.bss` (and 2,048 ranges for 512). The console's AOT log had the 1 MiB store full all session with 0.4-1.5 MiB of the nearest rooms' tiles not loaded, and tiles were the most of the frame thread's waits on the card (4.0 s of 15.1 in 380 s).
 - **The threads' host stacks** (128 KiB each, `cpu_aot_set_stack_alloc`) are there too, out of the heap.
 
 The host's 12 MiB of the heap stay. With 10 the heap's top had 472 KiB of room left in Azahar (2,520 with 12); the most the host holds is during a film (its two 1.6 MiB frames).
@@ -718,6 +718,34 @@ The host's 12 MiB of the heap stay. With 10 the heap's top had 472 KiB of room l
 | Frame pass, median | 34.6 ms | 34.2 ms |
 
 The lane on `CpuAot` with the list: 2,005, 3,255 and 4,071 frames, as before. Not run on a console.
+
+### The read cache's blocks in linear memory (#153)
+
+The card's reads are the frame thread's waits: 3,752 reads of 25 KiB, 21.7 s of the console's 490 s AOT session (Sentry `3DS-D2-1H`), about 3.2 ms a read and 0.11 ms a KiB by a fit of its windows. The read cache held 8 blocks of 16 KiB a file and 1 MiB in all, and an MPQ is one file, read by many of the game's at once.
+
+`tools/file_trace.py` replays a trace of the game's reads through the cache's rule. On two Azahar traces of the combined build (`act-load.txt` and `coldplains.txt` with `profile files,frames`):
+
+| Blocks a file, cap | SD time, act load | Cold Plains | The blocks' most |
+|---|---|---|---|
+| 8, 1 MiB (as it was) | 1.2 s | 3.5 s | 512, 640 KiB |
+| 16, 2 MiB | −12% | −10% | 992, 1,184 KiB |
+| 24, 2 MiB | −16% | −14% | 1,376, 1,568 KiB |
+| 32, 3 MiB | −19% | −18% | 1,760, 1,952 KiB |
+| 64, 4 MiB | −28% | −25% | 2,864, 3,488 KiB |
+
+More read-ahead adds little: following four runs a file and reading up to four blocks at a time gave 1-6% over the same block count, and was left out.
+
+The host heap can't hold the blocks: 2 MiB more of them left 3.1 MiB of it free in Azahar, and a film's frames are 3.2 MiB. So `rt::set_read_cache` takes a slab for them, and the AOT build gives it 2 MiB of the linear memory it has to spare, with 32 blocks a file. Blocks come from the slab first, then from the heap up to its 1 MiB as before. The tile store beside it is 1.5 MiB, where the section above made it 3.5: at 1.5 the frame thread waits as long on tiles in these two runs (1,008 against 987 ms, 1,618 against 1,572).
+
+| Azahar, the AOT CIA (`d54100a56e2f`) against the combined build before it | `act-load.txt` | `coldplains.txt` |
+|---|---|---|
+| Disk reads | 1,307 against 1,451 | 1,854 against 2,238 |
+| Disk time | 8,452 against 9,083 ms (−7%) | 10,535 against 12,257 ms (−14%) |
+| The frame thread's wait on reads | 6,443 against 7,064 ms (−9%) | 10,893 against 12,752 ms (−15%) |
+| Host heap free, lowest | 5,172 against 4,980 KiB | 5,157 against 4,980 KiB |
+| Linear free, lowest | 1,118 against 1,086 KiB | 1,118 against 1,086 KiB |
+
+Two runs of each script, one a build: the scripts' play differs a little from run to run. Not run on a console. The Box86 build's cache is as it was.
 
 ### A stop ends the run in order (#139)
 

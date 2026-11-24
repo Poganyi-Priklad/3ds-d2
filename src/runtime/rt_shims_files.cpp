@@ -517,18 +517,74 @@ bool run_background()
 // than 8 KiB blocks without read-ahead; larger blocks or more read-ahead
 // read too much the game never uses. Memory is tight (4 MiB of blocks ran
 // the host heap out in Blood Moor), so blocks are allocated on first use
-// and capped in total (kCap): past it, a file reuses its own blocks.
+// and capped in total (set_read_cache): past it, a file reuses its own blocks.
+//
+// set_read_cache (the AOT build: issue #153): 32 blocks a file, and 2 MiB of
+// blocks more in a slab the platform gives (the console's linear memory,
+// which that build has to spare; the heap's 1 MiB stays what it was: a film's
+// frames need the rest). A replay of two Azahar traces (an act's load and
+// arrival, Cold Plains) costs 18-19% less SD time with 32 blocks and 3 MiB
+// than with 8 and 1 MiB (24 and 2 MiB: 14-16%; 64 and 4 MiB: 25-28%): an MPQ
+// is one file here, read by many of the game's at once.
+constexpr uint32_t kRcBlock = 16 * 1024;
+uint32_t g_rc_blocks = 8;
+uint64_t g_rc_cap = 1u << 20;      // of heap blocks; a file with none still gets one
+std::atomic<uint32_t> g_rc_heap_bytes{0};   // a file closes on the game's thread while the worker fills another
+uint8_t *g_rc_slab = nullptr;
+uint32_t g_rc_slab_size = 0, g_rc_slab_next = 0;
+std::vector<uint8_t *> g_rc_slab_free;
+std::atomic_flag g_rc_lock = ATOMIC_FLAG_INIT;   // the slab's list: a file closes on the game's thread while the worker fills another
+
+// A block: from the slab while it has one, else the heap under its cap
+// (force: past it too). Null: reuse one.
+uint8_t *rc_alloc(bool force)
+{
+    uint8_t *p = nullptr;
+    while (g_rc_lock.test_and_set(std::memory_order_acquire)) {
+    }
+    if (!g_rc_slab_free.empty()) {
+        p = g_rc_slab_free.back();
+        g_rc_slab_free.pop_back();
+    } else if (g_rc_slab && g_rc_slab_next + kRcBlock <= g_rc_slab_size) {
+        p = g_rc_slab + g_rc_slab_next;
+        g_rc_slab_next += kRcBlock;
+    }
+    g_rc_lock.clear(std::memory_order_release);
+    if (p || (!force && g_rc_heap_bytes.load(std::memory_order_relaxed) + kRcBlock > g_rc_cap))
+        return p;
+    p = new (std::nothrow) uint8_t[kRcBlock];
+    if (p)
+        g_rc_heap_bytes += kRcBlock;
+    return p;
+}
+struct RcFree {
+    void operator()(uint8_t *p) const
+    {
+        if (g_rc_slab && p >= g_rc_slab && p < g_rc_slab + g_rc_slab_size) {
+            while (g_rc_lock.test_and_set(std::memory_order_acquire)) {
+            }
+            g_rc_slab_free.push_back(p);
+            g_rc_lock.clear(std::memory_order_release);
+        } else if (p) {
+            delete[] p;
+            g_rc_heap_bytes -= kRcBlock;
+        }
+    }
+};
+
 class ReadCache {
 public:
-    static constexpr uint32_t kBlock = 16 * 1024, kBlocks = 8;
-    static constexpr uint64_t kCap = 1u << 20;
+    static constexpr uint32_t kBlock = kRcBlock, kBlocksMax = 32;
 
-    ReadCache(int fd, uint64_t size, int pf = -1) : fd_(fd), size_(size), pf_(pf) {}
+    ReadCache(int fd, uint64_t size, int pf = -1)
+        : fd_(fd), size_(size), pf_(pf), count_(std::min(g_rc_blocks, kBlocksMax))
+    {
+    }
     void set_fd(int fd) { fd_ = fd; }   // the file reopened (resume_files)
     ~ReadCache()
     {
-        for (const Block &b : blocks_)
-            if (b.data)
+        for (uint32_t k = 0; k < count_; k++)
+            if (blocks_[k].data)
                 g_file_stats.cache_bytes -= kBlock;
     }
 
@@ -607,7 +663,7 @@ private:
     struct Block {
         uint64_t base = ~0ull;
         uint32_t len = 0, used = 0;
-        std::unique_ptr<uint8_t[]> data;
+        std::unique_ptr<uint8_t[], RcFree> data;
     };
 
     struct Guard {
@@ -622,9 +678,9 @@ private:
 
     Block *find(uint64_t base)
     {
-        for (Block &b : blocks_)
-            if (b.base == base && b.data)
-                return &b;
+        for (uint32_t k = 0; k < count_; k++)
+            if (blocks_[k].base == base && blocks_[k].data)
+                return &blocks_[k];
         return nullptr;
     }
 
@@ -635,7 +691,8 @@ private:
     Block *victim(const Block *keep)
     {
         Block *any = nullptr, *with_memory = nullptr;
-        for (Block &b : blocks_) {
+        for (uint32_t k = 0; k < count_; k++) {
+            Block &b = blocks_[k];
             if (&b == keep)
                 continue;
             if (!any || b.used < any->used)
@@ -643,12 +700,10 @@ private:
             if (b.data && (!with_memory || b.used < with_memory->used))
                 with_memory = &b;
         }
-        if (any && !any->data && with_memory && g_file_stats.cache_bytes + kBlock > kCap)
-            any = with_memory;   // at the cap: reuse a block instead of allocating
         if (any && !any->data) {
-            any->data.reset(new (std::nothrow) uint8_t[kBlock]);
+            any->data.reset(rc_alloc(!with_memory));
             if (!any->data)
-                return with_memory;
+                return with_memory;   // at the cap (or no memory): reuse a block instead
             g_file_stats.cache_bytes += kBlock;
         }
         return any;
@@ -726,7 +781,8 @@ private:
     int pf_;   // the prefetch store's id for this file, -1 none
     uint32_t clock_ = 0;
     uint64_t last_fill_ = ~0ull - kBlock;   // the last block filled: a miss right after it reads ahead
-    Block blocks_[kBlocks];
+    const uint32_t count_;   // of blocks_, the ones in use (set_read_cache when the file was opened)
+    Block blocks_[kBlocksMax];
     std::atomic_flag lock_ = ATOMIC_FLAG_INIT;
 };
 
@@ -935,6 +991,14 @@ bool prefetch_raw(int id, uint64_t pos, void *dst, uint32_t n)
 {
     uint32_t got;
     return pf_disk(id, pos, dst, n, got) && got == n;
+}
+
+void set_read_cache(uint32_t blocks, void *slab, uint32_t slab_size)
+{
+    g_rc_blocks = std::max<uint32_t>(2, std::min(blocks, ReadCache::kBlocksMax));
+    g_rc_slab = static_cast<uint8_t *>(slab);
+    g_rc_slab_size = slab ? slab_size : 0;
+    g_rc_slab_free.reserve(g_rc_slab_size / kRcBlock);   // no allocation when a block comes back
 }
 
 void set_prefetch_arena(void *arena, uint32_t size)
