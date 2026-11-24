@@ -140,6 +140,13 @@ NATIVE(FrameRead, 0)
 GROUP(frame_reads, 1)
 SITE(frame_reads, 0x0041aad0, "55 8b ec 8b 45 14 83 ec 2c 85 c0 74 06 c7 00 00 00 00 00", "e8 {FrameRead} 55 8b ec 83 ec 2c 90 90 90 90 90 90 90 90")
 
+// sound_defer.cpp, install_sound_defer: 0x481950 (the sound tables' load)
+// reads the record count at 0x482173, the records filled; a native returns
+// it, and gives each record that isn't a stream sounds.txt's Defer Inst.
+NATIVE(SoundTable, 0)
+GROUP(sound_defer, 1)
+SITE(sound_defer, 0x00482173, "a1 a4 c9 7b 00", "e8 {SoundTable}")
+
 // cinematics.cpp, install_cinematics: the GDI renderer's three video entries
 // (0x6c7cc0: "return 0", "ret 4", "return 0", 16 bytes each) become the play
 // loop (fastcall: ecx the name, edx the mode, one stack argument popped):

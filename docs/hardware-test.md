@@ -147,6 +147,12 @@ The app plays sound through WinVita's DirectSound emulation (ds_emul) and the 3D
   - `sortie-vite`, `trou>35ms` and `trou-max`: late writes to the DSP (underruns).
 - **What's still open on #117:** a heavy fight on the console (many voices, as in Baal's Throne, where WinVita measured 85% of grains clipped), with the limiter on and then off. In Azahar the counters work (a `sondiag` line every window), but no scripted run there has a fight that heavy.
 
+**Sound effects read off the game thread** (issue #153): a sound's file used to be read whole by the game thread at the sound's first play, which is a wait on the card in that frame (460 reads, 10.3 MiB and 1.6 s in 420 s of play on the console, Sentry `3DS-D2-1J`).
+- **What changed:** the game has its own way to load a sound in the background and start it when the file is in, used for the sounds `sounds.txt` marks Defer Inst. `src/game/sound_defer.cpp` marks every sound that isn't a stream (2,578 more, of 4,699) when the table is loaded. No game code is replaced; game.log has a `sound: … read off the game thread` line.
+- **What to listen for:** a sound's first play comes a few frames late. No sound should be missing.
+- **Switching it off:** `sounddefer=0` in settings.txt for a run to compare (the app writes the file again without it); `D2_SOUND_DEFER=0` on the lane, which has no sound device and loads no sound table.
+- **Azahar** (AOT `7566a6720375-aot957449`, Cold Plains script, 200 s): the frame thread waited 770 ms on sound files against 2,847 and 2,994 ms with it off; frames of 100–250 ms 33 against 41 and 42. One comparable run on, two off; monsters' sprites vary more between runs (2.3–4.2 s) than this saves. Not run on a console.
+
 ## Frame-rate work (2026-10-17)
 
 | Change | Measure | Result |
