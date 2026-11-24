@@ -290,6 +290,10 @@ const FileStats &file_stats();
 // game runs), written as a ring, a range at most a quarter of it. False if
 // it read nothing: already stored, no arena, or the read failed.
 void set_prefetch_arena(void *arena, uint32_t size);
+// The read cache's size, set before a file is opened: 16 KiB blocks a file
+// (8; 32 at most), and a slab for blocks beside the heap's 1 MiB of them
+// (null: none), used first. The slab is the caller's and stays.
+void set_read_cache(uint32_t blocks, void *slab, uint32_t slab_size);
 int prefetch_file(const char *name);
 bool io_background(std::function<void()> task);
 bool prefetch_raw(int id, uint64_t pos, void *dst, uint32_t n);

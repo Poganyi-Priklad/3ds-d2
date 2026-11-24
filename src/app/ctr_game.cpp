@@ -2823,19 +2823,23 @@ int main()
         game::install_frame_reads(c);
 #ifdef D2RT_CPU_AOT
         {
-            // The AOT build's store: 3.5 MiB of the linear memory to spare,
+            // The AOT build's store: 1.5 MiB of the linear memory to spare,
             // where the console's log had the 1 MiB one full all session
             // with 0.4-1.5 MiB of the nearest rooms' tiles not loaded and
-            // the frame thread waiting 4 s of 380 on tiles (3DS-D2-1H). 1 MiB
-            // of linear memory stays free after it, as the Box86 build has;
-            // without the room, 1 MiB of the heap.
-            const u32 want = aot_linear_spare() ? 3584u << 10 : 0;
-            void *store = want && linearSpaceFree() >= want + (1u << 20) ? linearMemAlign(want, 64) : nullptr;
+            // the frame thread waiting 4 s of 380 on tiles (3DS-D2-1H).
+            // Without the room, 1 MiB of the heap. The read cache has 2 MiB
+            // of that memory after it (set_read_cache), and 1 MiB stays
+            // free, as the Box86 build has.
+            const u32 want = aot_linear_spare() ? 1536u << 10 : 0;
+            void *store = want && linearSpaceFree() >= want + (3u << 20) ? linearMemAlign(want, 64) : nullptr;
             const u32 size = store ? want : 1u << 20;
             if (!store)
                 store = memalign(64, size);
             rt::set_prefetch_arena(store, store ? size : 0);
             status("tile store: %u KiB, %s", (unsigned)(store ? size >> 10 : 0), store && size == want ? "linear" : "heap");
+            void *slab = store && size == want && linearSpaceFree() >= (3u << 20) ? linearMemAlign(2u << 20, 64) : nullptr;
+            rt::set_read_cache(slab ? 32 : 8, slab, slab ? 2u << 20 : 0);
+            status("read cache: %s", slab ? "32 blocks a file, 2048 KiB of them linear" : "8 blocks a file");
         }
 #else
         rt::set_prefetch_arena(g_prefetch_arena, sizeof g_prefetch_arena);
