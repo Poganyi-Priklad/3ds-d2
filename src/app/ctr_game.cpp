@@ -1662,6 +1662,8 @@ void load_settings()
                                                        : g_ss.port_options() & ~game::kPortCore2Draw);
         else if (std::strncmp(line, "copycheck=", 10) == 0)   // a measurement's (Azahar), issue #80
             g_copy_check = std::atoi(line + 10) != 0;
+        else if (std::strncmp(line, "bigroomtest=", 12) == 0)   // issue #153: the room made for a large sprite, at every one
+            game::set_big_room_test(std::atoi(line + 12) != 0);
         else if (std::strncmp(line, "sounddefer=", 11) == 0)   // issue #153: 0 for a run to compare
             g_sound_defer = std::atoi(line + 11) != 0;
         else if (std::strncmp(line, "stoptest=", 9) == 0)   // a stop as a test (issue #139)

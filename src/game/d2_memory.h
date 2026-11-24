@@ -141,6 +141,11 @@ void request_pool_release();
 // is too large for the stubs' map of it.
 bool install_sprite_frames(d2rt::Cpu &c);
 bool sprite_frames_on();
+// A test of the room made for a group over 256 KiB that finds no block
+// (bigroomtest=1 in settings.txt, D2_BIG_ROOM_TEST=1 on the lane): every
+// group over 32 KiB first has the cache let go of another of that size, as
+// if it were a group over 256 KiB that had found no block.
+void set_big_room_test(bool on);
 struct SpriteFramesStats {
     FrameHeap::Stats heap;
     uint32_t to_pool;   // groups the allocator had no block for, given to the pool system
