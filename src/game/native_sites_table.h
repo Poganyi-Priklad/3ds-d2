@@ -157,6 +157,13 @@ SITE(monster_pace, 0x006cb648, "00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 
 SITE(monster_pace, 0x0046ff31, "8b 55 08 52 e8 66 fe ff ff", "e9 {=0x6cb648} 90 90 90 90")
 SITE(monster_pace, 0x0047036b, "81 c1 58 02 00 00", "81 c1 64 00 00 00")
 
+// player_modes.cpp, install_player_modes: 0x470350's call of the walk of
+// the units near the player (0x470070) goes to a native, which makes the
+// call and then asks for one of the player's modes.
+NATIVE(PlayerModes, 0)
+GROUP(player_modes, 1)
+SITE(player_modes, 0x00470377, "e8 f4 fc ff ff", "e8 {PlayerModes}")
+
 // sprite_headers.cpp, install_sprite_headers: 0x5fe990 (a sprite's file
 // record) has 0x60bf20 read a DCC file's header at 0x5fea79; a native fills
 // the record from the headers kept, or has 0x60bf20 read it.
