@@ -249,6 +249,8 @@ int main(int argc, char **argv)
         // Storm serving a waiting caller first, as on the console (M4_STORM_PRIO=0: as the game does).
         if (!std::getenv("M4_STORM_PRIO") || std::string(std::getenv("M4_STORM_PRIO")) != "0")
             game::install_storm_read_priority(c);
+        // The read thread's rate limit (M4_STORM_RATE_KB: KiB/s; the default otherwise).
+        game::set_storm_read_rate(c, std::getenv("M4_STORM_RATE_KB") ? (uint32_t)std::atoi(std::getenv("M4_STORM_RATE_KB")) << 10 : 0);
         // ...and reading it itself while the read thread is not reading (M4_STORM_DIRECT=0: queued).
         if (!std::getenv("M4_STORM_DIRECT") || std::string(std::getenv("M4_STORM_DIRECT")) != "0")
             game::install_storm_direct_reads(c);
@@ -304,6 +306,8 @@ int main(int argc, char **argv)
         for (const std::string &l : game::dcc_frame_lines())
             rt::logf("%s", l.c_str() + 5);
         for (const std::string &l : game::monster_pace_lines())
+            rt::logf("%s", l.c_str() + 5);
+        for (const std::string &l : game::sound_defer_lines())
             rt::logf("%s", l.c_str() + 5);
         for (const std::string &l : game::aot_lines())   // the AOT spike (issue #113): "aot: ..."
             rt::logf("%s", l.c_str());
