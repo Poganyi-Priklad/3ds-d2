@@ -48,12 +48,12 @@ std::unordered_map<std::string, Use> g_files;   // the window's, by name
 std::string g_last;                              // the game thread's last read, its wait not yet charged
 uint64_t g_last_kind[4] = {};
 // The same by who read (issue #153): the read's caller and four frames up
-// its EBP chain, for the monsters' and the sounds' files.
+// its EBP chain, by the file's class.
 struct Chain {
     uint32_t ra[5] = {};
     bool operator<(const Chain &o) const { return std::memcmp(ra, o.ra, sizeof ra) < 0; }
 };
-std::map<Chain, Use> g_chains[2];   // monsters, sound
+std::map<Chain, Use> g_chains[kClasses];
 Chain g_last_chain;
 int g_last_chain_of = -1;
 
@@ -140,8 +140,8 @@ uint32_t on_read(d2rt::Cpu &c)
     u.reads++;
     u.bytes += bytes;
     const Class cls = class_of(g_last);
-    g_last_chain_of = cls == kMonsters ? 0 : cls == kSound ? 1 : -1;
-    if (g_last_chain_of >= 0) {
+    g_last_chain_of = cls;
+    {
         Chain ch;
         ch.ra[0] = c.read_u32(esp + 4);
         uint32_t ebp = c.reg(d2rt::R_EBP);
@@ -220,15 +220,16 @@ std::vector<std::string> frame_reads_lines()
                                files[i].second.reads, (unsigned)(files[i].second.wait_us / 1000));
         out.emplace_back(line);
     }
-    for (int w = 0; w < 2; w++) {
+    // A class's callers, where it waited 20 ms or more in the window.
+    for (int w = 0; w < kClasses; w++) {
         std::vector<std::pair<Chain, Use>> v(g_chains[w].begin(), g_chains[w].end());
         g_chains[w].clear();
-        if (v.empty())
+        if (v.empty() || by[w].wait_us < 20000)
             continue;
         std::sort(v.begin(), v.end(), [](const auto &a, const auto &b) {
             return a.second.wait_us != b.second.wait_us ? a.second.wait_us > b.second.wait_us : a.second.reads > b.second.reads;
         });
-        n = std::snprintf(line, sizeof line, "[rt] frame reads, %s by caller:", w ? "sound" : "monsters");
+        n = std::snprintf(line, sizeof line, "[rt] frame reads, %s by caller:", kClassNames[w]);
         for (size_t i = 0; i < v.size() && i < 4 && n < (int)sizeof line - 120; i++) {
             const Use &u = v[i].second;
             n += std::snprintf(line + n, sizeof line - n, "%s %ux %u KiB %u ms (lock %u, read thread %u, file %u) from", i ? ";" : "",
