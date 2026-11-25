@@ -53,9 +53,12 @@
 #include "runtime/guest_thread_ctx.h"
 #include "runtime/rt_host.h"
 
+#include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <initializer_list>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -190,6 +193,13 @@ FrameHeap *g_frames = nullptr;
 uint8_t *g_frames_map = nullptr;   // host address of kFramesMap: a byte per 64 KiB granule from g_map_base
 uint32_t g_map_base = 0;
 uint32_t g_frames_to_pool = 0, g_frames_dropped = 0, g_frames_strays = 0;
+// The groups in blocks of their own (over 256 KiB), by their frames: the
+// cache entry each belongs to (SpriteFramesHeld's, at 0x5ff72d with the
+// entry in edi), and how many were let go of for another's room.
+std::unordered_map<uint32_t, uint32_t> g_big_entries;
+uint32_t g_big_let_go = 0, g_big_made_room = 0;
+bool g_big_test = false;
+uint32_t g_big_min = FrameHeap::kPoolLargest;   // the test: 32 KiB, so that the lane's scripts have such groups
 
 bool all_int3(d2rt::Cpu &c, uint32_t va, uint32_t n)
 {
@@ -553,13 +563,96 @@ void mark_granules(uint32_t va, uint32_t bytes, uint8_t v)
         g_frames_map[g] = v;
 }
 
+// A group over 256 KiB that found no block (3DS-D2-1F: 390 KiB wanted with
+// 5.4 MiB of the pool free in pieces of 320 KiB at the most, the zone for
+// such blocks holding five): the cache lets go of sprites that hold a block
+// of that kind, the least recently used first, until this one has room.
+// What the cache lets go of otherwise is small sprites, whose units leave
+// no piece that large. 0x5ff4a0 (ecx the cache, edx the entry, one stack
+// argument) lets an entry go as 0x5ff630 has it do for a sprite that grew,
+// a moment after this in the same callback; it refuses one in use (+0xc
+// bit 1), as the sprite being decoded is.
+constexpr uint32_t kCacheLetGo = 0x005ff4a0;
+constexpr uint32_t kBigUnused = 1000;   // ms since its last use, for a sprite to be let go of here
+uint32_t big_room(d2rt::Cpu &c, uint32_t n, uint32_t pool)
+{
+    if (n <= g_big_min || g_big_entries.empty())
+        return 0;
+    // The cache's entries are in two lists (+0x14 the used ones' head, +0x1c
+    // the head of those not drawn since they came in; an entry's next at
+    // +0x14), each with the tick of its last use at +0x10 (0x5ff61a). Ours
+    // among them, the longest unused first, and none used in the last
+    // second: a draw up the stack may hold the frames of one it has just
+    // fetched (the lane's test, letting go in any order, ended in the
+    // loader's check of a handle freed under it, 0x40a9e0).
+    struct Old {
+        uint32_t frames, tick;
+    };
+    std::vector<Old> old;
+    uint32_t newest = 0, recent = 0;
+    for (const uint32_t head : {0x1cu, 0x14u})
+        for (uint32_t e = c.read_u32(kSpriteCache + head), k = 0; e && k < 8192; e = c.read_u32(e + 0x14), k++) {
+            const uint32_t tick = c.read_u32(e + 0x10);
+            if ((int32_t)(tick - newest) > 0 || !newest)
+                newest = tick;
+            for (const auto &b : g_big_entries)
+                if (b.second == e)
+                    old.push_back({b.first, tick});
+        }
+    std::vector<uint32_t> order;
+    std::sort(old.begin(), old.end(), [&](const Old &x, const Old &y) { return newest - x.tick > newest - y.tick; });
+    for (const Old &o : old) {
+        if (newest - o.tick >= kBigUnused)
+            order.push_back(o.frames);
+        else
+            recent++;
+    }
+    const uint32_t ecx = c.reg(d2rt::R_ECX), edx = c.reg(d2rt::R_EDX);
+    uint32_t va = 0, gone = 0, stale = 0, refused = 0;
+    for (size_t i = 0; i < order.size() && !va; i++) {
+        const auto it = g_big_entries.find(order[i]);
+        if (it == g_big_entries.end())
+            continue;
+        const uint32_t entry = it->second;
+        if (!c.read_u32(entry) || (c.read_u32(entry + 0xc) & 2) || !g_frames->unit_bytes(order[i])) {
+            stale++;
+            continue;
+        }
+        c.set_reg(d2rt::R_ECX, kSpriteCache);
+        c.set_reg(d2rt::R_EDX, entry);
+        const uint32_t let = rt::guest_call(c, kCacheLetGo, {0});
+        c.set_reg(d2rt::R_ECX, ecx);
+        c.set_reg(d2rt::R_EDX, edx);
+        g_big_entries.erase(order[i]);   // freed (SpriteFramesFree has it too), or refused: not asked again
+        if (!let) {
+            refused++;
+            continue;
+        }
+        gone++;
+        va = g_frames->alloc(n, pool);
+    }
+    g_big_let_go += gone;
+    g_big_made_room += va != 0;
+    rt::logf("sprite frames: %u KiB had no block; %u sprites with blocks of their own let go of (%u used in the last "
+             "second, %u in use or gone, %u refused), %s",
+             n >> 10, gone, recent, stale, refused, va ? "and it has one" : "and it still has none");
+    return va;
+}
+
 // 0x60c103: the group's frames, edx bytes, of the pool system in ecx; or,
 // with no block to be had, 0x40b430 as the game called it.
 uint32_t frames_alloc(d2rt::Cpu &c)
 {
     const uint32_t n = c.reg(d2rt::R_EDX), ecx = c.reg(d2rt::R_ECX);
     const uint32_t pool = c.read_u32(kPoolsOn) && ecx ? ecx : kPool;
+    // The test (set_big_room_test): every group over 256 KiB first has the
+    // cache let go of another, as if it had found no block.
+    if (g_big_test)
+        if (const uint32_t va = big_room(c, n, pool))
+            return va;
     if (const uint32_t va = n ? g_frames->alloc(n, pool) : 0)
+        return va;
+    if (const uint32_t va = big_room(c, n, pool))
         return va;
     if (g_frames_to_pool++ < 8) {
         rt::logf("sprite frames: %u bytes to the pool system", n);
@@ -601,8 +694,10 @@ bool install_sprite_frames(d2rt::Cpu &c)
     // A pointer in a granule the frames hold that is not one of their units
     // (none should be) goes on to the pool system.
     const uint32_t free = rt::native_entry("SpriteFramesFree", 1, [](d2rt::Cpu &c) -> uint32_t {
-        if (g_frames->free(c.arg(0)))
+        if (g_frames->free(c.arg(0))) {
+            g_big_entries.erase(c.arg(0));
             return 1;
+        }
         if (g_frames_strays++ < 8)
             rt::logf("sprite frames: %08x freed is not a unit, to the pool system", c.arg(0));
         return 0;
@@ -626,6 +721,11 @@ bool install_sprite_frames(d2rt::Cpu &c)
         if (!frames)
             return n;
         const uint32_t unit = g_frames->unit_bytes(frames);
+        if (unit > g_big_min) {
+            if (g_big_entries.size() > 256)   // stale ones, of pools destroyed
+                g_big_entries.clear();
+            g_big_entries[frames] = c.reg(d2rt::R_EDI);
+        }
         return unit ? unit : FrameHeap::pool_bytes(n);
     });
     if (!alloc || !free || !destroy || !held)
@@ -658,6 +758,11 @@ bool install_sprite_frames(d2rt::Cpu &c)
 }
 
 bool sprite_frames_on() { return g_frames != nullptr; }
+void set_big_room_test(bool on)
+{
+    g_big_test = on;
+    g_big_min = on ? 32u << 10 : FrameHeap::kPoolLargest;
+}
 
 SpriteFramesStats sprite_frames_stats()
 {
@@ -679,6 +784,10 @@ bool sprite_frames_line(char *buf, size_t n)
                   "over 256 KiB %u, to the pool %u",
                   s.in_use >> 10, s.held >> 10, s.blocks, s.units, s.asked >> 10, s.taken, s.given, s.big,
                   g_frames_to_pool);
+    if (g_big_let_go) {
+        const size_t at = std::strlen(buf);
+        std::snprintf(buf + at, n - at, ", %u let go of for the room of %u", g_big_let_go, g_big_made_room);
+    }
     return true;
 }
 

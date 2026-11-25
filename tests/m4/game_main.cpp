@@ -254,6 +254,7 @@ int main(int argc, char **argv)
             game::install_storm_direct_reads(c);
         game::install_frame_reads(c);
         // Sounds read off the game thread at their first play (D2_SOUND_DEFER=0: as the game does).
+        game::set_big_room_test(std::getenv("D2_BIG_ROOM_TEST") != nullptr);
         game::install_sound_defer(c, !std::getenv("D2_SOUND_DEFER") || std::string(std::getenv("D2_SOUND_DEFER")) != "0");
         game::install_monster_pace(c, !std::getenv("D2_MONSTER_PACE") || std::string(std::getenv("D2_MONSTER_PACE")) != "0");
         game::install_fatal_exit(c);
