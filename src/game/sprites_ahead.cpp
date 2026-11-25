@@ -67,21 +67,8 @@ void ahead(int pf, uint32_t block, uint32_t csize, uint32_t fsize, uint32_t flag
         }
 }
 
-}  // namespace
-
-void set_sprites_ahead(bool on) { g_on = on; }
-
-void sprites_ahead_read(d2rt::Cpu &c, const char *name, uint32_t file)
+void send(d2rt::Cpu &c, uint32_t file)
 {
-    if (!g_on || !file)
-        return;
-    const uint64_t now = rt::now_us(), key = hash(name);
-    auto it = g_sent.find(key);
-    if (it != g_sent.end() && now - it->second < kAgain)
-        return;
-    if (g_sent.size() > 2048)   // the host heap is tight
-        g_sent.clear();
-    g_sent[key] = now;
     const uint32_t arc = c.read_u32(file + 0x114), blk = c.read_u32(file + 0x118);
     if (!arc || !blk)
         return;
@@ -97,6 +84,26 @@ void sprites_ahead_read(d2rt::Cpu &c, const char *name, uint32_t file)
         return;
     g_w.files++;
     g_w.bytes += csize;
+}
+
+}  // namespace
+
+void set_sprites_ahead(bool on) { g_on = on; }
+
+int sprites_ahead_read(d2rt::Cpu &c, const char *name, uint32_t file)
+{
+    if (!file)
+        return 0;
+    const uint64_t now = rt::now_us(), key = hash(name);
+    auto it = g_sent.find(key);
+    if (it != g_sent.end() && now - it->second < kAgain)
+        return now - it->second >= 100 * 1000 ? 2 : 0;
+    if (g_sent.size() > 2048)   // the host heap is tight
+        g_sent.clear();
+    g_sent[key] = now;
+    if (g_on)
+        send(c, file);
+    return 1;
 }
 
 std::vector<std::string> sprites_ahead_lines()

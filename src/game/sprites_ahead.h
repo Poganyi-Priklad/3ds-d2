@@ -30,8 +30,10 @@ namespace game {
 // Off until set: it needs the runtime's prefetch store.
 void set_sprites_ahead(bool on);
 // From frame_reads, at a read of a .dcc on the game thread: `file` Storm's
-// file object.
-void sprites_ahead_read(d2rt::Cpu &c, const char *name, uint32_t file);
+// file object. 1: the file's first read (sent now, or would be); 2: a read
+// of a file first read at least 100 ms ago, which the store may serve; 0:
+// between the two. Off, it sends nothing and answers the same, to compare.
+int sprites_ahead_read(d2rt::Cpu &c, const char *name, uint32_t file);
 // The heartbeat's line (none when no file was sent in the window).
 std::vector<std::string> sprites_ahead_lines();
 

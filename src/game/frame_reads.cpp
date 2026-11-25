@@ -57,6 +57,9 @@ struct Chain {
 std::map<Chain, Use> g_chains[kClasses];
 Chain g_last_chain;
 int g_last_chain_of = -1;
+// The reads sprites_ahead answered 1 (a file's first) and 2 (a later one).
+Use g_ahead[3];
+int g_last_ahead = 0;
 
 // The wait since the last read's entry, to that read, by kind.
 void charge()
@@ -75,6 +78,7 @@ void charge()
                     by->kind_us[k] += now[k] - g_last_kind[k];
                     by->wait_us += now[k] - g_last_kind[k];
                 }
+                g_ahead[g_last_ahead].wait_us += now[k] - g_last_kind[k];
             }
     }
     for (int k = 0; k < 4; k++)
@@ -145,7 +149,10 @@ uint32_t on_read(d2rt::Cpu &c)
     // the draw loads a direction at a time: the rest of the file read ahead.
     if ((cls == kMissiles || cls == kOverlays || cls == kObjects) && file && len > 4 &&
         (name[len - 1] | 0x20) == 'c' && (name[len - 2] | 0x20) == 'c' && (name[len - 3] | 0x20) == 'd')
-        sprites_ahead_read(c, name, file);
+        g_last_ahead = sprites_ahead_read(c, name, file);
+    else
+        g_last_ahead = 0;
+    g_ahead[g_last_ahead].reads++;
     g_last_chain_of = cls;
     {
         Chain ch;
@@ -246,6 +253,15 @@ std::vector<std::string> frame_reads_lines()
         }
         out.emplace_back(line);
     }
+    if (g_ahead[1].reads || g_ahead[2].reads) {
+        std::snprintf(line, sizeof line,
+                      "[rt] frame reads, sprites ahead: a file's first read %ux %u ms, its later reads %ux %u ms",
+                      g_ahead[1].reads, (unsigned)(g_ahead[1].wait_us / 1000), g_ahead[2].reads,
+                      (unsigned)(g_ahead[2].wait_us / 1000));
+        out.emplace_back(line);
+    }
+    for (Use &u : g_ahead)
+        u = Use{};
     g_files.clear();
     if (!g_last.empty())
         g_files[g_last];   // its wait still to come
