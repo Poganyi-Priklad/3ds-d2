@@ -464,6 +464,27 @@ void pf_commit(int id, uint64_t pos, uint32_t at, uint32_t len)
         }
 }
 
+// The card's read time, modelled (issue #166, set_sd_model): a read that
+// began at t0 waits here until the model's time for its size has passed.
+std::atomic<uint32_t> g_sd_fixed_us{0}, g_sd_kib_us{0}, g_sd_spread{0};
+std::atomic<uint32_t> g_sd_seed{0x2545F491};
+void sd_model_wait(uint64_t t0, uint32_t n)
+{
+    const uint32_t fixed = g_sd_fixed_us.load(std::memory_order_relaxed);
+    if (!fixed)
+        return;
+    uint64_t want = fixed + (uint64_t)g_sd_kib_us.load(std::memory_order_relaxed) * n / 1024;
+    if (const uint32_t spread = g_sd_spread.load(std::memory_order_relaxed)) {
+        // Evenly within +-spread per cent.
+        const uint32_t r = g_sd_seed.load(std::memory_order_relaxed) * 1664525u + 1013904223u;
+        g_sd_seed.store(r, std::memory_order_relaxed);
+        want = want * (100 - spread + (r >> 8) % (2 * spread + 1)) / 100;
+    }
+    const uint64_t took = wx86_now_us() - t0;
+    if (took < want)
+        ::usleep((useconds_t)(want - took));
+}
+
 bool pf_disk(int id, uint64_t pos, void *dst, uint32_t n, uint32_t &got)
 {
     got = 0;
@@ -481,6 +502,7 @@ bool pf_disk(int id, uint64_t pos, void *dst, uint32_t n, uint32_t &got)
             break;
         got += (uint32_t)r;
     }
+    sd_model_wait(t0, got);
     g_file_stats.prefetch_reads++;
     g_file_stats.prefetch_bytes += got;
     g_file_stats.prefetch_us += wx86_now_us() - t0;
@@ -770,6 +792,7 @@ private:
                     break;
                 done += (uint32_t)got;
             }
+        sd_model_wait(t0, done);
         g_file_stats.disk_reads++;
         g_file_stats.disk_bytes += done;
         g_file_stats.disk_us += wx86_now_us() - t0;
@@ -991,6 +1014,13 @@ bool prefetch_raw(int id, uint64_t pos, void *dst, uint32_t n)
 {
     uint32_t got;
     return pf_disk(id, pos, dst, n, got) && got == n;
+}
+
+void set_sd_model(uint32_t fixed_us, uint32_t kib_us, uint32_t spread_pct)
+{
+    g_sd_kib_us = kib_us;
+    g_sd_spread = spread_pct < 100 ? spread_pct : 99;
+    g_sd_fixed_us = fixed_us;
 }
 
 void set_read_cache(uint32_t blocks, void *slab, uint32_t slab_size)

@@ -1632,6 +1632,12 @@ bool g_storm_direct = true;
 // sound asked for by a play took up to 20 s in a fight, at 4096 a fifth of
 // a second as a rule (issue #153).
 uint32_t g_storm_rate_kib = 4096;
+// The card's read time modelled (rt::set_sd_model, issue #166), for Azahar,
+// where a file is read in no time: "sdmodel=1" the console's as measured
+// (5.4 ms a read and 38 us a KiB, within 30 per cent either way: 145 windows
+// of Sentry 3DS-D2-1J, 2026-11-25), "sdmodel=<us a read>,<us a KiB>,<spread
+// per cent>" another card. 0, the default: off.
+uint32_t g_sd_model[3] = {0, 0, 0};
 // The frame trace's stall column: a frame this long or longer is sampled
 // (rt::stall_probe). "stallms=" (a measurement's).
 uint32_t g_stall_ms = 150;
@@ -1686,7 +1692,13 @@ void load_settings()
             game::set_aot_min_us(std::atof(line + 7));
         else if (std::strncmp(line, "stallms=", 8) == 0)
             g_stall_ms = (uint32_t)std::strtoul(line + 8, nullptr, 10);
-        else if (std::strncmp(line, "stormrate=", 10) == 0)
+        else if (std::strncmp(line, "sdmodel=", 8) == 0) {
+            unsigned f = 0, k = 38, s = 30;
+            const int got = std::sscanf(line + 8, "%u,%u,%u", &f, &k, &s);
+            if (got == 1 && f == 1)
+                f = 5400;
+            g_sd_model[0] = f, g_sd_model[1] = k, g_sd_model[2] = s;
+        } else if (std::strncmp(line, "stormrate=", 10) == 0)
             g_storm_rate_kib = (uint32_t)std::strtoul(line + 10, nullptr, 10);
         else if (std::strncmp(line, "stormdirect=", 12) == 0)
             g_storm_direct = std::atoi(line + 12) != 0;
@@ -2907,6 +2919,11 @@ int main()
         rt::set_prefetch_arena(g_prefetch_arena, sizeof g_prefetch_arena);
 #endif
         game::set_storm_read_rate(c, g_storm_rate_kib << 10);
+        if (g_sd_model[0]) {
+            rt::set_sd_model(g_sd_model[0], g_sd_model[1], g_sd_model[2]);
+            status("sd model: a read %u us and %u us a KiB, within %u%%", (unsigned)g_sd_model[0], (unsigned)g_sd_model[1],
+                   (unsigned)g_sd_model[2]);
+        }
         game::install_fatal_exit(c);
         game::install_pool_release(c);
         game::set_pool_block_size(c, game::kCtrPoolBlock);
