@@ -1632,12 +1632,17 @@ bool g_storm_direct = true;
 // sound asked for by a play took up to 20 s in a fight, at 4096 a fifth of
 // a second as a rule (issue #153).
 uint32_t g_storm_rate_kib = 4096;
-// The card's read time modelled (rt::set_sd_model, issue #166), for Azahar,
-// where a file is read in no time: "sdmodel=1" the console's as measured
-// (5.4 ms a read and 38 us a KiB, within 30 per cent either way: 145 windows
-// of Sentry 3DS-D2-1J, 2026-11-25), "sdmodel=<us a read>,<us a KiB>,<spread
-// per cent>" another card. 0, the default: off.
-uint32_t g_sd_model[3] = {0, 0, 0};
+// The card's read time modelled (rt::set_sd_model, issue #166), in an
+// emulator only: there every run has it, so that a run on the desk shows the
+// frames a console's card would cost; on a console it is never on, whatever
+// the setting. The default is the console's slow end, not its average: 7 ms
+// a read and 170 us a KiB, within 20 per cent either way, the line through
+// the ninth decile of the game thread's file time a read at 1, 8, 26 and 107
+// KiB (6.7, 9.0, 12.7 and 25 ms; 59 minutes on a New 3DS, Sentry 3DS-D2-1J,
+// event 7f538e2f, 2026-11-25). The average there was 5.4 ms and 38 us a KiB:
+// "sdmodel=5400,38,30". "sdmodel=<us a read>,<us a KiB>,<spread per cent>"
+// another card, "sdmodel=0" off (the emulator's own reads).
+uint32_t g_sd_model[3] = {7000, 170, 20};
 // The frame trace's stall column: a frame this long or longer is sampled
 // (rt::stall_probe). "stallms=" (a measurement's).
 uint32_t g_stall_ms = 150;
@@ -1693,10 +1698,9 @@ void load_settings()
         else if (std::strncmp(line, "stallms=", 8) == 0)
             g_stall_ms = (uint32_t)std::strtoul(line + 8, nullptr, 10);
         else if (std::strncmp(line, "sdmodel=", 8) == 0) {
-            unsigned f = 0, k = 38, s = 30;
-            const int got = std::sscanf(line + 8, "%u,%u,%u", &f, &k, &s);
-            if (got == 1 && f == 1)
-                f = 5400;
+            unsigned f = 0, k = 170, s = 20;
+            if (std::sscanf(line + 8, "%u,%u,%u", &f, &k, &s) == 1 && f == 1)
+                f = 7000;   // "sdmodel=1": the default
             g_sd_model[0] = f, g_sd_model[1] = k, g_sd_model[2] = s;
         } else if (std::strncmp(line, "stormrate=", 10) == 0)
             g_storm_rate_kib = (uint32_t)std::strtoul(line + 10, nullptr, 10);
@@ -2919,10 +2923,17 @@ int main()
         rt::set_prefetch_arena(g_prefetch_arena, sizeof g_prefetch_arena);
 #endif
         game::set_storm_read_rate(c, g_storm_rate_kib << 10);
-        if (g_sd_model[0]) {
-            rt::set_sd_model(g_sd_model[0], g_sd_model[1], g_sd_model[2]);
-            status("sd model: a read %u us and %u us a KiB, within %u%%", (unsigned)g_sd_model[0], (unsigned)g_sd_model[1],
-                   (unsigned)g_sd_model[2]);
+        {
+            std::string detail;
+            if (report::environment(detail) != "azahar")
+                status("sd model: off (never on outside an emulator)");
+            else if (!g_sd_model[0])
+                status("sd model: off (sdmodel=0), the emulator's own reads");
+            else {
+                rt::set_sd_model(g_sd_model[0], g_sd_model[1], g_sd_model[2]);
+                status("sd model: a read %u us and %u us a KiB, within %u%% (an emulator's run)", (unsigned)g_sd_model[0],
+                       (unsigned)g_sd_model[1], (unsigned)g_sd_model[2]);
+            }
         }
         game::install_fatal_exit(c);
         game::install_pool_release(c);

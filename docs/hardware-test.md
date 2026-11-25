@@ -74,6 +74,8 @@ A profiler run with the guest code profile on is read with `python3 -I tools/pro
 - **Arena placement.** The guest arena is mapped at 0x08000000 with `MEMOP_ALLOC`, and libctru's heap is moved above it. The arena line in `stderr.txt` should read `base=0x8000000 ... perdu-alignement=0 Ko`.
 - **Speed.** Azahar's frame rate barely moved with its CPU clock setting (9.3 → 10 fps at 300%), so the console's real numbers are unknown until this test.
 
+- **The card's read time** (issue #166). In an emulator every run models the SD card: each read of a game file from the file system takes at least 7 ms and 170 µs a KiB, within 20% either way. That is the console's slow end (the ninth decile of the game thread's file time per read in a 59-minute session, Sentry 3DS-D2-1J, event `7f538e2f`), not its average, so that a run in Azahar shows the long frames a card can cause. On a console the model is never on, whatever settings.txt says; game.log's `sd model:` line says which. `sdmodel=0` in settings.txt gives the emulator's own reads, `sdmodel=5400,38,30` the console's average, `sdmodel=<µs a read>,<µs a KiB>,<spread %>` another card. Azahar's own reads already take about what the console's average ones do (5.7 ms against 6.1 to 6.2 ms at 28 KiB), so the model adds the slow end only. Azahar measurements from before 2026-11-25 are without it: with it the game thread waited 12.2 s on files in the Cold Plains script's 200 s, against 5 to 7 s without (one run).
+
 ## If it crashes
 
 - **Luma's crash screen.** Luma3DS shows the exception on screen and saves a dump to `luma/dumps/arm11/crash_dump_*.dmp` on the SD card. Decode it against the ELF saved next to that CIA:

@@ -295,8 +295,8 @@ void set_prefetch_arena(void *arena, uint32_t size);
 // (8; 32 at most), and a slab for blocks beside the heap's 1 MiB of them
 // (null: none), used first. The slab is the caller's and stays.
 void set_read_cache(uint32_t blocks, void *slab, uint32_t slab_size);
-// The card's read time, modelled (issue #166), for a run where a file is
-// read in no time (Azahar): each read of a game file from the file system,
+// The card's read time, modelled (issue #166), for a run in an emulator:
+// each read of a game file from the file system,
 // the read cache's and the prefetch worker's, takes at least fixed_us and
 // kib_us a KiB, within spread_pct per cent either way, evenly. The time is
 // in the counters above as the card's. fixed_us 0: off (the default).
