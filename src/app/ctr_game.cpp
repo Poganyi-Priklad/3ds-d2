@@ -1494,8 +1494,8 @@ void present(const rt::Frame &f)
                 game::frame_trace_note(lock ? "frame lock: on" : "frame lock: off");
         }
     }
-    {   // the OPTIONS page's AOT row: compiled code (issue #115) or its bench (issue #113); only a build
-        // with the compiled code has either
+    {   // settings.txt's "port=aot" or "aotbench" (port_options.h; no row on the OPTIONS page): compiled
+        // code (issue #115) or its bench (issue #113), in a build with Box86 and the compiled code both
         const uint32_t port = g_ss.port_options();
         const game::AotMode want = !game::aot_linked()          ? game::AotMode::Off
                                    : (port & game::kPortAot)      ? game::AotMode::Sig

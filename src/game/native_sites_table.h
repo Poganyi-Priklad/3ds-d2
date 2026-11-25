@@ -217,6 +217,20 @@ GROUP(floor_queue, 1)
 SITE(floor_queue, 0x00476cdc, "e8 2f 80 06 00", "e8 {FloorQueueArm}")
 SITE(floor_queue, 0x00476ce1, "e8 1a cf ff ff", "e8 {FloorQueueEnd}")
 
+// sprite_trace.cpp, install_sprite_trace: the sprite cache's uses (0x600350,
+// in 0x6001f0) and removals (0x5ff53c, in 0x5ff4a0) go through stubs in
+// .text's zero slack, each: cmp byte [0x6cb6e0], 0 (the trace's flag); je
+// over; push eax, ecx, edx; (the use: its argument, eax with bit 0 set when
+// [ebp+0xc] is 0, pushed); call the native; pop them; over: the bytes the
+// jump replaced; jmp back. Compiled with them, so the AOT build traces too.
+NATIVE(SpriteTraceUse, 1)
+NATIVE(SpriteTraceRemove, 0)
+GROUP(sprite_trace, 1)
+SITE(sprite_trace, 0x006cb6f0, "00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00", "80 3d e0 b6 6c 00 00 74 1a 50 51 52 89 c1 83 7d 0c 00 0f 94 c2 0f b6 d2 09 d1 51 e8 {SpriteTraceUse} 5a 59 58 8b 58 20 85 db e9 {=0x600355}")
+SITE(sprite_trace, 0x006cb720, "00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00", "80 3d e0 b6 6c 00 00 74 0b 50 51 52 e8 {SpriteTraceRemove} 5a 59 58 8b 4f 04 29 4e 08 e9 {=0x5ff542}")
+SITE(sprite_trace, 0x00600350, "8b 58 20 85 db", "e9 {=0x6cb6f0}")
+SITE(sprite_trace, 0x005ff53c, "8b 4f 04 29 4e 08", "e9 {=0x6cb720} 90")
+
 #ifdef NATIVE_SITES_TABLE_DEFAULTS
 #undef NATIVE
 #undef GROUP

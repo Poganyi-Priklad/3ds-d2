@@ -40,7 +40,13 @@ struct ProfileOptionInfo {
 
 inline constexpr ProfileOptionInfo kProfileOptions[] = {
     {kProfSprites, "sprites", "sprite trace", "cache traffic to logs/sprites.trc"},
+    // The AOT build has no translated blocks to sample: the shims' times and
+    // the threads' waits only (seen in Azahar, 2026-11-25).
+#ifdef D2RT_CPU_AOT
+    {kProfGuest, "guest", "shim and wait profile", "shim times and waits, per thread"},
+#else
     {kProfGuest, "guest", "guest code profile", "shims, threads, EIPs; ~12% slower"},
+#endif
     {kProfFiles, "files", "file-read trace", "every game read to logs/files.trc"},
     {kProfSdBench, "sdbench", "SD card benchmark", "read costs; a 1 s pause at start"},
     {kProfFrames, "frames", "frame timing", "every frame to logs/frames.trc"},

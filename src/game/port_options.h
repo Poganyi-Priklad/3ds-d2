@@ -38,6 +38,11 @@ enum PortOption : uint32_t {
     // compiled code (D2_AOT_BUILD=1), each call of a compiled function runs
     // one way in turn (Box86, the four builds, the native) and is timed,
     // into game.log's "aot:" lines. Nothing in any other build.
+    // Not on the page: of the two builds that ship, the AOT one runs
+    // nothing but compiled code and the x86 one has none, so neither this
+    // nor kPortAot did anything in either. "aotbench" and "aot" in
+    // settings.txt's "port=" still set them, for a build with both Box86
+    // and the compiled code.
     kPortAotBench = 1u << 5,
     // The sound's output limiter (issue #117, WinVita db71c76 in ds_emul):
     // a mix louder than full scale is turned down for that grain and eased
@@ -45,8 +50,7 @@ enum PortOption : uint32_t {
     kPortSoundLimit = 1u << 6,
     // The game's hot functions run as compiled code (issue #115, the AOT
     // build's coverage list, aot_spike.h's register-signature mode): Box86
-    // enters each compiled function it calls. Shares the AOT row with the
-    // bench: a tap steps off, compiled, bench. Nothing in any other build.
+    // enters each compiled function it calls. Not on the page either.
     kPortAot = 1u << 7,
 };
 
@@ -71,8 +75,6 @@ inline constexpr PortOptionInfo kPortOptions[] = {
     {kPortFrameLock, "framelock", "frame lock at 50 Hz", "game frames timed by the screen"},
     {kPortNativeDcc, "dcc", "native sprite decoder", "new sprites decoded off core 0"},
     {kPortTilePrefetch, "tiles", "read tiles ahead", "tiles near the player read on core 2"},
-    {kPortAot, "aot", "compiled code (AOT)", "an AOT build only; tap again: bench", kPortAotBench, "aotbench",
-     "bench: each way timed, in game.log"},
     {kPortSoundLimit, "limiter", "sound limiter", "loud mixes turned down, not clipped"},
 };
 inline constexpr int kPortOptionCount = sizeof kPortOptions / sizeof kPortOptions[0];
@@ -112,6 +114,10 @@ inline uint32_t port_bits(const char *names)
             if (o.alt_name && len == std::strlen(o.alt_name) && std::strncmp(name, o.alt_name, len) == 0)
                 bits = off ? bits & ~o.alt : (bits & ~o.bit) | o.alt;
         }
+        if (len == 3 && std::strncmp(name, "aot", 3) == 0)
+            bits = off ? bits & ~kPortAot : (bits & ~kPortAotBench) | kPortAot;
+        if (len == 8 && std::strncmp(name, "aotbench", 8) == 0)
+            bits = off ? bits & ~kPortAotBench : (bits & ~kPortAot) | kPortAotBench;
         names += n;
         names += *names ? 1 : 0;
     }
@@ -132,6 +138,10 @@ inline std::string port_names(uint32_t bits)
             s += o.alt_name;
         }
     }
+    if (bits & kPortAot)   // named only when on: they have no row
+        s += ",aot";
+    if (bits & kPortAotBench)
+        s += ",aotbench";
     return s;
 }
 
