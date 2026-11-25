@@ -301,6 +301,19 @@ void set_read_cache(uint32_t blocks, void *slab, uint32_t slab_size);
 // kib_us a KiB, within spread_pct per cent either way, evenly. The time is
 // in the counters above as the card's. fixed_us 0: off (the default).
 void set_sd_model(uint32_t fixed_us, uint32_t kib_us, uint32_t spread_pct);
+// The sprites' store (issue #153). set_sprite_keep: its memory, before the
+// game runs (null: none). keep_region: bytes read from the card inside
+// [pos, pos+len) of the file `id` (prefetch_file's) are kept from now on,
+// and a later read of the same bytes is served from the store, before the
+// read cache and the card; the last 128 regions named count. A ring: a new
+// range replaces the oldest ones where it lands; a range is a quarter of
+// the store at the most. keep_stats: the counts since the last call.
+struct KeepStats {
+    uint32_t hits = 0, hit_bytes = 0, puts = 0, put_bytes = 0, held = 0, size = 0;
+};
+void set_sprite_keep(void *arena, uint32_t size);
+void keep_region(int id, uint64_t pos, uint32_t len);
+KeepStats keep_stats();
 int prefetch_file(const char *name);
 bool io_background(std::function<void()> task);
 bool prefetch_raw(int id, uint64_t pos, void *dst, uint32_t n);

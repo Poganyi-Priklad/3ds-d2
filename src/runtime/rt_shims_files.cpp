@@ -464,6 +464,93 @@ void pf_commit(int id, uint64_t pos, uint32_t at, uint32_t len)
         }
 }
 
+// The sprites' store (issue #153, set_sprite_keep): the bytes read from the
+// card inside a region keep_region named (a sprite file's extent in its
+// archive), kept for the next read of the same bytes. The game's sprite
+// cache holds decoded frames and lets them go in a crowd; the draw then
+// fetches the direction again, and on the console that was the card again
+// (one file 41 times in a fight: 3DS-D2-1J, event 7f538e2f), since a read of
+// a block or more passes the read cache by. A ring, like the prefetch's: a
+// new range replaces the oldest where it lands.
+constexpr uint32_t kKeepRanges = 384, kKeepRegions = 128;
+uint8_t *g_keep_arena = nullptr;
+uint32_t g_keep_size = 0, g_keep_head = 0, g_keep_region_next = 0;
+struct KeepRegion {
+    int id = -1;
+    uint64_t pos = 0;
+    uint32_t len = 0;
+};
+KeepRegion g_keep_regions[kKeepRegions];
+PfRange g_keep[kKeepRanges];
+std::atomic_flag g_keep_lock = ATOMIC_FLAG_INIT;
+std::atomic<uint32_t> g_keep_hits{0}, g_keep_hit_bytes{0}, g_keep_puts{0}, g_keep_put_bytes{0}, g_keep_held{0};
+struct KeepGuard {
+    KeepGuard()
+    {
+        while (g_keep_lock.test_and_set(std::memory_order_acquire)) {
+        }
+    }
+    ~KeepGuard() { g_keep_lock.clear(std::memory_order_release); }
+};
+
+bool keep_serve(int id, uint64_t pos, uint8_t *dst, uint32_t n)
+{
+    if (id < 0 || !g_keep_held.load(std::memory_order_relaxed))
+        return false;
+    KeepGuard g;
+    for (const PfRange &r : g_keep)
+        if (r.id == id && r.len && pos >= r.pos && pos + n <= r.pos + r.len) {
+            std::memcpy(dst, g_keep_arena + r.at + (pos - r.pos), n);
+            g_keep_hits++;
+            g_keep_hit_bytes += n;
+            return true;
+        }
+    return false;
+}
+
+// Whether [pos, pos+n) is all inside a named region.
+bool keep_wanted(int id, uint64_t pos, uint32_t n)
+{
+    if (id < 0 || !g_keep_arena)
+        return false;
+    KeepGuard g;
+    for (const KeepRegion &r : g_keep_regions)
+        if (r.id == id && pos >= r.pos && pos + n <= r.pos + r.len)
+            return true;
+    return false;
+}
+
+void keep_put(int id, uint64_t pos, const uint8_t *src, uint32_t n)
+{
+    if (!n || n > g_keep_size / 4)
+        return;
+    KeepGuard g;
+    if (g_keep_head + n > g_keep_size)
+        g_keep_head = 0;
+    const uint32_t at = g_keep_head;
+    PfRange *slot = nullptr;
+    for (PfRange &r : g_keep) {
+        if (r.len && r.at < at + n && at < r.at + r.len) {
+            g_keep_held -= r.len;
+            r.len = 0;
+            r.id = -1;
+        }
+        if (!r.len && !slot)
+            slot = &r;
+    }
+    if (!slot)
+        return;
+    std::memcpy(g_keep_arena + at, src, n);
+    slot->id = id;
+    slot->pos = pos;
+    slot->at = at;
+    slot->len = n;
+    g_keep_head = at + n;
+    g_keep_held += n;
+    g_keep_puts++;
+    g_keep_put_bytes += n;
+}
+
 // The card's read time, modelled (issue #166, set_sd_model): a read that
 // began at t0 waits here until the model's time for its size has passed.
 std::atomic<uint32_t> g_sd_fixed_us{0}, g_sd_kib_us{0}, g_sd_spread{0};
@@ -626,7 +713,8 @@ public:
             return true;
         if (n > size_ - pos)
             n = (uint32_t)(size_ - pos);
-        if (pf_serve(pf_, pos, dst, n)) {   // read ahead on the worker (issue #89)
+        if (pf_serve(pf_, pos, dst, n) ||    // read ahead on the worker (issue #89)
+            keep_serve(pf_, pos, dst, n)) {  // a sprite's, read before (issue #153)
             got = n;
             return true;
         }
@@ -661,9 +749,15 @@ public:
             n = (uint32_t)(size_ - pos);
         if (pf_serve(pf_, pos, dst, n))   // read ahead on the worker (issue #89)
             return n;
+        if (keep_serve(pf_, pos, dst, n))   // a sprite's, read before (issue #153)
+            return n;
+        const bool keep = keep_wanted(pf_, pos, n);
         if (n >= kBlock) {
             g_file_stats.direct++;
-            return disk_read(pos, dst, n);
+            const uint32_t r = disk_read(pos, dst, n);
+            if (keep && r == n)
+                keep_put(pf_, pos, dst, n);
+            return r;
         }
         uint32_t done = 0;
         while (done < n) {
@@ -678,6 +772,8 @@ public:
             std::memcpy(dst + done, b->data.get() + off, take);
             done += take;
         }
+        if (keep && done == n)
+            keep_put(pf_, pos, dst, n);
         return done;
     }
 
@@ -1029,6 +1125,35 @@ void set_read_cache(uint32_t blocks, void *slab, uint32_t slab_size)
     g_rc_slab = static_cast<uint8_t *>(slab);
     g_rc_slab_size = slab ? slab_size : 0;
     g_rc_slab_free.reserve(g_rc_slab_size / kRcBlock);   // no allocation when a block comes back
+}
+
+void set_sprite_keep(void *arena, uint32_t size)
+{
+    g_keep_arena = static_cast<uint8_t *>(arena);
+    g_keep_size = arena ? size : 0;
+}
+
+void keep_region(int id, uint64_t pos, uint32_t len)
+{
+    if (id < 0 || !len || !g_keep_arena)
+        return;
+    KeepGuard g;
+    for (const KeepRegion &r : g_keep_regions)
+        if (r.id == id && r.pos == pos && r.len == len)
+            return;
+    g_keep_regions[g_keep_region_next++ % kKeepRegions] = KeepRegion{id, pos, len};
+}
+
+KeepStats keep_stats()
+{
+    KeepStats k;
+    k.hits = g_keep_hits.exchange(0);
+    k.hit_bytes = g_keep_hit_bytes.exchange(0);
+    k.puts = g_keep_puts.exchange(0);
+    k.put_bytes = g_keep_put_bytes.exchange(0);
+    k.held = g_keep_held.load();
+    k.size = g_keep_size;
+    return k;
 }
 
 void set_prefetch_arena(void *arena, uint32_t size)

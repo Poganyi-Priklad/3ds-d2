@@ -35,6 +35,12 @@ void set_sprites_ahead(bool on);
 // between the two. Off, it sends nothing and answers the same, to compare.
 int sprites_ahead_read(d2rt::Cpu &c, const char *name, uint32_t file);
 // The heartbeat's line (none when no file was sent in the window).
+// The game thread's read of a sprite's file (any class's): its extent in
+// the archive named to the sprites' store (rt::keep_region), which keeps
+// what the card gives of it for the next read of the same bytes. Nothing
+// without a store (rt::set_sprite_keep).
+void sprites_keep_read(d2rt::Cpu &c, uint32_t file);
+// The heartbeat's lines: the read-ahead's and the store's.
 std::vector<std::string> sprites_ahead_lines();
 
 }  // namespace game

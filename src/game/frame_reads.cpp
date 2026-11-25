@@ -152,6 +152,9 @@ uint32_t on_read(d2rt::Cpu &c)
         g_last_ahead = sprites_ahead_read(c, name, file);
     else
         g_last_ahead = 0;
+    // Any sprite's file: what the card gives of it is kept (issue #153).
+    if (file && len > 4 && (name[len - 1] | 0x20) == 'c' && (name[len - 2] | 0x20) == 'c' && (name[len - 3] | 0x20) == 'd')
+        sprites_keep_read(c, file);
     g_ahead[g_last_ahead].reads++;
     g_last_chain_of = cls;
     {

@@ -106,9 +106,32 @@ int sprites_ahead_read(d2rt::Cpu &c, const char *name, uint32_t file)
     return 1;
 }
 
+void sprites_keep_read(d2rt::Cpu &c, uint32_t file)
+{
+    if (!file)
+        return;
+    const uint32_t arc = c.read_u32(file + 0x114), blk = c.read_u32(file + 0x118);
+    if (!arc || !blk)
+        return;
+    const uint32_t block = c.read_u32(blk), csize = c.read_u32(blk + 4), flags = c.read_u32(blk + 12);
+    if (!(flags & kExists) || !csize || csize > (4u << 20))
+        return;
+    rt::keep_region(rt::prefetch_file(rt::read_cstr(c, arc + 8, 260).c_str()), block, csize);
+}
+
 std::vector<std::string> sprites_ahead_lines()
 {
     std::vector<std::string> out;
+    {
+        const rt::KeepStats k = rt::keep_stats();
+        if (k.hits || k.puts) {
+            char line[200];
+            std::snprintf(line, sizeof line,
+                          "[rt] sprites kept: %u reads served from the store (%u KiB), %u put in it (%u KiB); it holds %u of %u KiB",
+                          k.hits, k.hit_bytes >> 10, k.puts, k.put_bytes >> 10, k.held >> 10, k.size >> 10);
+            out.emplace_back(line);
+        }
+    }
     const uint32_t pieces = g_pieces.exchange(0), bytes = g_piece_bytes.exchange(0);
     if (!g_w.files && !g_w.skipped && !pieces)
         return out;
