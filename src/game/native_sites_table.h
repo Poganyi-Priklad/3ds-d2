@@ -118,6 +118,13 @@ GROUP(storm_priority, 1)
 SITE(storm_priority, 0x006cb780, "00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00", "83 7d 18 00 75 07 6a 00 e9 {=0x41aeb7} 68 ff ff ff 7f e9 {=0x41aeb7}")
 SITE(storm_priority, 0x0041aeb2, "68 ff ff ff 7f", "e9 {=0x6cb780}")
 
+// storm_reads.cpp, set_storm_read_rate: the game sets the read thread's
+// rate limit with push 0x40000; call 0x4164a0 at 0x40a3b8. The call goes to
+// a native, which keeps the run's rate where Storm does.
+NATIVE(StormRate, 1)
+GROUP(storm_rate, 1)
+SITE(storm_rate, 0x0040a3bd, "e8 de c0 00 00", "e8 {StormRate}")
+
 // storm_reads.cpp, install_storm_direct_reads: the read thread sets a flag
 // byte before it leaves Storm's lock to read (0x41a66c) and clears it after
 // (0x41a725); SFileReadFile's check for an asynchronous archive (0x41ace2, 13
@@ -153,9 +160,19 @@ SITE(monster_pace, 0x0047036b, "81 c1 58 02 00 00", "81 c1 64 00 00 00")
 // sound_defer.cpp, install_sound_defer: 0x481950 (the sound tables' load)
 // reads the record count at 0x482173, the records filled; a native returns
 // it, and gives each record that isn't a stream sounds.txt's Defer Inst.
+// 0x482b40 (the tick's scan of the records, which finds a load finished)
+// asks a native at 0x482b64 whether it is due, in place of its 25 ticks; and
+// natives count a load in (0x482b1d, in 0x482970) and out (0x481772, in
+// 0x481720) as the game does, timing it.
 NATIVE(SoundTable, 0)
+NATIVE(SoundAsked, 0)
+NATIVE(SoundLoaded, 0)
+NATIVE(SoundScanDue, 0)
 GROUP(sound_defer, 1)
 SITE(sound_defer, 0x00482173, "a1 a4 c9 7b 00", "e8 {SoundTable}")
+SITE(sound_defer, 0x00482b64, "8b c1 2b 05 c0 c9 7b 00 83 f8 19 0f 82 9d 00 00 00", "e8 {SoundScanDue} 83 f8 01 0f 82 {=0x482c12} 90 90 90")
+SITE(sound_defer, 0x00482b1d, "01 3d c8 c9 7b 00", "e8 {SoundAsked} 90")
+SITE(sound_defer, 0x00481772, "83 2d c8 c9 7b 00 01", "e8 {SoundLoaded} 90 90")
 
 // cinematics.cpp, install_cinematics: the GDI renderer's three video entries
 // (0x6c7cc0: "return 0", "ret 4", "return 0", 16 bytes each) become the play

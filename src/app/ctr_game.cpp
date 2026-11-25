@@ -1597,8 +1597,11 @@ uint32_t g_background_slice_us = kBackgroundSliceUs;
 // leaves them queued, as the game does.
 bool g_storm_direct = true;
 // The read thread's rate limit (game::set_storm_read_rate): "stormrate=" in
-// KiB/s, 0: the game's 256 KiB/s.
-uint32_t g_storm_rate_kib = 0;
+// KiB/s (256: the game's). The limit is on the loads no caller waits for,
+// which the deferred sounds and the monsters' sprites are: at 256 KiB/s a
+// sound asked for by a play took up to 20 s in a fight, at 4096 a fifth of
+// a second as a rule (issue #153).
+uint32_t g_storm_rate_kib = 4096;
 // The frame trace's stall column: a frame this long or longer is sampled
 // (rt::stall_probe). "stallms=" (a measurement's).
 uint32_t g_stall_ms = 150;
@@ -2464,6 +2467,8 @@ void hitch_heartbeat(const game::SpriteCacheWindow &w)
         logline_held(l.c_str());
     for (const std::string &l : game::monster_pace_lines())
         logline_held(l.c_str());
+    for (const std::string &l : game::sound_defer_lines())
+        logline_held(l.c_str());
     // The JIT pool full (issue #90): chunks refused, so the JIT evicts.
     static uint32_t refused_seen = 0;
     if (dyn86_ctr_jitpool_refused != refused_seen) {
@@ -2860,8 +2865,7 @@ int main()
 #else
         rt::set_prefetch_arena(g_prefetch_arena, sizeof g_prefetch_arena);
 #endif
-        if (g_storm_rate_kib)
-            game::set_storm_read_rate(c, g_storm_rate_kib << 10);
+        game::set_storm_read_rate(c, g_storm_rate_kib << 10);
         game::install_fatal_exit(c);
         game::install_pool_release(c);
         game::set_pool_block_size(c, game::kCtrPoolBlock);
