@@ -1,6 +1,7 @@
 // See frame_reads.h.
 #include "game/frame_reads.h"
 #include "game/native_sites.h"
+#include "game/sprites_ahead.h"
 #include "game/tiles_ahead.h"
 
 #include "runtime/cpu.h"
@@ -140,6 +141,11 @@ uint32_t on_read(d2rt::Cpu &c)
     u.reads++;
     u.bytes += bytes;
     const Class cls = class_of(g_last);
+    // A missile's, an overlay's or an object's sprite (issue #153), which
+    // the draw loads a direction at a time: the rest of the file read ahead.
+    if ((cls == kMissiles || cls == kOverlays || cls == kObjects) && file && len > 4 &&
+        (name[len - 1] | 0x20) == 'c' && (name[len - 2] | 0x20) == 'c' && (name[len - 3] | 0x20) == 'd')
+        sprites_ahead_read(c, name, file);
     g_last_chain_of = cls;
     {
         Chain ch;

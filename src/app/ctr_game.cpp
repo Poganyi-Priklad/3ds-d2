@@ -39,6 +39,7 @@
 #include "game/sound_defer.h"
 #include "game/player_modes.h"
 #include "game/sprite_headers.h"
+#include "game/sprites_ahead.h"
 #include "game/tiles_ahead.h"
 #include "game/frame_trace.h"
 #include "game/port_options.h"
@@ -1055,6 +1056,7 @@ int g_player_modes = 2;
 #else
 int g_player_modes = 0;
 #endif
+bool g_sprites_ahead = true;   // spritesahead=0 in settings.txt: a sprite's directions each read at their first draw (issue #153)
 bool g_sprite_headers = true;   // spriteheaders=0 in settings.txt: every DCC header read from its archive (issue #153)
 bool g_sound_defer = true;   // sounddefer=0 in settings.txt: sounds read by the game thread, as the game does (issue #153)
 uint32_t g_stop_test_s = 0;   // stoptest=<s> in settings.txt: a CpuAot stop that long after the first heartbeat (issue #139)
@@ -1703,6 +1705,8 @@ void load_settings()
             g_monster_pace = std::atoi(line + 12) != 0;
         else if (std::strncmp(line, "playermodes=", 12) == 0)   // issue #153: 0, 1 or 2
             g_player_modes = std::atoi(line + 12);
+        else if (std::strncmp(line, "spritesahead=", 13) == 0)   // issue #153: 0 for a run to compare
+            g_sprites_ahead = std::atoi(line + 13) != 0;
         else if (std::strncmp(line, "spriteheaders=", 14) == 0)   // issue #153: 0 for a run to compare
             g_sprite_headers = std::atoi(line + 14) != 0;
         else if (std::strncmp(line, "sounddefer=", 11) == 0)   // issue #153: 0 for a run to compare
@@ -2497,6 +2501,8 @@ void hitch_heartbeat(const game::SpriteCacheWindow &w)
         logline_held(l.c_str());
     for (const std::string &l : game::tiles_ahead_lines())
         logline_held(l.c_str());
+    for (const std::string &l : game::sprites_ahead_lines())
+        logline_held(l.c_str());
     for (const std::string &l : game::dcc_frame_lines())
         logline_held(l.c_str());
     for (const std::string &l : game::monster_pace_lines())
@@ -2883,6 +2889,7 @@ int main()
         game::install_monster_pace(c, g_monster_pace);
         game::install_sprite_headers(c, kSpriteHeaders, g_archives_sig, g_sprite_headers);
         game::install_player_modes(c, g_player_modes);
+        game::set_sprites_ahead(g_sprites_ahead);
 #ifdef D2RT_CPU_AOT
         {
             // The AOT build's store: 1.5 MiB of the linear memory to spare,
