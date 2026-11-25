@@ -35,6 +35,7 @@
 #include "game/draw_census.h"
 #include "game/dcc_native.h"
 #include "game/frame_reads.h"
+#include "game/monster_pace.h"
 #include "game/sound_defer.h"
 #include "game/tiles_ahead.h"
 #include "game/frame_trace.h"
@@ -1024,6 +1025,7 @@ std::atomic<bool> g_lock_on{false};
 // would put them a quarter second apart.
 std::atomic<bool> g_lock_in_game{false};
 bool g_lock_test = false;
+bool g_monster_pace = true;  // monsterpace=0 in settings.txt: a monster's modes asked for at once, as the game does (issue #153)
 bool g_sound_defer = true;   // sounddefer=0 in settings.txt: sounds read by the game thread, as the game does (issue #153)
 uint32_t g_stop_test_s = 0;   // stoptest=<s> in settings.txt: a CpuAot stop that long after the first heartbeat (issue #139)
 int32_t g_lock_err_us = 0;    // the render thread's: where the swaps fall from a refresh's middle, averaged
@@ -1662,6 +1664,8 @@ void load_settings()
                                                        : g_ss.port_options() & ~game::kPortCore2Draw);
         else if (std::strncmp(line, "copycheck=", 10) == 0)   // a measurement's (Azahar), issue #80
             g_copy_check = std::atoi(line + 10) != 0;
+        else if (std::strncmp(line, "monsterpace=", 12) == 0)   // issue #153: 0 for a run to compare
+            g_monster_pace = std::atoi(line + 12) != 0;
         else if (std::strncmp(line, "sounddefer=", 11) == 0)   // issue #153: 0 for a run to compare
             g_sound_defer = std::atoi(line + 11) != 0;
         else if (std::strncmp(line, "stoptest=", 9) == 0)   // a stop as a test (issue #139)
@@ -2454,6 +2458,10 @@ void hitch_heartbeat(const game::SpriteCacheWindow &w)
         logline_held(l.c_str());
     for (const std::string &l : game::tiles_ahead_lines())
         logline_held(l.c_str());
+    for (const std::string &l : game::dcc_frame_lines())
+        logline_held(l.c_str());
+    for (const std::string &l : game::monster_pace_lines())
+        logline_held(l.c_str());
     // The JIT pool full (issue #90): chunks refused, so the JIT evicts.
     static uint32_t refused_seen = 0;
     if (dyn86_ctr_jitpool_refused != refused_seen) {
@@ -2826,6 +2834,7 @@ int main()
             game::install_storm_direct_reads(c);
         game::install_frame_reads(c);
         game::install_sound_defer(c, g_sound_defer);
+        game::install_monster_pace(c, g_monster_pace);
 #ifdef D2RT_CPU_AOT
         {
             // The AOT build's store: 1.5 MiB of the linear memory to spare,

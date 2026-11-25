@@ -153,6 +153,13 @@ The app plays sound through WinVita's DirectSound emulation (ds_emul) and the 3D
 - **Switching it off:** `sounddefer=0` in settings.txt for a run to compare (the app writes the file again without it); `D2_SOUND_DEFER=0` on the lane, which has no sound device and loads no sound table.
 - **Azahar** (AOT `7566a6720375-aot957449`, Cold Plains script, 200 s): the frame thread waited 770 ms on sound files against 2,847 and 2,994 ms with it off; frames of 100–250 ms 33 against 41 and 42. One comparable run on, two off; monsters' sprites vary more between runs (2.3–4.2 s) than this saves. Not run on a console.
 
+**A monster's sprites asked for a mode at a time** (issue #153): when a monster arrives, the game asks for the sprites of every mode it has, all in that frame. The loads are in the background, but each request opens the file and reads its header on the game thread: 30 to 60 files for one monster. In Azahar's Cold Plains fight one 10 s window had 127 such reads and 751 ms of wait, against 10 sprite groups the frame thread decoded itself.
+- **What changed:** `src/game/monster_pace.cpp` lets a monster class's modes through one every 100 ms: the mode the monster is in, neutral and walk first, then attack and hit, then the rest. The game's own walk of the units near the player asks again for what was left, every 100 ms where it was 600. One stub and two sites; game.log has `monster pace:` lines.
+- **What to look for:** a monster drawn with a part missing for a moment, or one that blinks at its first attack or death. A mode not yet asked for when it is first drawn is loaded by the draw, as before.
+- **Switching it off:** `monsterpace=0` in settings.txt for a run to compare; `D2_MONSTER_PACE=0` on the lane.
+- **Azahar** (AOT `dcb21dc67c0f-aot55b1de`, Cold Plains script, 200 s, alternating): frames of 100–250 ms 31 and 22 against 37 and 32 with it off, over 250 ms 10 and 10 against 13 and 16; the frame thread waited 2,444 and 2,003 ms on monster files against 4,109 and 2,946. All 85 modes asked for in the first run were let through. Two runs each, and the fights differ between runs. Not run on a console.
+- **Where the frame thread decodes sprites** (the heartbeat's `dcc on the frame thread:` line, by the callers of the sprite fetch): 224 groups in 2.3 s at the game's entry, behind the loading screen (the player's modes and the monsters arriving then, loaded at once), and about 60 groups in 0.4 s over the 200 s of play after it.
+
 ## Frame-rate work (2026-10-17)
 
 | Change | Measure | Result |

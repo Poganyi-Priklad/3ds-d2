@@ -140,6 +140,16 @@ NATIVE(FrameRead, 0)
 GROUP(frame_reads, 1)
 SITE(frame_reads, 0x0041aad0, "55 8b ec 8b 45 14 83 ec 2c 85 c0 74 06 c7 00 00 00 00 00", "e8 {FrameRead} 55 8b ec 83 ec 2c 90 90 90 90 90 90 90 90")
 
+// monster_pace.cpp, install_monster_pace: 0x46feb0's call of 0x46fda0 for
+// a mode (0x46ff31, 9 bytes: mov edx, [ebp+8]; push edx; call) goes through
+// a stub in .text's slack: a native gives the mode to go on with, or -1 for
+// a mode left to a later walk. 0x470350 walks every 100 ms, not 600.
+NATIVE(MonsterMode, 0)
+GROUP(monster_pace, 1)
+SITE(monster_pace, 0x006cb648, "00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00", "e8 {MonsterMode} 83 f8 ff 74 08 ff 75 08 e8 {=0x46fda0} e9 {=0x46ff3a}")
+SITE(monster_pace, 0x0046ff31, "8b 55 08 52 e8 66 fe ff ff", "e9 {=0x6cb648} 90 90 90 90")
+SITE(monster_pace, 0x0047036b, "81 c1 58 02 00 00", "81 c1 64 00 00 00")
+
 // sound_defer.cpp, install_sound_defer: 0x481950 (the sound tables' load)
 // reads the record count at 0x482173, the records filled; a native returns
 // it, and gives each record that isn't a stream sounds.txt's Defer Inst.
