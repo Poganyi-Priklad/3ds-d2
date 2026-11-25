@@ -37,6 +37,7 @@
 #include "game/frame_reads.h"
 #include "game/monster_pace.h"
 #include "game/sound_defer.h"
+#include "game/sprite_headers.h"
 #include "game/tiles_ahead.h"
 #include "game/frame_trace.h"
 #include "game/port_options.h"
@@ -62,6 +63,8 @@
 #include <ctime>
 #include <malloc.h>
 #include <string>
+#include <dirent.h>
+#include <strings.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <utility>
@@ -315,6 +318,7 @@ namespace {
 
 const char kRoot[] = "sdmc:/3ds/3ds-d2";
 const char kGameDir[] = "sdmc:/3ds/3ds-d2/game";
+const char kSpriteHeaders[] = "sdmc:/3ds/3ds-d2/sprite-headers.bin";   // game/sprite_headers.h
 const char kRomfsGameDir[] = "romfs:/game";   // the CIA carries the game files in its RomFS
 const char kSaveDir[] = "sdmc:/3ds/3ds-d2/save";
 const char kLogDir[] = "sdmc:/3ds/3ds-d2/logs";
@@ -1026,6 +1030,22 @@ std::atomic<bool> g_lock_on{false};
 std::atomic<bool> g_lock_in_game{false};
 bool g_lock_test = false;
 bool g_monster_pace = true;  // monsterpace=0 in settings.txt: a monster's modes asked for at once, as the game does (issue #153)
+uint64_t g_archives_sig = 0;    // the archives' sizes, for the kept headers to be this copy's
+void note_archives(const std::string &game_dir)
+{
+    uint64_t sig = 0;
+    if (DIR *d = opendir(game_dir.c_str())) {
+        while (const dirent *e = readdir(d)) {
+            const size_t n = std::strlen(e->d_name);
+            struct stat st;
+            if (n > 4 && strcasecmp(e->d_name + n - 4, ".mpq") == 0 && stat((game_dir + "/" + e->d_name).c_str(), &st) == 0)
+                sig += ((uint64_t)st.st_size + n) * 1099511628211ull;
+        }
+        closedir(d);
+    }
+    g_archives_sig = sig;
+}
+bool g_sprite_headers = true;   // spriteheaders=0 in settings.txt: every DCC header read from its archive (issue #153)
 bool g_sound_defer = true;   // sounddefer=0 in settings.txt: sounds read by the game thread, as the game does (issue #153)
 uint32_t g_stop_test_s = 0;   // stoptest=<s> in settings.txt: a CpuAot stop that long after the first heartbeat (issue #139)
 int32_t g_lock_err_us = 0;    // the render thread's: where the swaps fall from a refresh's middle, averaged
@@ -1671,6 +1691,8 @@ void load_settings()
             game::set_big_room_test(std::atoi(line + 12) != 0);
         else if (std::strncmp(line, "monsterpace=", 12) == 0)   // issue #153: 0 for a run to compare
             g_monster_pace = std::atoi(line + 12) != 0;
+        else if (std::strncmp(line, "spriteheaders=", 14) == 0)   // issue #153: 0 for a run to compare
+            g_sprite_headers = std::atoi(line + 14) != 0;
         else if (std::strncmp(line, "sounddefer=", 11) == 0)   // issue #153: 0 for a run to compare
             g_sound_defer = std::atoi(line + 11) != 0;
         else if (std::strncmp(line, "stoptest=", 9) == 0)   // a stop as a test (issue #139)
@@ -2467,6 +2489,8 @@ void hitch_heartbeat(const game::SpriteCacheWindow &w)
         logline_held(l.c_str());
     for (const std::string &l : game::monster_pace_lines())
         logline_held(l.c_str());
+    for (const std::string &l : game::sprite_headers_lines())
+        logline_held(l.c_str());
     for (const std::string &l : game::sound_defer_lines())
         logline_held(l.c_str());
     // The JIT pool full (issue #90): chunks refused, so the JIT evicts.
@@ -2652,6 +2676,7 @@ int main()
         gfxExit();
         return 0;
     }
+    note_archives(game_dir);
     if (exe.empty() && !read_file(game_dir + "/Game.exe", exe)) {
         status("Game.exe not found in %s.", kGameDir);
         status("Copy Game.exe (1.14d) and the .mpq files there.");
@@ -2842,6 +2867,7 @@ int main()
         game::install_frame_reads(c);
         game::install_sound_defer(c, g_sound_defer);
         game::install_monster_pace(c, g_monster_pace);
+        game::install_sprite_headers(c, kSpriteHeaders, g_archives_sig, g_sprite_headers);
 #ifdef D2RT_CPU_AOT
         {
             // The AOT build's store: 1.5 MiB of the linear memory to spare,

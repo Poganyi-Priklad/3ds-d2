@@ -40,6 +40,7 @@
 #include "game/frame_reads.h"
 #include "game/monster_pace.h"
 #include "game/sound_defer.h"
+#include "game/sprite_headers.h"
 #include "game/autoplay.h"
 #include "game/d2_units.h"
 #include "game/automap.h"
@@ -259,6 +260,9 @@ int main(int argc, char **argv)
         game::set_big_room_test(std::getenv("D2_BIG_ROOM_TEST") != nullptr);
         game::install_sound_defer(c, !std::getenv("D2_SOUND_DEFER") || std::string(std::getenv("D2_SOUND_DEFER")) != "0");
         game::install_monster_pace(c, !std::getenv("D2_MONSTER_PACE") || std::string(std::getenv("D2_MONSTER_PACE")) != "0");
+        // DCC headers kept (D2_SPRITE_HEADERS=0: each read; D2_SPRITE_HEADERS_FILE: kept there between runs).
+        game::install_sprite_headers(c, std::getenv("D2_SPRITE_HEADERS_FILE"), 1,
+                                     !std::getenv("D2_SPRITE_HEADERS") || std::string(std::getenv("D2_SPRITE_HEADERS")) != "0");
         game::install_fatal_exit(c);
         if (ctr_layout) {
             game::install_pool_release(c);
@@ -306,6 +310,8 @@ int main(int argc, char **argv)
         for (const std::string &l : game::dcc_frame_lines())
             rt::logf("%s", l.c_str() + 5);
         for (const std::string &l : game::monster_pace_lines())
+            rt::logf("%s", l.c_str() + 5);
+        for (const std::string &l : game::sprite_headers_lines())
             rt::logf("%s", l.c_str() + 5);
         for (const std::string &l : game::sound_defer_lines())
             rt::logf("%s", l.c_str() + 5);
