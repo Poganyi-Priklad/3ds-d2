@@ -157,6 +157,13 @@ SITE(monster_pace, 0x006cb648, "00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 
 SITE(monster_pace, 0x0046ff31, "8b 55 08 52 e8 66 fe ff ff", "e9 {=0x6cb648} 90 90 90 90")
 SITE(monster_pace, 0x0047036b, "81 c1 58 02 00 00", "81 c1 64 00 00 00")
 
+// sprite_headers.cpp, install_sprite_headers: 0x5fe990 (a sprite's file
+// record) has 0x60bf20 read a DCC file's header at 0x5fea79; a native fills
+// the record from the headers kept, or has 0x60bf20 read it.
+NATIVE(SpriteHeader, 0)
+GROUP(sprite_headers, 1)
+SITE(sprite_headers, 0x005fea79, "e8 a2 d4 00 00", "e8 {SpriteHeader}")
+
 // sound_defer.cpp, install_sound_defer: 0x481950 (the sound tables' load)
 // reads the record count at 0x482173, the records filled; a native returns
 // it, and gives each record that isn't a stream sounds.txt's Defer Inst.

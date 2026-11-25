@@ -10,6 +10,7 @@
 #include <cctype>
 #include <cstdio>
 #include <cstring>
+#include <map>
 #include <unordered_map>
 
 namespace game {
@@ -46,6 +47,15 @@ struct Use {
 std::unordered_map<std::string, Use> g_files;   // the window's, by name
 std::string g_last;                              // the game thread's last read, its wait not yet charged
 uint64_t g_last_kind[4] = {};
+// The same by who read (issue #153): the read's caller and four frames up
+// its EBP chain, for the monsters' and the sounds' files.
+struct Chain {
+    uint32_t ra[5] = {};
+    bool operator<(const Chain &o) const { return std::memcmp(ra, o.ra, sizeof ra) < 0; }
+};
+std::map<Chain, Use> g_chains[2];   // monsters, sound
+Chain g_last_chain;
+int g_last_chain_of = -1;
 
 // The wait since the last read's entry, to that read, by kind.
 void charge()
@@ -55,10 +65,15 @@ void charge()
     const uint64_t now[4] = {t[kCritsec], t[kEvent], t[kFileio], t[kMulti]};
     if (!g_last.empty()) {
         Use &u = g_files[g_last];
+        Use *by = g_last_chain_of >= 0 ? &g_chains[g_last_chain_of][g_last_chain] : nullptr;
         for (int k = 0; k < 4; k++)
             if (now[k] > g_last_kind[k]) {
                 u.kind_us[k] += now[k] - g_last_kind[k];
                 u.wait_us += now[k] - g_last_kind[k];
+                if (by) {
+                    by->kind_us[k] += now[k] - g_last_kind[k];
+                    by->wait_us += now[k] - g_last_kind[k];
+                }
             }
     }
     for (int k = 0; k < 4; k++)
@@ -124,6 +139,21 @@ uint32_t on_read(d2rt::Cpu &c)
     Use &u = g_files[g_last];
     u.reads++;
     u.bytes += bytes;
+    const Class cls = class_of(g_last);
+    g_last_chain_of = cls == kMonsters ? 0 : cls == kSound ? 1 : -1;
+    if (g_last_chain_of >= 0) {
+        Chain ch;
+        ch.ra[0] = c.read_u32(esp + 4);
+        uint32_t ebp = c.reg(d2rt::R_EBP);
+        for (int i = 1; i < 5 && ebp && c.hostptr(ebp, 8); i++) {
+            ch.ra[i] = c.read_u32(ebp + 4);
+            ebp = c.read_u32(ebp);
+        }
+        g_last_chain = ch;
+        Use &by = g_chains[g_last_chain_of][ch];
+        by.reads++;
+        by.bytes += bytes;
+    }
     return 0;
 }
 
@@ -162,7 +192,7 @@ std::vector<std::string> frame_reads_lines()
     }
     if (!all.reads && all.wait_us < 1000)
         return out;
-    char line[512];
+    char line[640];
     int n = std::snprintf(line, sizeof line, "[rt] frame reads: %u reads of %u files, %u KiB, waited %u ms;",
                           all.reads, (unsigned)files.size(), (unsigned)(all.bytes >> 10), (unsigned)(all.wait_us / 1000));
     for (int k = 0; k < kClasses && n < (int)sizeof line - 48; k++)
@@ -188,6 +218,25 @@ std::vector<std::string> frame_reads_lines()
              i++)
             n += std::snprintf(line + n, sizeof line - n, "%s %s %ux %u ms", i ? ";" : "", files[i].first.c_str(),
                                files[i].second.reads, (unsigned)(files[i].second.wait_us / 1000));
+        out.emplace_back(line);
+    }
+    for (int w = 0; w < 2; w++) {
+        std::vector<std::pair<Chain, Use>> v(g_chains[w].begin(), g_chains[w].end());
+        g_chains[w].clear();
+        if (v.empty())
+            continue;
+        std::sort(v.begin(), v.end(), [](const auto &a, const auto &b) {
+            return a.second.wait_us != b.second.wait_us ? a.second.wait_us > b.second.wait_us : a.second.reads > b.second.reads;
+        });
+        n = std::snprintf(line, sizeof line, "[rt] frame reads, %s by caller:", w ? "sound" : "monsters");
+        for (size_t i = 0; i < v.size() && i < 4 && n < (int)sizeof line - 120; i++) {
+            const Use &u = v[i].second;
+            n += std::snprintf(line + n, sizeof line - n, "%s %ux %u KiB %u ms (lock %u, read thread %u, file %u) from", i ? ";" : "",
+                               u.reads, (unsigned)(u.bytes >> 10), (unsigned)(u.wait_us / 1000), (unsigned)(u.kind_us[0] / 1000),
+                               (unsigned)(u.kind_us[1] / 1000), (unsigned)(u.kind_us[2] / 1000));
+            for (int k = 0; k < 5; k++)
+                n += std::snprintf(line + n, sizeof line - n, " %x", v[i].first.ra[k]);
+        }
         out.emplace_back(line);
     }
     g_files.clear();
