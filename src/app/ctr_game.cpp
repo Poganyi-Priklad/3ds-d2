@@ -1056,6 +1056,16 @@ int g_player_modes = 2;
 #else
 int g_player_modes = 0;
 #endif
+// The sprites' store (rt::set_sprite_keep, issue #153), KiB of the heap:
+// the compressed sprite data the draw has fetched, kept for when the game's
+// cache has let the frames go and fetches them again. The AOT build's; the
+// console's heap had 2.5 MiB of room at its lowest in 59 minutes (3DS-D2-1J,
+// event 7f538e2f). "spritekeep=<KiB>", 0 off.
+#ifdef D2RT_CPU_AOT
+uint32_t g_sprite_keep_kib = 768;
+#else
+uint32_t g_sprite_keep_kib = 0;
+#endif
 bool g_sprites_ahead = true;   // spritesahead=0 in settings.txt: a sprite's directions each read at their first draw (issue #153)
 bool g_sprite_headers = true;   // spriteheaders=0 in settings.txt: every DCC header read from its archive (issue #153)
 bool g_sound_defer = true;   // sounddefer=0 in settings.txt: sounds read by the game thread, as the game does (issue #153)
@@ -1721,6 +1731,8 @@ void load_settings()
             g_monster_pace = std::atoi(line + 12) != 0;
         else if (std::strncmp(line, "playermodes=", 12) == 0)   // issue #153: 0, 1 or 2
             g_player_modes = std::atoi(line + 12);
+        else if (std::strncmp(line, "spritekeep=", 11) == 0)
+            g_sprite_keep_kib = std::min<uint32_t>((uint32_t)std::strtoul(line + 11, nullptr, 10), 4096);
         else if (std::strncmp(line, "spritesahead=", 13) == 0)   // issue #153: 0 for a run to compare
             g_sprites_ahead = std::atoi(line + 13) != 0;
         else if (std::strncmp(line, "spriteheaders=", 14) == 0)   // issue #153: 0 for a run to compare
@@ -2906,6 +2918,12 @@ int main()
         game::install_sprite_headers(c, kSpriteHeaders, g_archives_sig, g_sprite_headers);
         game::install_player_modes(c, g_player_modes);
         game::set_sprites_ahead(g_sprites_ahead);
+        if (g_sprite_keep_kib) {
+            void *keep = memalign(64, g_sprite_keep_kib << 10);
+            rt::set_sprite_keep(keep, g_sprite_keep_kib << 10);
+            status("sprite store: %s", keep ? (std::to_string(g_sprite_keep_kib) + " KiB of the heap").c_str() : "no memory for it, off");
+        } else
+            status("sprite store: off");
 #ifdef D2RT_CPU_AOT
         {
             // The AOT build's store: 1.5 MiB of the linear memory to spare,
