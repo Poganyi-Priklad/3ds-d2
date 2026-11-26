@@ -4,7 +4,15 @@ Diablo II: Lord of Destruction 1.14d on the New 3DS.
 
 ![Diablo II on a New 3DS XL: the Rogue Encampment on the top screen, the town automap on the bottom screen](docs/evidence/3ds-d2-banner.jpeg)
 
-3ds-d2 runs the unmodified Windows `Game.exe` of Diablo II 1.14d on a New 3DS. The x86 code runs through an ARMv6 port of the Box86 dynamic recompiler (from the WinVita engine). The Windows APIs the game calls come from 3ds-d2's own runtime. The hottest drawing routines run as native ARM code. The game itself is not included: you need your own copy of Diablo II and Lord of Destruction, patched to 1.14d.
+3ds-d2 runs the unmodified Windows `Game.exe` of Diablo II 1.14d on a New 3DS. The x86 code runs through an ARMv6 port of the Box86 dynamic recompiler (from the WinVita engine) or as an AOT package. The Windows APIs the game calls come from 3ds-d2's own runtime. The hottest drawing routines run as native ARM code. The game itself is not included: you need your own copy of Diablo II and Lord of Destruction, patched to 1.14d.
+
+## Status & the Journey
+
+This port evolves as I play the game. It is quite something that a full computer game from 2001 runs as well as it does on the n3DS's tiny screen. I started a journey with a fresh Paladin so the port is not only about "it compiles, thus it works", but there's a remarkable amount of personal playhours invested as I've moved through the game and encountered issues that I try to solve before continuing. Is it perfect? Definitely not! But I try to enjoy the journey. Version 1.0.0 is my goal for when I've finished the campaign, but the journey is a long one:
+
+- `v0.3.2`: a rough road, used up to the end of Act I
+- `v0.4.0`: brought us to the middle of Act II
+- `v0.5.0`: marks the fall of Duriel and the end of Act II
 
 ## Requirements
 
@@ -69,7 +77,7 @@ If you set up your console with the 3ds.hacks.guide, you may have done this alre
 
 ### 3. Install the app
 
-Build the CIA as described under [Building the CIA](#building-the-cia), then install `3ds-d2-x86-<version>-<build-id>.cia` with FBI. Either copy it to the SD card and pick it in FBI under *SD*, or use FBI's *Remote Install*. The HOME menu then shows a **3ds-d2 x86** icon (title ID `000400000D2D3E00`), its banner marked `v1.14D-X86`. The `3ds-d2-aot-...` CIA is a title of its own, **3ds-d2** (`000400000D2D3D00`, the ID of every release up to v0.4.0, so it installs over one), marked `v1.14D-AOT`. Both can be installed at once; they use the same game files, saves and settings in `/3ds/3ds-d2`.
+Build the CIA as described under [Building the CIA](#building-the-cia), then install `3ds-d2-x86-<version>-<build-id>.cia` with FBI. Either copy it to the SD card and pick it in FBI under *SD*, or use FBI's *Remote Install*. The HOME menu then shows a **3ds-d2 x86** icon (title ID `000400000D2D3E00`), its banner marked `v1.14D-X86`. The `3ds-d2-aot-...` CIA is a title of its own, **3ds-d2** (`000400000D2D3D00`, the ID of every release up to v0.5.0, so it installs over one), marked `v1.14D-AOT`. Both can be installed at once; they use the same game files, saves and settings in `/3ds/3ds-d2`.
 
 The CIA holds only the app, about 2 MB. A new version is a quick reinstall over the old one, and the game files on the SD card stay where they are.
 
@@ -130,7 +138,7 @@ The rest of the Camera album is never offered. A pair is sent as `screenshot-<n>
 
 In Sentry, reports are grouped by what happened, not by your description, so the same crash lands in one issue however it's described. The groups: a crash the app caught (the fault, and where in Game.exe); a Luma3DS dump (the crashed process and exception, and outside 3ds-d2 its address); a fatal error by its kind; a session that didn't end; a report you asked for, by its title. Your description goes with each report as its `note`.
 
-A report you ask for (or a profiler run's) is titled by the version, which you can't change, and an optional topic you add with **R**: `v0.4.0` alone, or `v0.4.0 #24`. Reports with the same title are one Sentry issue; the topic ignores case and extra spaces. The topic is remembered (`/3ds/3ds-d2/report-topic.txt`) for every later report until you change it, and goes with crash reports too, as the `topic` tag, without changing how they group. Builds not made from a release's tag carry `-dev` in their version (`v0.4.0-dev`), in the CIA's name and in Sentry, so testing never mixes with a release's reports.
+A report you ask for (or a profiler run's) is titled by the version, which you can't change, and an optional topic you add with **R**: `v0.5.0` alone, or `v0.5.0 #24`. Reports with the same title are one Sentry issue; the topic ignores case and extra spaces. The topic is remembered (`/3ds/3ds-d2/report-topic.txt`) for every later report until you change it, and goes with crash reports too, as the `topic` tag, without changing how they group. Builds not made from a release's tag carry `-dev` in their version (`v0.5.0-dev`), in the CIA's name and in Sentry, so testing never mixes with a release's reports.
 
 On a report's screen:
 

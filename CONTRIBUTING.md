@@ -83,7 +83,7 @@ A helpful bug report has:
 
 - **What happened**, and what you expected instead.
 - **How to make it happen**, if you know: where you were, what you pressed.
-- **Your build:** the CIA's name, for example `3ds-d2-0.4.0-dev-c8ddbb858e2e.cia`. The last part is the build ID. Or pre-build Release version.
+- **Your build:** the CIA's name, for example `3ds-d2-x86-0.5.0-dev-1296bb7a8002.cia`. The last part is the build ID. Or pre-build Release version.
 - **Your console:** for example New 3DS XL, or New 2DS XL. If you're playing in an emulator, say which one (Azahar, for example).
 - **Sentry's event ID**, if you sent a report about it.
 - **Screenshots**, if you have them.
