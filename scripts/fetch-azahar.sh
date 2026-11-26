@@ -14,7 +14,7 @@
 # names it; a download it does not name is recorded there (first fetch).
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VERSION=2126.2
+VERSION=2127.0.1
 BASE="https://github.com/azahar-emu/azahar/releases/download/$VERSION"
 DEST="$ROOT/build/azahar/$VERSION"
 SUMS="$ROOT/packaging/azahar.sha256"

@@ -44,9 +44,9 @@ mkdir -p "$out"
 
 # The portable copy's SD card (scripts/fetch-azahar.sh), unless AZAHAR_SDMC.
 case "$(uname -s)" in
-Darwin) user=build/azahar/2126.2/azahar-macos-universal-2126.2/user ;;   # next to Azahar.app
-Linux)  user=build/azahar/2126.2/user ;;                                 # next to the AppImage
-*)      user=build/azahar/2126.2/azahar-windows-msvc-2126.2/user ;;
+Darwin) user=build/azahar/2127.0.1/azahar-macos-universal-2127.0.1/user ;;   # next to Azahar.app
+Linux)  user=build/azahar/2127.0.1/user ;;                                 # next to the AppImage
+*)      user=build/azahar/2127.0.1/azahar-windows-msvc-2127.0.1/user ;;
 esac
 sdmc="${AZAHAR_SDMC:-$user/sdmc}/3ds/3ds-d2"
 mkdir -p "$sdmc"
